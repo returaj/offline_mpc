@@ -1,1 +1,1 @@
-# gan_mpc_2
+### GAN-MPC: Considering only safety aspect.
