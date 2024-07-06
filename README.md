@@ -1,1 +1,1 @@
-### GAN-MPC: Considering only safety aspect.
+### Offline MPC: Considering only safety aspect.
