@@ -17,6 +17,7 @@ import argparse
 from distutils.util import strtobool
 import numpy as np
 from typing import Callable
+import gymnasium
 from gymnasium.wrappers.normalize import NormalizeObservation
 import safety_gymnasium
 from safety_gymnasium.wrappers import (
@@ -25,6 +26,20 @@ from safety_gymnasium.wrappers import (
     SafeUnsqueeze,
 )
 from safety_gymnasium.vector.async_vector_env import SafetyAsyncVectorEnv
+
+
+class SafeMonitor(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
+    def __init__(self, env: gymnasium.Env) -> None:
+        gymnasium.utils.RecordConstructorArgs.__init__(self)
+        gymnasium.Wrapper.__init__(self, env)
+
+    def step(self, action):
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        assert (
+            "unnormalized_obs" not in info
+        ), 'info dict cannot contain key "unormalized_obs"'
+        info["unnormalized_obs"] = obs
+        return obs, reward, cost, terminated, truncated, info
 
 
 class SafeNormalizeObservation(NormalizeObservation):
@@ -38,10 +53,24 @@ class SafeNormalizeObservation(NormalizeObservation):
             if self.is_vector_env
             else self.normalize(np.array([obs]))[0]
         )
+        for k in infos.keys():
+            if k in ("final_observation", "unnormalized_obs"):
+                infos[k] = np.array(
+                    [
+                        (
+                            self.normalize(array)
+                            if array is not None
+                            else np.zeros(obs.shape[-1])
+                        )
+                        for array in infos[k]
+                    ],
+                )
         return obs, rews, costs, terminateds, truncateds, infos
 
 
-def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int | None = None):
+def make_sa_mujoco_env(
+    num_envs: int, env_id: str, seed: int | None = None, monitor: bool = False
+):
     """
     Creates and wraps an environment based on the specified parameters.
 
@@ -49,6 +78,7 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int | None = None):
         num_envs (int): Number of parallel environments.
         env_id (str): ID of the environment to create.
         seed (int or None, optional): Seed for the random number generator. Default is None.
+        monitor: monitor unnormalized observation
 
     Returns:
         env: The created and wrapped environment.
@@ -85,6 +115,8 @@ def make_sa_mujoco_env(num_envs: int, env_id: str, seed: int | None = None):
         act_space = env.action_space
         env = SafeAutoResetWrapper(env)
         env = SafeRescaleAction(env, -1.0, 1.0)
+        if monitor:
+            env = SafeMonitor(env)
         env = SafeNormalizeObservation(env)
         env = SafeUnsqueeze(env)
 
