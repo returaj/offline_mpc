@@ -14,9 +14,9 @@ default_cfg = {
 }
 
 
-def load_model(obs_dim, act_dim, hidden_sizes, path):
+def load_model(obs_dim, act_dim, hidden_sizes, path, device):
     actor = Actor(obs_dim=obs_dim, act_dim=act_dim, hidden_sizes=hidden_sizes)
-    actor.load_state_dict(torch.load(path))
+    actor.load_state_dict(torch.load(path, map_location=device))
     actor.eval()
     return actor
 
@@ -93,13 +93,14 @@ def main(args):
         num_envs=1, env_id=args.task, seed=None, monitor=True
     )
     config = default_cfg
+    device = torch.device(f"{args.device}:{args.device_id}")
     actor = load_model(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
         path=args.log_dir,
+        device=device,
     )
-    device = torch.device(f"{args.device}:{args.device_id}")
     print("Start collecting trajectories")
     trajectories = collect_trajectories(
         env=env, actor=actor, config=config, device=device
