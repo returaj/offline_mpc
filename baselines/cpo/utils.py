@@ -33,13 +33,22 @@ class SafeMonitor(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
         gymnasium.utils.RecordConstructorArgs.__init__(self)
         gymnasium.Wrapper.__init__(self, env)
 
-    def step(self, action):
-        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+    def update_info(self, obs, info):
         assert (
             "unnormalized_obs" not in info
         ), 'info dict cannot contain key "unormalized_obs"'
         info["unnormalized_obs"] = obs
+        return info
+
+    def step(self, action):
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        info = self.update_info(obs, info)
         return obs, reward, cost, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        info = self.update_info(obs, info)
+        return obs, info
 
 
 class SafeNormalizeObservation(NormalizeObservation):
