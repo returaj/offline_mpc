@@ -16,7 +16,8 @@ default_cfg = {
 
 def load_model(obs_dim, act_dim, hidden_sizes, path, device):
     actor = Actor(obs_dim=obs_dim, act_dim=act_dim, hidden_sizes=hidden_sizes)
-    actor.load_state_dict(torch.load(path, map_location=device))
+    actor.load_state_dict(torch.load(path))
+    actor = actor.to(device)
     actor.eval()
     return actor
 

@@ -64,16 +64,24 @@ class SafeNormalizeObservation(NormalizeObservation):
         )
         for k in infos.keys():
             if k in ("final_observation", "unnormalized_obs"):
-                infos[k] = np.array(
-                    [
-                        (
-                            self.normalize(array)
-                            if array is not None
-                            else np.zeros(obs.shape[-1])
-                        )
-                        for array in infos[k]
-                    ],
-                )
+                if self.is_vector_env:
+                    infos[k] = np.array(
+                        [
+                            (
+                                self.normalize(np.array([array]))[0]
+                                if array is not None
+                                else np.zeros(obs.shape[-1])
+                            )
+                            for array in infos[k]
+                        ],
+                    )
+                else:
+                    array = infos[k]
+                    infos[k] = (
+                        self.normalize(np.array([array]))[0]
+                        if array is not None
+                        else np.zeros(obs.shape[-1])
+                    )
         return obs, rews, costs, terminateds, truncateds, infos
 
 
