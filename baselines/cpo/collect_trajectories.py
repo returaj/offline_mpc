@@ -51,8 +51,7 @@ class Trajectories:
         return merged, ep_return, ep_cost
 
     def get_trajectories(self):
-        ret = {k: np.concatenate(v, axis=0) for k, v in self.trajectories.items()}
-        return ret
+        return self.trajectories
 
 
 def collect_trajectories(env, actor, config, device):
