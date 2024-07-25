@@ -38,10 +38,10 @@ from models import ActorVCritic
 
 
 default_cfg = {
-    'hidden_sizes': [64, 64],
+    'hidden_sizes': [512, 512],
     'gamma': 0.99,
     'target_kl': 0.02,
-    'batch_size': 64,
+    'batch_size': 128,
     'learning_iters': 40,
     'max_grad_norm': 40.0,
 }

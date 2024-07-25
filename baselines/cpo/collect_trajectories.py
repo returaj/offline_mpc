@@ -7,7 +7,7 @@ from models import Actor
 
 
 default_cfg = {
-    "hidden_sizes": [64, 64],
+    "hidden_sizes": [512, 512],
     "num_trajectories": 100,
     "min_return": 13,
     "max_cost": 25,
