@@ -366,6 +366,13 @@ def main(args, cfg_env=None):
                     },
                     itr=epoch,
                 )
+    logger.torch_save(itr=epoch)
+    logger.save_state(
+        state_dict={
+            "Normalizer": env.obs_rms,
+        },
+        itr=epoch,
+    )
     logger.close()
 
 

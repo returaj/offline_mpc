@@ -38,12 +38,12 @@ from models import ActorVCritic
 
 
 default_cfg = {
-    'hidden_sizes': [512, 512],
-    'gamma': 0.99,
-    'target_kl': 0.02,
-    'batch_size': 128,
-    'learning_iters': 40,
-    'max_grad_norm': 40.0,
+    "hidden_sizes": [512, 512],
+    "gamma": 0.99,
+    "target_kl": 0.02,
+    "batch_size": 128,
+    "learning_iters": 40,
+    "max_grad_norm": 40.0,
 }
 
 
@@ -54,7 +54,7 @@ def main(args, cfg_env=None):
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
-    device = torch.device(f'{args.device}:{args.device_id}')
+    device = torch.device(f"{args.device}:{args.device_id}")
 
     env, obs_space, act_space = make_sa_mujoco_env(
         num_envs=args.num_envs, env_id=args.task, seed=args.seed
@@ -84,9 +84,7 @@ def main(args, cfg_env=None):
     reward_critic_optimizer = torch.optim.Adam(
         policy.reward_critic.parameters(), lr=3e-4
     )
-    cost_critic_optimizer = torch.optim.Adam(
-        policy.cost_critic.parameters(), lr=3e-4
-    )
+    cost_critic_optimizer = torch.optim.Adam(policy.cost_critic.parameters(), lr=3e-4)
 
     # create the vectorized on-policy buffer
     buffer = VectorizedOnPolicyBuffer(
@@ -211,11 +209,15 @@ def main(args, cfg_env=None):
                 eval_rew, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
-                        act, log_prob, value_r, value_c = policy.step(eval_obs, deterministic=True)
+                        act, log_prob, value_r, value_c = policy.step(
+                            eval_obs, deterministic=True
+                        )
                     next_obs, reward, cost, terminated, truncated, info = env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
-                    next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+                    next_obs = torch.as_tensor(
+                        next_obs, dtype=torch.float32, device=device
+                    )
                     eval_rew += reward
                     eval_cost += cost
                     eval_len += 1
@@ -253,7 +255,9 @@ def main(args, cfg_env=None):
                 data["target_value_c"],
                 advantage,
             ),
-            batch_size=config.get("batch_size", args.steps_per_epoch//config.get("num_mini_batch", 1)),
+            batch_size=config.get(
+                "batch_size", args.steps_per_epoch // config.get("num_mini_batch", 1)
+            ),
             shuffle=True,
         )
         update_counts = 0
@@ -268,9 +272,13 @@ def main(args, cfg_env=None):
                 adv_b,
             ) in dataloader:
                 reward_critic_optimizer.zero_grad()
-                loss_r = nn.functional.mse_loss(policy.reward_critic(obs_b), target_value_r_b)
+                loss_r = nn.functional.mse_loss(
+                    policy.reward_critic(obs_b), target_value_r_b
+                )
                 cost_critic_optimizer.zero_grad()
-                loss_c = nn.functional.mse_loss(policy.cost_critic(obs_b), target_value_c_b)
+                loss_c = nn.functional.mse_loss(
+                    policy.cost_critic(obs_b), target_value_c_b
+                )
                 if config.get("use_critic_norm", True):
                     for param in policy.reward_critic.parameters():
                         loss_r += param.pow(2).sum() * 0.001
@@ -282,9 +290,11 @@ def main(args, cfg_env=None):
                 ratio_cliped = torch.clamp(ratio, 0.8, 1.2)
                 loss_pi = -torch.min(ratio * adv_b, ratio_cliped * adv_b).mean()
                 actor_optimizer.zero_grad()
-                total_loss = loss_pi + 2*loss_r + loss_c \
-                    if config.get("use_value_coefficient", False) \
+                total_loss = (
+                    loss_pi + 2 * loss_r + loss_c
+                    if config.get("use_value_coefficient", False)
                     else loss_pi + loss_r + loss_c
+                )
                 total_loss.backward()
                 clip_grad_norm_(policy.parameters(), config["max_grad_norm"])
                 reward_critic_optimizer.step()
@@ -338,14 +348,21 @@ def main(args, cfg_env=None):
             logger.log_tabular("Value/CostAdv", data["adv_c"].mean().item())
 
             logger.dump_tabular()
-            if (epoch+1) % 100 == 0 or epoch == 0:
+            if (epoch + 1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
                 logger.save_state(
                     state_dict={
                         "Normalizer": env.obs_rms,
                     },
-                    itr = epoch
+                    itr=epoch,
                 )
+    logger.torch_save(itr=epoch)
+    logger.save_state(
+        state_dict={
+            "Normalizer": env.obs_rms,
+        },
+        itr=epoch,
+    )
     logger.close()
 
 
