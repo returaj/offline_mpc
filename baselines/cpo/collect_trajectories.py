@@ -9,8 +9,8 @@ from models import Actor
 default_cfg = {
     "hidden_sizes": [64, 64],
     "num_trajectories": 100,
-    "min_return": 100,
-    "max_cost": 10000,
+    "min_return": 13,
+    "max_cost": 25,
 }
 
 
@@ -72,7 +72,7 @@ def collect_trajectories(env, actor, config, device):
             reward=reward,
             cost=cost,
             done=done,
-            next_obs=next_info["final_observation"] if done else next_unnorm_obs,
+            next_obs=next_info["unnormalized_final_obs"] if done else next_unnorm_obs,
         )
         obs, unnorm_obs = next_obs, next_unnorm_obs
         if done:

@@ -38,10 +38,10 @@ from models import ActorVCritic
 
 
 default_cfg = {
-    "hidden_sizes": [64, 64],
+    "hidden_sizes": [512, 512],
     "gamma": 0.99,
     "target_kl": 0.02,
-    "batch_size": 64,
+    "batch_size": 128,
     "learning_iters": 40,
     "max_grad_norm": 40.0,
 }
@@ -360,6 +360,12 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch + 1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
+                logger.save_state(
+                    state_dict={
+                        "Normalizer": env.obs_rms,
+                    },
+                    itr=epoch,
+                )
     logger.close()
 
 

@@ -38,6 +38,11 @@ class SafeMonitor(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
             "unnormalized_obs" not in info
         ), 'info dict cannot contain key "unormalized_obs"'
         info["unnormalized_obs"] = obs
+        if "final_observation" in info:
+            assert (
+                "unnormalized_final_obs" not in info
+            ), 'info dict cannot contain key "unnormalized_final_obs"'
+            info["unnormalized_final_obs"] = info["final_observation"]
         return info
 
     def step(self, action):
@@ -62,26 +67,26 @@ class SafeNormalizeObservation(NormalizeObservation):
             if self.is_vector_env
             else self.normalize(np.array([obs]))[0]
         )
-        for k in infos.keys():
-            if k in ("final_observation", "unnormalized_obs"):
-                if self.is_vector_env:
-                    infos[k] = np.array(
-                        [
-                            (
-                                self.normalize(np.array([array]))[0]
-                                if array is not None
-                                else np.zeros(obs.shape[-1])
-                            )
-                            for array in infos[k]
-                        ],
-                    )
-                else:
-                    array = infos[k]
-                    infos[k] = (
-                        self.normalize(np.array([array]))[0]
-                        if array is not None
-                        else np.zeros(obs.shape[-1])
-                    )
+        if "final_observation" in infos:
+            key = "final_observation"
+            if self.is_vector_env:
+                infos[key] = np.array(
+                    [
+                        (
+                            self.normalize(np.array([array]))[0]
+                            if array is not None
+                            else np.zeros(obs.shape[-1])
+                        )
+                        for array in infos[key]
+                    ],
+                )
+            else:
+                array = infos[key]
+                infos[key] = (
+                    self.normalize(np.array([array]))[0]
+                    if array is not None
+                    else np.zeros(obs.shape[-1])
+                )
         return obs, rews, costs, terminateds, truncateds, infos
 
 
