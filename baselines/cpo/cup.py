@@ -223,7 +223,7 @@ def main(args, cfg_env=None):
                         act, log_prob, value_r, value_c = policy.step(
                             eval_obs, deterministic=True
                         )
-                    next_obs, reward, cost, terminated, truncated, info = env.step(
+                    next_obs, reward, cost, terminated, truncated, info = eval_env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
                     next_obs = torch.as_tensor(
