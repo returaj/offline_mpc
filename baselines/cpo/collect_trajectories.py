@@ -82,7 +82,7 @@ def collect_trajectories(env, actor, config, device):
             if merged:
                 curr_traj += 1
                 print(
-                    "episode return: %.3f, episode cost: %.3f".format(
+                    "episode return: {:.3f}, episode cost: {:.3f}".format(
                         ep_return, ep_cost
                     )
                 )
@@ -106,7 +106,7 @@ def main(args):
     trajectories = collect_trajectories(
         env=env, actor=actor, config=config, device=device
     )
-    filepath = osp.join(args.log_dir, "..", "trajectories.h5")
+    filepath = osp.join(osp.dirname(args.log_dir), "..", "trajectories.h5")
     hf = h5py.File(filepath, "w")
     for k, v in trajectories.items():
         hf.create_dataset(k, data=v)
