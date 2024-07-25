@@ -19,6 +19,90 @@ from __future__ import annotations
 from collections import deque
 
 
+class Lagrange:
+    """Lagrange multiplier for constrained optimization.
+
+    Args:
+        cost_limit: the cost limit
+        lagrangian_multiplier_init: the initial value of the lagrangian multiplier
+        lagrangian_multiplier_lr: the learning rate of the lagrangian multiplier
+        lagrangian_upper_bound: the upper bound of the lagrangian multiplier
+
+    Attributes:
+        cost_limit: the cost limit
+        lagrangian_multiplier_lr: the learning rate of the lagrangian multiplier
+        lagrangian_upper_bound: the upper bound of the lagrangian multiplier
+        _lagrangian_multiplier: the lagrangian multiplier
+        lambda_range_projection: the projection function of the lagrangian multiplier
+        lambda_optimizer: the optimizer of the lagrangian multiplier
+    """
+
+    # pylint: disable-next=too-many-arguments
+    def __init__(
+        self,
+        cost_limit: float,
+        lagrangian_multiplier_init: float,
+        lagrangian_multiplier_lr: float,
+        lagrangian_upper_bound: float | None = None,
+    ) -> None:
+        """Initialize an instance of :class:`Lagrange`."""
+        self.cost_limit: float = cost_limit
+        self.lagrangian_multiplier_lr: float = lagrangian_multiplier_lr
+        self.lagrangian_upper_bound: float | None = lagrangian_upper_bound
+
+        init_value = max(lagrangian_multiplier_init, 0.0)
+        self._lagrangian_multiplier: torch.nn.Parameter = torch.nn.Parameter(
+            torch.as_tensor(init_value),
+            requires_grad=True,
+        )
+        self.lambda_range_projection: torch.nn.ReLU = torch.nn.ReLU()
+        # fetch optimizer from PyTorch optimizer package
+        self.lambda_optimizer: torch.optim.Optimizer = torch.optim.Adam(
+            [
+                self._lagrangian_multiplier,
+            ],
+            lr=lagrangian_multiplier_lr,
+        )
+
+    @property
+    def lagrangian_multiplier(self) -> torch.Tensor:
+        """The lagrangian multiplier.
+
+        Returns:
+            the lagrangian multiplier
+        """
+        return self.lambda_range_projection(self._lagrangian_multiplier).detach().item()
+
+    def compute_lambda_loss(self, mean_ep_cost: float) -> torch.Tensor:
+        """Compute the loss of the lagrangian multiplier.
+
+        Args:
+            mean_ep_cost: the mean episode cost
+
+        Returns:
+            the loss of the lagrangian multiplier
+        """
+        return -self._lagrangian_multiplier * (mean_ep_cost - self.cost_limit)
+
+    def update_lagrange_multiplier(self, Jc: float) -> None:
+        """Update the lagrangian multiplier.
+
+        Args:
+            Jc: the mean episode cost
+
+        Returns:
+            the loss of the lagrangian multiplier
+        """
+        self.lambda_optimizer.zero_grad()
+        lambda_loss = self.compute_lambda_loss(Jc)
+        lambda_loss.backward()
+        self.lambda_optimizer.step()
+        self._lagrangian_multiplier.data.clamp_(
+            0.0,
+            self.lagrangian_upper_bound,
+        )  # enforce: lambda in [0, inf]
+
+
 class PIDLagrangian:
     """PID Lagrangian multiplier for constrained optimization.
 

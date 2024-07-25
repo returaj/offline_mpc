@@ -33,7 +33,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from buffer import VectorizedOnPolicyBuffer
 from utils import make_sa_mujoco_env, single_agent_args
-from lagrangian import PIDLagrangian as Lagrange
+from lagrangian import Lagrange
 from logger import EpochLogger
 from models import ActorVCritic
 
