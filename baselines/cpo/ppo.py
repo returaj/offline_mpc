@@ -228,9 +228,9 @@ def main(args, cfg_env=None):
                 eval_len_deque.append(eval_len)
             logger.store(
                 **{
-                    "Metrics/EvalEpRet": np.mean(eval_rew),
-                    "Metrics/EvalEpCost": np.mean(eval_cost),
-                    "Metrics/EvalEpLen": np.mean(eval_len),
+                    "Metrics/EvalEpRet": np.mean(eval_rew_deque),
+                    "Metrics/EvalEpCost": np.mean(eval_cost_deque),
+                    "Metrics/EvalEpLen": np.mean(eval_len_deque),
                 }
             )
 

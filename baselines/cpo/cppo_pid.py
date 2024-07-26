@@ -111,9 +111,9 @@ def main(args, cfg_env=None):
     rew_deque = deque(maxlen=50)
     cost_deque = deque(maxlen=50)
     len_deque = deque(maxlen=50)
-    eval_rew_deque = deque(maxlen=50)
-    eval_cost_deque = deque(maxlen=50)
-    eval_len_deque = deque(maxlen=50)
+    eval_rew_deque = deque(maxlen=5)
+    eval_cost_deque = deque(maxlen=5)
+    eval_len_deque = deque(maxlen=5)
     logger.save_config(dict_args)
     logger.setup_torch_saver(policy.actor)
     logger.log("Start with training.")
@@ -205,7 +205,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
 
-        eval_episodes = 1 if epoch < epochs - 1 else 10
+        eval_episodes = 5 if epoch < epochs - 1 else 10
         if args.use_eval:
             for _ in range(eval_episodes):
                 eval_done = False
@@ -233,9 +233,9 @@ def main(args, cfg_env=None):
                 eval_len_deque.append(eval_len)
             logger.store(
                 **{
-                    "Metrics/EvalEpRet": np.mean(eval_rew),
-                    "Metrics/EvalEpCost": np.mean(eval_cost),
-                    "Metrics/EvalEpLen": np.mean(eval_len),
+                    "Metrics/EvalEpRet": np.mean(eval_rew_deque),
+                    "Metrics/EvalEpCost": np.mean(eval_cost_deque),
+                    "Metrics/EvalEpLen": np.mean(eval_len_deque),
                 }
             )
 
