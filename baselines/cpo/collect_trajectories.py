@@ -9,8 +9,8 @@ from models import Actor
 default_cfg = {
     "hidden_sizes": [512, 512],
     "num_trajectories": 100,
-    "min_return": 13,
-    "max_cost": 25,
+    "min_return": 20,
+    "max_cost": 14,
 }
 
 
@@ -58,8 +58,8 @@ def collect_trajectories(env, actor, config, device):
     trajectories = Trajectories()
     obs, info = env.reset()
     unnorm_obs = info["unnormalized_obs"]
-    curr_traj = 0
-    while curr_traj < config["num_trajectories"]:
+    accpeted_traj, cnt_traj = 0, 0
+    while accpeted_traj < config["num_trajectories"]:
         dist = actor(torch.tensor(obs, dtype=torch.float32, device=device))
         act = dist.mean.detach().squeeze().cpu().numpy()
         next_obs, reward, cost, terminated, truncated, next_info = env.step(act)
@@ -78,11 +78,12 @@ def collect_trajectories(env, actor, config, device):
             merged, ep_return, ep_cost = trajectories.merge(
                 min_return=config["min_return"], max_cost=config["max_cost"]
             )
+            cnt_traj += 1
             if merged:
-                curr_traj += 1
+                accpeted_traj += 1
                 print(
-                    "episode return: {:.3f}, episode cost: {:.3f}".format(
-                        ep_return, ep_cost
+                    "total_trajectories: {:d}, accpeted_trajectories: {:d}, episode return: {:.3f}, episode cost: {:.3f}".format(
+                        cnt_traj, accpeted_traj, ep_return, ep_cost
                     )
                 )
     return trajectories.get_trajectories()
