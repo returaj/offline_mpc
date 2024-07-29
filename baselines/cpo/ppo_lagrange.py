@@ -30,11 +30,11 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader, TensorDataset
 
-from buffer import VectorizedOnPolicyBuffer
-from utils import make_sa_mujoco_env, single_agent_args
-from lagrangian import Lagrange
-from logger import EpochLogger
-from models import ActorVCritic
+from baselines.utils.buffer import VectorizedOnPolicyBuffer
+from baselines.cpo.utils import make_sa_mujoco_env, single_agent_args
+from baselines.utils.lagrangian import Lagrange
+from baselines.utils.logger import EpochLogger
+from baselines.utils.models import ActorVCritic
 
 
 default_cfg = {

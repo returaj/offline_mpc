@@ -2,8 +2,8 @@ import os.path as osp
 import h5py
 import torch
 import numpy as np
-from utils import make_sa_mujoco_env, single_agent_args
-from models import Actor
+from baselines.cpo.utils import make_sa_mujoco_env, single_agent_args
+from baselines.utils.models import Actor
 
 
 default_cfg = {
