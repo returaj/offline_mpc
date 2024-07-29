@@ -44,7 +44,7 @@ def main(args, cfg_env=None):
     policy = Actor(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
-        hidden_sizes=config["hidden_size"],
+        hidden_sizes=config["hidden_sizes"],
     ).to(device)
     policy_optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 

@@ -18,6 +18,12 @@ def single_agent_args():
             "help": "The task to run",
         },
         {
+            "name": "--experiment",
+            "type": str,
+            "default": "single_agent_exp",
+            "help": "Experiment name",
+        },
+        {
             "name": "--log-dir",
             "type": str,
             "default": "../runs",
