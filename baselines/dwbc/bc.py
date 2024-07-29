@@ -110,9 +110,9 @@ def main(args, cfg_env=None):
             for _ in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
-                eval_obs = torch.tensor(
+                eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
-                ).unsqueeze()
+                ).unsqueeze(0)
                 eval_reward, eval_cost, eval_len = 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
@@ -122,7 +122,7 @@ def main(args, cfg_env=None):
                     )
                     eval_obs = torch.as_tensor(
                         next_obs, dtype=torch.float32, device=device
-                    ).unsqueeze()
+                    ).unsqueeze(0)
                     eval_reward += reward
                     eval_cost += cost
                     eval_len += 1
