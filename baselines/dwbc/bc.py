@@ -45,7 +45,7 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_size"],
-    )
+    ).to(device)
     policy_optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 
     # set training steps
@@ -117,7 +117,7 @@ def main(args, cfg_env=None):
                 while not eval_done:
                     with torch.no_grad():
                         act = policy(eval_obs).mean
-                    next_obs, reward, cost, terminated, truncated, info = eval_env.step(
+                    next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
                     eval_obs = torch.as_tensor(
