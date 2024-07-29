@@ -95,6 +95,7 @@ def main(args, cfg_env=None):
             policy_optimizer.step()
 
             logger.store(**{"Loss/Loss_policy": loss_policy.mean().item()})
+            logger.logged = True
         training_end_time = time.time()
         new_distribution = policy(observations)
         final_kl = (
