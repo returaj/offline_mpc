@@ -116,7 +116,7 @@ def main(args):
     trajectories = collect_trajectories(
         env=env, obs_norm=obs_norm, actor=actor, config=config, device=device
     )
-    filepath = osp.join(osp.dirname(args.log_dir), "..", "trajectories.h5")
+    filepath = osp.join(osp.dirname(args.model_path), "..", f"trajectories_{config["num_trajectories"]}.h5")
     hf = h5py.File(filepath, "w")
     for k, v in trajectories.items():
         hf.create_dataset(k, data=v)
