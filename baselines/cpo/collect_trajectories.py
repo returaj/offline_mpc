@@ -26,7 +26,7 @@ def load_model(obs_dim, act_dim, hidden_sizes, path, device):
 
 
 def load_state(path):
-    obs_norm = joblib.load(path, "r")["Normalize"]
+    obs_norm = joblib.load(path, "r")["Normalizer"]
     return obs_norm
 
 
