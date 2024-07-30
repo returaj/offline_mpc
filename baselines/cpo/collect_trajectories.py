@@ -1,10 +1,13 @@
 import os.path as osp
 import h5py
+import joblib
 import torch
 import numpy as np
 from baselines.cpo.utils import make_sa_mujoco_env, single_agent_args
 from baselines.utils.models import Actor
 
+
+EP = 1e-6
 
 default_cfg = {
     "hidden_sizes": [512, 512],
@@ -20,6 +23,11 @@ def load_model(obs_dim, act_dim, hidden_sizes, path, device):
     actor = actor.to(device)
     actor.eval()
     return actor
+
+
+def load_state(path):
+    obs_norm = joblib.load(path, "r")["Normalize"]
+    return obs_norm
 
 
 class Trajectories:
@@ -54,12 +62,13 @@ class Trajectories:
         return self.trajectories
 
 
-def collect_trajectories(env, actor, config, device):
+def collect_trajectories(env, obs_norm, actor, config, device):
     trajectories = Trajectories()
     obs, info = env.reset()
     unnorm_obs = info["unnormalized_obs"]
     accpeted_traj, cnt_traj = 0, 0
     while accpeted_traj < config["num_trajectories"]:
+        obs = (obs - obs_norm.mean) / np.sqrt(obs_norm.var + EP)
         dist = actor(torch.tensor(obs, dtype=torch.float32, device=device))
         act = dist.mean.detach().squeeze().cpu().numpy()
         next_obs, reward, cost, terminated, truncated, next_info = env.step(act)
@@ -99,12 +108,13 @@ def main(args):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
-        path=args.log_dir,
+        path=args.model_path,
         device=device,
     )
+    obs_norm = load_state(args.state_path)
     print("Start collecting trajectories")
     trajectories = collect_trajectories(
-        env=env, actor=actor, config=config, device=device
+        env=env, obs_norm=obs_norm, actor=actor, config=config, device=device
     )
     filepath = osp.join(osp.dirname(args.log_dir), "..", "trajectories.h5")
     hf = h5py.File(filepath, "w")

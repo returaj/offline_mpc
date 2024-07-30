@@ -173,6 +173,18 @@ def single_agent_args():
             "help": "Experiment name",
         },
         {
+            "name": "--model-path",
+            "type": str,
+            "default": "../runs/torch_save/model0.pt",
+            "help": "saved model path, is used for loading model",
+        },
+        {
+            "name": "--state-path",
+            "type": str,
+            "default": "../runs/state0.pkl",
+            "help": "saved state path, is used for loading normalized state information",
+        },
+        {
             "name": "--log-dir",
             "type": str,
             "default": "../runs",
