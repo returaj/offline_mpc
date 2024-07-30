@@ -68,7 +68,7 @@ def collect_trajectories(env, obs_norm, actor, config, device):
     unnorm_obs = info["unnormalized_obs"]
     accpeted_traj, cnt_traj = 0, 0
     while accpeted_traj < config["num_trajectories"]:
-        obs = (obs - obs_norm.mean) / np.sqrt(obs_norm.var + EP)
+        obs = (unnorm_obs - obs_norm.mean) / np.sqrt(obs_norm.var + EP)
         dist = actor(torch.tensor(obs, dtype=torch.float32, device=device))
         act = dist.mean.detach().squeeze().cpu().numpy()
         next_obs, reward, cost, terminated, truncated, next_info = env.step(act)
@@ -90,11 +90,11 @@ def collect_trajectories(env, obs_norm, actor, config, device):
             cnt_traj += 1
             if merged:
                 accpeted_traj += 1
-                print(
-                    "total_trajectories: {:d}, accpeted_trajectories: {:d}, episode return: {:.3f}, episode cost: {:.3f}".format(
-                        cnt_traj, accpeted_traj, ep_return, ep_cost
-                    )
+            print(
+                "total_trajectories: {:d}, accpeted_trajectories: {:d}, episode return: {:.3f}, episode cost: {:.3f}".format(
+                    cnt_traj, accpeted_traj, ep_return, ep_cost
                 )
+            )
     return trajectories.get_trajectories()
 
 
