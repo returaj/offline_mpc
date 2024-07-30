@@ -97,6 +97,7 @@ def main(args, cfg_env=None):
             logger.store(**{"Loss/Loss_policy": loss_policy.mean().item()})
             logger.logged = False
         training_end_time = time.time()
+
         new_distribution = policy(observations)
         final_kl = (
             torch.distributions.kl.kl_divergence(old_distribution, new_distribution)
@@ -104,6 +105,7 @@ def main(args, cfg_env=None):
             .mean()
             .item()
         )
+        old_distribution = new_distribution
 
         eval_start_time = time.time()
         eval_episodes = 1 if epoch < epochs - 1 else 10
