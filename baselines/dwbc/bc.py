@@ -18,6 +18,8 @@ from baselines.utils.models import Actor
 from baselines.utils.logger import EpochLogger
 
 
+EP = 1e-6
+
 default_cfg = {
     "hidden_sizes": [512, 512],
     "gamma": 0.99,
@@ -57,6 +59,8 @@ def main(args, cfg_env=None):
         observations = np.concatenate(np.array(d["obs"]).squeeze(), axis=0)
         actions = np.concatenate(np.array(d["act"]).squeeze(), axis=0)
 
+    mu_obs, std_obs = observations.mean(axis=0), observations.std(axis=0)
+    observations = (observations - mu_obs) / (std_obs + EP)
     observations = torch.as_tensor(observations, dtype=torch.float32, device=device)
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
     dataloader = DataLoader(
@@ -113,6 +117,7 @@ def main(args, cfg_env=None):
             for _ in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
+                eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
                 eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
                 ).unsqueeze(0)
@@ -123,6 +128,7 @@ def main(args, cfg_env=None):
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
+                    next_obs = (next_obs - mu_obs) / (std_obs + EP)
                     eval_obs = torch.as_tensor(
                         next_obs, dtype=torch.float32, device=device
                     ).unsqueeze(0)
@@ -158,7 +164,21 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch + 1) % 100 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
+                logger.save_state(
+                    state_dict={
+                        "mu_obs": mu_obs,
+                        "std_obs": std_obs,
+                    },
+                    itr=epoch,
+                )
     logger.torch_save(itr=epoch)
+    logger.save_state(
+        state_dict={
+            "mu_obs": mu_obs,
+            "std_obs": std_obs,
+        },
+        itr=epoch,
+    )
     logger.close()
 
 
