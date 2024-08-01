@@ -125,7 +125,7 @@ def main(args):
         obs, _ = env.reset(seed=args.seed + id)
         while not done:
             obs = (obs - obs_norm.mean) / np.sqrt(obs_norm.var + EP)
-            obs = torch.as_tensor(obs.unsqueeze(), dtype=torch.float32, device=device)
+            obs = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             dist = actor(obs)
             act = dist.mean.detach().squeeze().cpu().numpy()
             obs, reward, cost, terminated, truncated, _ = env.step(act)
