@@ -1,5 +1,6 @@
 import argparse
-import os
+import os.path as osp
+import imageio
 import numpy as np
 import joblib
 import torch
@@ -92,16 +93,18 @@ def load_state(path):
     return obs_norm
 
 
+def save_video(frames, prefix_name, video_dir, fps=30):
+    video_path = osp.join(video_dir, f"{prefix_name}.mp4")
+    writer = imageio.get_writer(video_path, fps=fps)
+    for f in frames:
+        writer.append_data(f)
+    writer.close()
+
+
 def main(args):
     config = default_cfg
 
     env = safety_gymnasium.make(args.task, render_mode="rgb_array")
-    env = RecordVideo(
-        env=env,
-        video_folder=args.video_dir,
-        name_prefix="test-video",
-        episode_trigger=lambda x: x % 1 == 0,
-    )
 
     obs_space, act_space = env.observation_space, env.action_space
     device = torch.device(f"{args.device}:{args.device_id}")
@@ -117,6 +120,7 @@ def main(args):
     eval_configs = {}
     for id in range(args.num_videos):
         done = False
+        frames = []
         eval_config = {"total_return": 0.0, "total_cost": 0.0}
         obs, _ = env.reset(seed=args.seed + id)
         while not done:
@@ -128,10 +132,14 @@ def main(args):
             eval_config["total_return"] += reward
             eval_config["total_cost"] += cost
             done = terminated or truncated
-            env.render()
+            frames.append(env.render())
+        save_video(
+            frames=frames, fps=30, prefix_name=f"video_{id}", video_path=args.video_dir
+        )
         print(eval_config)
         eval_configs[id] = eval_config
     env.close()
+    joblib.dump(eval_configs, osp.join(args.video_dir, "eval_config.pkl"))
 
 
 if __name__ == "__main__":
