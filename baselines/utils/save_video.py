@@ -1,4 +1,5 @@
 import argparse
+import os
 import os.path as osp
 import imageio
 import numpy as np
@@ -94,6 +95,7 @@ def load_state(path):
 
 
 def save_video(frames, prefix_name, video_dir, fps=30):
+    os.makedirs(video_dir, exist_ok=True)
     video_path = osp.join(video_dir, f"{prefix_name}.mp4")
     writer = imageio.get_writer(video_path, fps=fps)
     for f in frames:
