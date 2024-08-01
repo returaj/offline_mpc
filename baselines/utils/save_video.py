@@ -136,7 +136,7 @@ def main(args):
             done = terminated or truncated
             frames.append(env.render())
         save_video(
-            frames=frames, fps=30, prefix_name=f"video_{id}", video_path=args.video_dir
+            frames=frames, fps=30, prefix_name=f"video_{id}", video_dir=args.video_dir
         )
         print(eval_config)
         eval_configs[id] = eval_config
