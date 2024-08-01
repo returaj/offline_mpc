@@ -155,7 +155,7 @@ dmypy.json
 cython_debug/
 
 # data folders
-data/*.h5
+data/
 runs/
 
 # PyCharm
