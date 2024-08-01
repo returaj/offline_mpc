@@ -63,6 +63,12 @@ def create_arguments():
             "default": "../runs",
             "help": "path of saved environment state",
         },
+        {
+            "name": "--video-dir",
+            "type": str,
+            "default": "../runs",
+            "help": "path to save video",
+        },
     ]
     parser = argparse.ArgumentParser(description="RL Policy")
     for param in custom_parameters:
