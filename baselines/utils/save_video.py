@@ -20,7 +20,7 @@ default_cfg = {
 
 
 def create_arguments():
-    custom_parameters = {
+    custom_parameters = [
         {
             "name": "--seed",
             "type": int,
@@ -63,7 +63,7 @@ def create_arguments():
             "default": "../runs",
             "help": "path of saved environment state",
         },
-    }
+    ]
     parser = argparse.ArgumentParser(description="RL Policy")
     for param in custom_parameters:
         param_name = param.pop("name")
