@@ -4,6 +4,7 @@ import os.path as osp
 import imageio
 import numpy as np
 import joblib
+import json
 import torch
 import safety_gymnasium
 from gymnasium.wrappers.record_video import RecordVideo
@@ -141,7 +142,8 @@ def main(args):
         print(eval_config)
         eval_configs[id] = eval_config
     env.close()
-    joblib.dump(eval_configs, osp.join(args.video_dir, "eval_config.pkl"))
+    with open(osp.join(args.video_dir, "eval_config.json"), "w") as f:
+        json.dump(eval_configs, f, indent=4)
 
 
 if __name__ == "__main__":
