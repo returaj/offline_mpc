@@ -68,6 +68,7 @@ def main(args, cfg_env=None):
         if not (negative_matched or positive_matched):
             pass
         filepath = os.path.join(args.data_path, file)
+        print(f"Added data: {filepath}")
         with h5py.File(filepath, "r") as d:
             observations = np.concatenate(np.array(d["obs"]).squeeze(), axis=0)
             actions = np.concatenate(np.array(d["act"]).squeeze(), axis=0)
@@ -156,7 +157,9 @@ def main(args, cfg_env=None):
         training_start_time = time.time()
         for target_obs, target_act, _ in dataloader:
             with torch.no_grad():
-                weights = nn.functional.sigmoid(critic(torch.cat([target_obs, act], dim=1)))
+                weights = nn.functional.sigmoid(
+                    critic(torch.cat([target_obs, act], dim=1))
+                )
             policy_optimizer.zero_grad()
             pred_act = policy(target_obs).rsample()
             loss_policy = torch.mean(weights * (pred_act - target_act) ** 2)
