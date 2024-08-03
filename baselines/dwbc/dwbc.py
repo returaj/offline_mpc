@@ -154,13 +154,12 @@ def main(args, cfg_env=None):
     final_kl = torch.ones_like(old_distribution.loc)
     for epoch in range(num_epochs):
         training_start_time = time.time()
-        for obs, act, _ in dataloader:
+        for target_obs, target_act, _ in dataloader:
             with torch.no_grad():
-                weights = nn.functional.sigmoid(critic(torch.cat([obs, act], dim=1)))
+                weights = nn.functional.sigmoid(critic(torch.cat([target_obs, act], dim=1)))
             policy_optimizer.zero_grad()
-            dist = policy(obs)
-            log_prob = dist.log_prob(act).sum(axis=-1)
-            loss_policy = torch.mean(weights * log_prob)
+            pred_act = policy(target_obs).rsample()
+            loss_policy = torch.mean(weights * (pred_act - target_act) ** 2)
             if config.get("use_critic_norm", True):
                 for params in policy.parameters():
                     loss_policy += params.pow(2).sum() * 0.001
