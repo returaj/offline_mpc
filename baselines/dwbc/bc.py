@@ -58,13 +58,15 @@ def main(args, cfg_env=None):
     with h5py.File(args.data_path, "r") as d:
         observations = np.concatenate(np.array(d["obs"]).squeeze(), axis=0)
         actions = np.concatenate(np.array(d["act"]).squeeze(), axis=0)
+        costs = np.concatenate(np.array(d["cost"]).squeeze(), axis=0)
 
     mu_obs, std_obs = observations.mean(axis=0), observations.std(axis=0)
     observations = (observations - mu_obs) / (std_obs + EP)
     observations = torch.as_tensor(observations, dtype=torch.float32, device=device)
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
+    costs = torch.as_tensor(costs, dtype=torch.float32, device=device)
     dataloader = DataLoader(
-        dataset=TensorDataset(observations, actions),
+        dataset=TensorDataset(observations, actions, costs),
         batch_size=batch_size,
         shuffle=True,
     )
@@ -87,10 +89,15 @@ def main(args, cfg_env=None):
     final_kl = torch.ones_like(old_distribution.loc)
     for epoch in range(epochs):
         training_start_time = time.time()
-        for obs, traget_act in dataloader:
+        for obs, target_act, cost in dataloader:
             policy_optimizer.zero_grad()
             pred_act = policy(obs).rsample()
-            loss_policy = nn.functional.mse_loss(pred_act, traget_act)
+            if args.cost_weight:
+                loss_policy = torch.mean(
+                    cost * torch.sum((pred_act - target_act) ** 2, dim=-1)
+                )
+            else:
+                loss_policy = nn.functional.mse_loss(pred_act, target_act)
             if config.get("use_critic_norm", True):
                 for params in policy.parameters():
                     loss_policy += params.pow(2).sum() * 0.001

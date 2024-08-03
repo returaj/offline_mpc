@@ -65,6 +65,12 @@ def single_agent_args():
             "default": 128,
             "help": "The number of steps to run in each environment per policy rollout",
         },
+        {
+            "name": "--cost-weight",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "Use cost as a weight for bc cloaning loss function",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
