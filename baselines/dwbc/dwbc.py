@@ -158,7 +158,7 @@ def main(args, cfg_env=None):
         for target_obs, target_act, _ in dataloader:
             with torch.no_grad():
                 weights = nn.functional.sigmoid(
-                    critic(torch.cat([target_obs, act], dim=1))
+                    critic(torch.cat([target_obs, target_act], dim=1))
                 )
             policy_optimizer.zero_grad()
             pred_act = policy(target_obs).rsample()
