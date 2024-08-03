@@ -68,10 +68,14 @@ def main(args, cfg_env=None):
         if not (negative_matched or positive_matched):
             continue
         filepath = os.path.join(args.data_path, file)
-        print(f"Added data: {filepath}")
         with h5py.File(filepath, "r") as d:
             observations = np.concatenate(np.array(d["obs"]).squeeze(), axis=0)
             actions = np.concatenate(np.array(d["act"]).squeeze(), axis=0)
+            avg_reward = np.mean(np.sum(d["reward"], axis=1))
+            avg_cost = np.mean(np.sum(d["cost"], axis=1))
+        print(f"Added data: {filepath}")
+        print(f"Avg reward: {avg_reward}")
+        print(f"Avg cost: {avg_cost}")
         if negative_matched:
             neg_observations = observations
             neg_actions = actions
@@ -162,7 +166,9 @@ def main(args, cfg_env=None):
                 )
             policy_optimizer.zero_grad()
             pred_act = policy(target_obs).rsample()
-            loss_policy = torch.mean(weights * (pred_act - target_act) ** 2)
+            loss_policy = torch.mean(
+                weights * torch.sum((pred_act - target_act) ** 2, dim=1)
+            )
             if config.get("use_critic_norm", True):
                 for params in policy.parameters():
                     loss_policy += params.pow(2).sum() * 0.001
