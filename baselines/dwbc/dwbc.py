@@ -92,10 +92,9 @@ def main(args, cfg_env=None):
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
     labels = np.concatenate(
         [
-            np.zeros((1, neg_observations.shape[0])),
-            np.ones((1, union_observations.shape[0])),
+            np.zeros(neg_observations.shape[0]),
+            np.ones(union_observations.shape[0]),
         ],
-        axis=0,
     )
     labels = torch.as_tensor(labels, dtype=torch.float32, device=device)
     dataloader = DataLoader(
@@ -104,33 +103,29 @@ def main(args, cfg_env=None):
         shuffle=True,
     )
 
-    # set logger
+    # set critic logger
     dict_args = vars(args)
     dict_args.update(config)
     logger = EpochLogger(
         log_dir=args.log_dir,
         seed=str(args.seed),
     )
-    eval_rew_deque = deque(maxlen=50)
-    eval_cost_deque = deque(maxlen=50)
-    eval_len_deque = deque(maxlen=50)
     logger.save_config(dict_args)
-    logger.setup_torch_saver(policy)
-    logger.log("Start with training.")
+    logger.log("Start with critic training.")
 
     # train critic model
     for epoch in range(num_epochs):
         training_start_time = time.time()
         for obs, act, label in dataloader:
             critic_optimizer.zero_grad()
-            logits = critic(torch.cat([obs, act], dim=0))
+            logits = critic(torch.cat([obs, act], dim=1))
             loss_critic = nn.functional.binary_cross_entropy_with_logits(logits, label)
             if config.get("use_critic_norm", True):
                 for params in critic.parameters():
-                    loss += params.pow(2).sum() * 0.001
+                    loss_critic += params.pow(2).sum() * 0.001
             loss_critic.backward()
             clip_grad_norm_(critic.parameters(), config["max_grad_norm"])
-            critic.step()
+            critic_optimizer.step()
             logger.store(**{"Loss/Loss_critic": loss_critic.mean().item()})
             logger.logged = False
         training_end_time = time.time()
@@ -141,6 +136,18 @@ def main(args, cfg_env=None):
                 "Time/Update_critic", training_end_time - training_start_time
             )
             logger.dump_tabular()
+    logger.close()
+
+    # setup policy logger
+    eval_rew_deque = deque(maxlen=50)
+    eval_cost_deque = deque(maxlen=50)
+    eval_len_deque = deque(maxlen=50)
+    logger = EpochLogger(
+        log_dir=args.log_dir,
+        seed=str(args.seed),
+    )
+    logger.setup_torch_saver(policy)
+    logger.log("Start with policy training.")
 
     # train weighted bc
     old_distribution = policy(observations)
@@ -149,7 +156,7 @@ def main(args, cfg_env=None):
         training_start_time = time.time()
         for obs, act, _ in dataloader:
             with torch.no_grad():
-                weights = nn.functional.sigmoid(critic(torch.cat([obs, act], dim=0)))
+                weights = nn.functional.sigmoid(critic(torch.cat([obs, act], dim=1)))
             policy_optimizer.zero_grad()
             dist = policy(obs)
             log_prob = dist.log_prob(act).sum(axis=-1)
@@ -228,7 +235,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular("Time/Total", eval_end_time - training_start_time)
             logger.dump_tabular()
-            if (epoch + 1) % 20 == 0 or epoch == 0:
+            if (epoch + 1) % 2 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
                 logger.save_state(
                     state_dict={
