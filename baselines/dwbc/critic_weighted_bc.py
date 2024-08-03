@@ -206,7 +206,7 @@ def main(args, cfg_env=None):
                 while not eval_done:
                     with torch.no_grad():
                         act = policy(eval_obs).mean
-                        critic_cost = torch.nn.functional.sigmoid(
+                        critic_cost = 1 - torch.nn.functional.sigmoid(
                             critic(torch.cat([eval_obs, act], dim=1))
                         )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
