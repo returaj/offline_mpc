@@ -66,7 +66,7 @@ def main(args, cfg_env=None):
         negative_matched = re.search("^.*?neg_.*$", file)
         positive_matched = re.search("^.*?pos_.*$", file)
         if not (negative_matched or positive_matched):
-            pass
+            continue
         filepath = os.path.join(args.data_path, file)
         print(f"Added data: {filepath}")
         with h5py.File(filepath, "r") as d:
