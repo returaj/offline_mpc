@@ -235,7 +235,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular("Time/Total", eval_end_time - training_start_time)
             logger.dump_tabular()
-            if (epoch + 1) % 2 == 0 or epoch == 0:
+            if (epoch + 1) % 20 == 0 or epoch == 0:
                 logger.torch_save(itr=epoch)
                 logger.save_state(
                     state_dict={
