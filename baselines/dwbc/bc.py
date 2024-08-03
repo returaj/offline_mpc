@@ -94,7 +94,7 @@ def main(args, cfg_env=None):
             pred_act = policy(obs).rsample()
             if args.cost_weight:
                 loss_policy = torch.mean(
-                    cost * torch.sum((pred_act - target_act) ** 2, dim=-1)
+                    (1 - cost) * torch.sum((pred_act - target_act) ** 2, dim=-1)
                 )
             else:
                 loss_policy = nn.functional.mse_loss(pred_act, target_act)
