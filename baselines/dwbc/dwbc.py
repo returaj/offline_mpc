@@ -146,6 +146,7 @@ def main(args, cfg_env=None):
     # setup policy logger
     eval_rew_deque = deque(maxlen=50)
     eval_cost_deque = deque(maxlen=50)
+    eval_critic_deque = deque(maxlen=50)
     eval_len_deque = deque(maxlen=50)
     logger = EpochLogger(
         log_dir=args.log_dir,
@@ -201,10 +202,13 @@ def main(args, cfg_env=None):
                 eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
                 ).unsqueeze(0)
-                eval_reward, eval_cost, eval_len = 0.0, 0.0, 0.0
+                eval_reward, eval_cost, eval_critic, eval_len = 0.0, 0.0, 0.0, 0.0
                 while not eval_done:
                     with torch.no_grad():
                         act = policy(eval_obs).mean
+                        critic_cost = torch.nn.functional.sigmoid(
+                            critic(torch.cat([eval_obs, act], dim=1))
+                        )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act.detach().squeeze().cpu().numpy()
                     )
@@ -214,15 +218,18 @@ def main(args, cfg_env=None):
                     ).unsqueeze(0)
                     eval_reward += reward
                     eval_cost += cost
+                    eval_critic += critic_cost.item()
                     eval_len += 1
                     eval_done = terminated or truncated
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
+                eval_critic_deque.append(eval_critic)
                 eval_len_deque.append(eval_len)
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),
                     "Metrics/EvalEpCost": np.mean(eval_cost_deque),
+                    "Metrics/EvalCriticCost": np.mean(eval_critic_deque),
                     "Metrics/EvalEpLen": np.mean(eval_len_deque),
                 }
             )
@@ -232,6 +239,7 @@ def main(args, cfg_env=None):
             if args.use_eval:
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
+                logger.log_tabular("Metrics/EvalCriticCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             logger.log_tabular("Train/Epoch_policy", epoch + 1)
             logger.log_tabular(
