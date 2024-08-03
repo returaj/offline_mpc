@@ -165,10 +165,13 @@ def main(args, cfg_env=None):
                     critic(torch.cat([target_obs, target_act], dim=1))
                 )
             policy_optimizer.zero_grad()
-            pred_act = policy(target_obs).rsample()
-            loss_policy = torch.mean(
-                weights * torch.sum((pred_act - target_act) ** 2, dim=1)
-            )
+            dist = policy(target_obs)
+            # pred_act = dist.rsample()
+            # loss_policy = torch.mean(
+            #     weights * torch.sum((pred_act - target_act) ** 2, dim=1)
+            # )
+            log_prob = dist.log_prob(target_act).sum(axis=-1)
+            loss_policy = -torch.mean(weights * log_prob)
             if config.get("use_critic_norm", True):
                 for params in policy.parameters():
                     loss_policy += params.pow(2).sum() * 0.001
