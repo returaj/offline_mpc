@@ -233,8 +233,6 @@ class Logger:
             joblib.dump(state_dict, osp.join(self.log_dir, fname))
         except:
             self.log("Warning: could not pickle state_dict.", color="red")
-        if hasattr(self, "torch_saver_elements"):
-            self.torch_save(itr)
 
     def setup_torch_saver(self, what_to_save):
         """
@@ -252,22 +250,23 @@ class Logger:
         """
         self.torch_saver_elements = what_to_save
 
-    def torch_save(self, itr=None):
+    def torch_save(self, itr=None, torch_saver_elements=None, prefix=""):
         """Saves the PyTorch model (or models)."""
 
         self.log("Save model to disk...")
+        torch_saver_elements = torch_saver_elements or self.torch_saver_elements
         assert (
-            self.torch_saver_elements is not None
-        ), "First have to setup saving with self.setup_torch_saver"
+            torch_saver_elements is not None
+        ), "First have to setup saving with self.setup_torch_saver or pass torch_saver_elements"
         fpath = "torch_save"
         fpath = osp.join(self.log_dir, fpath)
-        fname = "model" + ("%d" % itr if itr is not None else "") + ".pt"
+        fname = prefix + "model" + ("%d" % itr if itr is not None else "") + ".pt"
         fname = osp.join(fpath, fname)
         os.makedirs(fpath, exist_ok=True)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            torch.save(self.torch_saver_elements, fname)
-        torch.save(self.torch_saver_elements.state_dict(), fname)
+            torch.save(torch_saver_elements, fname)
+        torch.save(torch_saver_elements.state_dict(), fname)
         self.log("Done.")
 
     def dump_tabular(self) -> None:

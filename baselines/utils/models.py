@@ -23,8 +23,7 @@ import torch.optim
 from torch.distributions import Normal
 
 
-
-def build_mlp_network(sizes):
+def build_mlp_network(sizes, activation=None):
     """
     Build a multi-layer perceptron (MLP) neural network.
 
@@ -32,13 +31,14 @@ def build_mlp_network(sizes):
 
     Args:
         sizes (list of int): List of integers representing the sizes of each layer in the network.
-
+        activation: activation funciton
     Returns:
         nn.Sequential: An instance of PyTorch's Sequential module representing the constructed MLP.
     """
     layers = list()
     for j in range(len(sizes) - 1):
-        act = nn.Tanh if j < len(sizes) - 2 else nn.Identity
+        activation = activation or nn.Tanh
+        act = activation if j < len(sizes) - 2 else nn.Identity
         affine_layer = nn.Linear(sizes[j], sizes[j + 1])
         nn.init.kaiming_uniform_(affine_layer.weight, a=np.sqrt(5))
         layers += [affine_layer, act()]
@@ -165,3 +165,30 @@ class ActorVCritic(nn.Module):
         value_r = self.reward_critic(obs)
         value_c = self.cost_critic(obs)
         return action, log_prob, value_r, value_c
+
+
+class MLP(nn.Module):
+    """
+    Standard MLP network.
+
+    This class represents a standard mlp network.
+
+    Args:
+        in_dim (int): Dimensionality of the input space.
+        out_dim (int): Dimensionality of the output space.
+    Attributes:
+        vector_value (nn.Sequential): MLP network representing the output function.
+
+    Example:
+        in_dim, out_dim = 10, 5
+        value = MLP(in_dim, out_dim)
+        x = torch.randn(1, obs_dim)
+        value_estimate = value(x)
+    """
+
+    def __init__(self, in_dim, out_dim, hidden_sizes: list = [64, 64]):
+        super().__init__()
+        self.model = build_mlp_network([in_dim] + hidden_sizes + [out_dim], nn.ReLU)
+
+    def forward(self, x):
+        return self.model(x)
