@@ -30,7 +30,7 @@ default_cfg = {
     "elite_portion": 0.1,
     "max_iter": 10,  # 10
     "num_samples": 400,  # 400
-    "horizon": 5,  # 10
+    "horizon": 10,  # 10
 }
 
 
@@ -97,7 +97,7 @@ def main(args, cfg_env=None):
     ).to(device)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=3e-4)
     dynamics = MLP(
-        in_dim=(obs_space.shape[0] + act_space.shape[0]),
+        in_dim=obs_space.shape[0] + act_space.shape[0],
         out_dim=obs_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
@@ -246,7 +246,7 @@ def main(args, cfg_env=None):
                     dtype=torch.float32,
                     device=device,
                 )
-                while (not eval_done) and (eval_len < 200):
+                while not eval_done:
                     act, horizon_cost = cem_policy(
                         dynamics=dynamics,
                         critic=critic,
