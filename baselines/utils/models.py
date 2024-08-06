@@ -192,3 +192,31 @@ class MLP(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+
+class GaussianMLP(nn.Module):
+    """
+    Standard MLP network which outputs gaussian distributions mean and std.
+
+    Args:
+        in_dim (int): Dimensionality of the input space.
+        out_dim (int): Dimensionality of the output space.
+    Attributes:
+        mean, std (nn.Sequential): MLP network representing the gaussian distribution.
+
+    Example:
+        in_dim, out_dim = 10, 5
+        value = GaussianMLP(in_dim, out_dim)
+        x = torch.randn(1, obs_dim)
+        mean, std = value(x)
+    """
+
+    def __init__(self, in_dim, out_dim, hidden_sizes: list = [64, 64]):
+        super().__init__()
+        self.mean = MLP(in_dim, out_dim, hidden_sizes)
+        self.log_std = nn.Parameter(torch.zeros(out_dim), requires_grad=True)
+
+    def forward(self, x: torch.Tensor):
+        mean = self.mean(x)
+        std = torch.exp(self.log_std)
+        return mean, std
