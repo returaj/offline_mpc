@@ -188,7 +188,7 @@ class MLP(nn.Module):
 
     def __init__(self, in_dim, out_dim, hidden_sizes: list = [64, 64]):
         super().__init__()
-        self.model = build_mlp_network([in_dim] + hidden_sizes + [out_dim])
+        self.model = build_mlp_network([in_dim] + hidden_sizes + [out_dim], nn.ReLU)
 
     def forward(self, x):
         return self.model(x)
