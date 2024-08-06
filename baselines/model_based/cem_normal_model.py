@@ -80,7 +80,7 @@ def cem_policy(dynamics, critic, eval_obs, act, config, device):
         new_std = torch.std(elite_controls, dim=0)
         mean = smoothing * mean + (1 - smoothing) * new_mean
         std = smoothing * std + (1 - smoothing) * new_std
-    noises = torch.randn(size=(horizon, obs_size))
+    noises = torch.randn(size=(horizon, obs_size), dtype=torch.float32, device=device)
     horizon_cost = cost_fn(mean, noises)
     return mean, horizon_cost
 
