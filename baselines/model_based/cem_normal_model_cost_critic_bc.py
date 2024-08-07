@@ -123,7 +123,7 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
-    )
+    ).to(device)
     bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=3e-4)
     critic = VCritic(
         obs_dim=2 * obs_space.shape[0],
