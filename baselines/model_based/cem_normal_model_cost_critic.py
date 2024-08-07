@@ -210,15 +210,18 @@ def main(args, cfg_env=None):
             )
             dynamics_kl_loss = torch.mean(torch.sum(dynamics_kl_loss, dim=1))
             true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
+            pos_weight = (label.shape[0] - label.sum()) / (
+                label.sum() + EP
+            )  # num_neg_samples / num_pos_samples
             critic_loss = nn.functional.binary_cross_entropy_with_logits(
-                true_logits, label
+                true_logits, label, pos_weight=pos_weight
             )
             if config.get("use_critic_norm", True):
                 for params in critic.parameters():
                     critic_loss += params.pow(2).sum() * 0.001
             cyclic_logits = critic(torch.cat([target_obs, pred_next_obs], dim=1))
             cyclic_loss = nn.functional.binary_cross_entropy_with_logits(
-                cyclic_logits, label
+                cyclic_logits, label, pos_weight=pos_weight
             )
             loss = dynamics_loss + critic_loss + cyclic_loss + dynamics_kl_loss
             loss.backward()
