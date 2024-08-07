@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import sys
 import time
 import re
@@ -15,8 +16,9 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
 
 import safety_gymnasium
-from baselines.utils.models import VCritic, MLP
+from baselines.utils.models import Actor, VCritic, MLP
 from baselines.utils.logger import EpochLogger
+from baselines.utils.save_video import save_video
 from baselines.model_based.utils import single_agent_args
 
 
@@ -32,6 +34,17 @@ default_cfg = {
     "num_samples": 400,  # 400
     "horizon": 10,  # 10
 }
+
+
+def get_initial_action(dynamics, bc_policy, init_state, horizon):
+    actions = []
+    state = init_state
+    with torch.no_grad():
+        for _ in range(horizon):
+            act = bc_policy(state).mean
+            actions.append(act)
+            state = state + dynamics(torch.cat([state, act], dim=1))
+    return torch.cat(actions, dim=0)
 
 
 def get_horizon_cost(dynamics, critic, init_state, controls):
@@ -86,11 +99,19 @@ def main(args, cfg_env=None):
     config = default_cfg
 
     # evaluation environment
-    eval_env = safety_gymnasium.make(args.task)
+    eval_env = safety_gymnasium.make(
+        args.task, render_mode="rgb_array", camera_name="track"
+    )
     eval_env.reset(seed=None)
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
+    bc_policy = Actor(
+        obs_dim=obs_space.shape[0],
+        act_dim=act_space.shape[0],
+        hidden_sizes=config["hidden_sizes"],
+    ).to(device)
+    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=3e-4)
     critic = VCritic(
         obs_dim=2 * obs_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
@@ -183,8 +204,14 @@ def main(args, cfg_env=None):
     for epoch in range(num_epochs):
         training_start_time = time.time()
         for target_obs, target_act, target_next_obs, label in dataloader:
+            bc_policy_optimizer.zero_grad()
             dynamics_optimizer.zero_grad()
             critic_optimizer.zero_grad()
+            pred_act = bc_policy(target_obs).rsample()
+            bc_policy_loss = nn.functional.mse_loss(target_act, pred_act)
+            if config.get("use_critic_norm", True):
+                for params in bc_policy.parameters():
+                    bc_policy_loss += params.pow(2).sum() * 0.001
             pred_next_obs = target_obs + dynamics(
                 torch.cat([target_obs, target_act], dim=1)
             )
@@ -206,14 +233,17 @@ def main(args, cfg_env=None):
             cyclic_loss = nn.functional.binary_cross_entropy_with_logits(
                 cyclic_logits, label, pos_weight=pos_weight
             )
-            loss = dynamics_loss + critic_loss + cyclic_loss
+            loss = bc_policy_loss + dynamics_loss + critic_loss + cyclic_loss
             loss.backward()
+            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
             clip_grad_norm_(critic.parameters(), config["max_grad_norm"])
             clip_grad_norm_(dynamics.parameters(), config["max_grad_norm"])
+            bc_policy_optimizer.step()
             critic_optimizer.step()
             dynamics_optimizer.step()
             logger.store(
                 **{
+                    "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
                     "Loss/Loss_dynamics": dynamics_loss.mean().item(),
                     "Loss/Loss_critic": critic_loss.mean().item(),
                     "Loss/Loss_cyclic": cyclic_loss.mean().item(),
@@ -224,11 +254,12 @@ def main(args, cfg_env=None):
         training_end_time = time.time()
 
         eval_start_time = time.time()
-        eval_episodes = 1 if epoch < num_epochs - 1 else 1
+        is_last_epoch = epoch >= num_epochs - 1
+        eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             config["act_high"] = act_space.high
             config["act_low"] = act_space.low
-            for _ in range(eval_episodes):
+            for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
                 eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
@@ -242,17 +273,19 @@ def main(args, cfg_env=None):
                     0.0,
                     0.0,
                 )
-                act = torch.zeros(
-                    (config["horizon"], act_space.shape[0]),
-                    dtype=torch.float32,
-                    device=device,
-                )
+                ep_frames = []
                 while not eval_done:
+                    init_act = get_initial_action(
+                        dynamics=dynamics,
+                        bc_policy=bc_policy,
+                        init_state=eval_obs,
+                        horizon=config["horizon"],
+                    )
                     act, horizon_cost = cem_policy(
                         dynamics=dynamics,
                         critic=critic,
                         eval_obs=eval_obs,
-                        act=act,
+                        act=init_act,
                         config=config,
                         device=device,
                     )
@@ -274,6 +307,13 @@ def main(args, cfg_env=None):
                     eval_horizon_cost += horizon_cost.item()
                     eval_len += 1
                     eval_done = terminated or truncated
+                    if is_last_epoch:
+                        ep_frames.append(eval_env.render())
+                save_video(
+                    ep_frames,
+                    prefix_name=f"video_{id}",
+                    video_dir=osp.join(args.log_dir, "video"),
+                )
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
                 eval_critic_deque.append(eval_critic)
@@ -298,6 +338,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalHorizonCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             logger.log_tabular("Train/Epoch", epoch + 1)
+            logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_critic")
             logger.log_tabular("Loss/Loss_cyclic")
@@ -311,6 +352,9 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch + 1) % 20 == 0 or epoch == 0:
                 logger.torch_save(
+                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy"
+                )
+                logger.torch_save(
                     itr=epoch, torch_saver_elements=dynamics, prefix="dynamics"
                 )
                 logger.torch_save(
@@ -323,6 +367,7 @@ def main(args, cfg_env=None):
                     },
                     itr=epoch,
                 )
+    logger.torch_save(itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy")
     logger.torch_save(itr=epoch, torch_saver_elements=dynamics, prefix="dynamics")
     logger.torch_save(itr=epoch, torch_saver_elements=critic, prefix="critic")
     logger.save_state(

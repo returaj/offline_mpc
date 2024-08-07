@@ -356,6 +356,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalHorizonCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             logger.log_tabular("Train/Epoch", epoch + 1)
+            logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_dynamics_kl")
             logger.log_tabular("Loss/Loss_critic")
@@ -370,6 +371,9 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch + 1) % 20 == 0 or epoch == 0:
                 logger.torch_save(
+                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy"
+                )
+                logger.torch_save(
                     itr=epoch, torch_saver_elements=dynamics, prefix="dynamics"
                 )
                 logger.torch_save(
@@ -382,6 +386,7 @@ def main(args, cfg_env=None):
                     },
                     itr=epoch,
                 )
+    logger.torch_save(itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy")
     logger.torch_save(itr=epoch, torch_saver_elements=dynamics, prefix="dynamics")
     logger.torch_save(itr=epoch, torch_saver_elements=critic, prefix="critic")
     logger.save_state(
