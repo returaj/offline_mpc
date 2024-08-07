@@ -28,10 +28,24 @@ default_cfg = {
     "sampling_smoothing": 0.0,
     "evolution_smoothing": 0.1,
     "elite_portion": 0.1,
-    "max_iter": 10,  # 10
-    "num_samples": 400,  # 400
-    "horizon": 10,  # 10
+    "max_iter": 2,  # 10
+    "num_samples": 40,  # 400
+    "horizon": 2,  # 10
 }
+
+
+def get_initial_action(dynamics, bc_policy, init_state, noises):
+    actions = []
+    state = init_state
+    noises = noises.unsqueeze(1)
+    with torch.no_grad():
+        for n in noises:
+            act = bc_policy(state).mean
+            actions.append(act)
+            dynamics_mean, dynamics_std = dynamics(torch.cat([state, act], dim=1))
+            dynamics_delta = dynamics_mean + n * dynamics_std
+            state = state + dynamics_delta
+    return torch.cat(actions, dim=0)
 
 
 def get_horizon_cost(dynamics, critic, init_state, controls, noises):
@@ -221,16 +235,19 @@ def main(args, cfg_env=None):
                 1 + 2 * torch.log(pred_std) - pred_std**2 - pred_mean**2
             )
             dynamics_kl_loss = torch.mean(torch.sum(dynamics_kl_loss, dim=1))
+            pos_weight = (label.shape[0] - label.sum()) / (
+                label.sum() + EP
+            )  # num_neg_samples / num_pos_samples
             true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
             critic_loss = nn.functional.binary_cross_entropy_with_logits(
-                true_logits, label
+                true_logits, label, pos_weight=pos_weight
             )
             if config.get("use_critic_norm", True):
                 for params in critic.parameters():
                     critic_loss += params.pow(2).sum() * 0.001
             cyclic_logits = critic(torch.cat([target_obs, pred_next_obs], dim=1))
             cyclic_loss = nn.functional.binary_cross_entropy_with_logits(
-                cyclic_logits, label
+                cyclic_logits, label, pos_weight=pos_weight
             )
             loss = (
                 dynamics_loss
@@ -279,11 +296,15 @@ def main(args, cfg_env=None):
                     0.0,
                 )
                 while not eval_done:
-                    # TODO update initial action using BC policy
-                    init_act = torch.zeros(
-                        (config["horizon"], act_space.shape[0]),
-                        dtype=torch.float32,
-                        device=device,
+                    init_act = get_initial_action(
+                        dynamics=dynamics,
+                        bc_policy=bc_policy,
+                        init_state=eval_obs,
+                        noises=torch.randn(
+                            size=(config["horizon"], eval_obs.shape[0]),
+                            dtype=torch.float32,
+                            device=device,
+                        ),
                     )
                     act, horizon_cost = cem_policy(
                         dynamics=dynamics,

@@ -209,10 +209,10 @@ def main(args, cfg_env=None):
                 1 + 2 * torch.log(pred_std) - pred_std**2 - pred_mean**2
             )
             dynamics_kl_loss = torch.mean(torch.sum(dynamics_kl_loss, dim=1))
-            true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
             pos_weight = (label.shape[0] - label.sum()) / (
                 label.sum() + EP
             )  # num_neg_samples / num_pos_samples
+            true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
             critic_loss = nn.functional.binary_cross_entropy_with_logits(
                 true_logits, label, pos_weight=pos_weight
             )
