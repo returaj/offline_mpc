@@ -233,7 +233,7 @@ def main(args, cfg_env=None):
         if args.use_eval:
             config["act_high"] = act_space.high
             config["act_low"] = act_space.low
-            for _ in range(eval_episodes):
+            for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
                 eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
