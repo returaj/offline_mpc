@@ -255,7 +255,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 1 if is_last_epoch else 1
+        eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
             config["act_high"] = act_space.high
             config["act_low"] = act_space.low
