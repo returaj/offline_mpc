@@ -179,11 +179,11 @@ def main(args, cfg_env=None):
     )
 
     # set logger
-    eval_rew_deque = deque(maxlen=50)
-    eval_cost_deque = deque(maxlen=50)
-    eval_critic_deque = deque(maxlen=50)
-    eval_horizon_cost_deque = deque(maxlen=50)
-    eval_len_deque = deque(maxlen=50)
+    eval_rew_deque = deque(maxlen=5)
+    eval_cost_deque = deque(maxlen=5)
+    eval_critic_deque = deque(maxlen=5)
+    eval_horizon_cost_deque = deque(maxlen=5)
+    eval_len_deque = deque(maxlen=5)
     dict_args = vars(args)
     dict_args.update(config)
     logger = EpochLogger(
