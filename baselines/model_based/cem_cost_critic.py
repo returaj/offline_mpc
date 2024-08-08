@@ -13,7 +13,7 @@ import h5py
 import torch
 import torch.nn as nn
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from torcheval.metrics.functional import binary_confusion_matrix
 
 import safety_gymnasium
@@ -163,10 +163,19 @@ def main(args, cfg_env=None):
     )
     labels = np.concatenate([neg_costs, union_costs])  # use costs as labels
     labels = torch.as_tensor(labels, dtype=torch.float32, device=device)
+    label_one_count = labels.sum()
+    label_zero_count = labels.shape[0] - label_one_count
+    label_weights = [1 / label_zero_count, 1 / label_one_count]
+    sample_weights = torch.as_tensor(
+        [label_weights[int(i)] for i in labels], dtype=torch.float32, device=device
+    )
+    weighted_sampler = WeightedRandomSampler(
+        weights=sample_weights, num_samples=labels.shape[0], replacement=True
+    )
     dataloader = DataLoader(
         dataset=TensorDataset(observations, actions, next_observations, labels),
         batch_size=batch_size,
-        shuffle=True,
+        sampler=weighted_sampler,
     )
 
     # set logger
@@ -197,19 +206,19 @@ def main(args, cfg_env=None):
             if config.get("use_critic_norm", True):
                 for params in dynamics.parameters():
                     dynamics_loss += params.pow(2).sum() * 0.001
-            pos_weight = (label.shape[0] - label.sum()) / (
-                label.sum() + EP
-            )  # num_neg_samples / num_pos_samples
+            # pos_weight = (label.shape[0] - label.sum()) / (
+            #     label.sum() + EP
+            # )  # num_neg_samples / num_pos_samples
             true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
             critic_loss = nn.functional.binary_cross_entropy_with_logits(
-                true_logits, label, pos_weight=pos_weight
+                true_logits, label
             )
             if config.get("use_critic_norm", True):
                 for params in critic.parameters():
                     critic_loss += params.pow(2).sum() * 0.001
             cyclic_logits = critic(torch.cat([target_obs, pred_next_obs], dim=1))
             cyclic_loss = nn.functional.binary_cross_entropy_with_logits(
-                cyclic_logits, label, pos_weight=pos_weight
+                cyclic_logits, label
             )
             loss = dynamics_loss + critic_loss + cyclic_loss
             loss.backward()
