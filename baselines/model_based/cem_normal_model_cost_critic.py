@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import sys
 import time
 import re
@@ -13,10 +14,12 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
+from torcheval.metrics.functional import binary_confusion_matrix
 
 import safety_gymnasium
 from baselines.utils.models import VCritic, GaussianMLP
 from baselines.utils.logger import EpochLogger
+from baselines.utils.save_video import save_video
 from baselines.model_based.utils import single_agent_args
 
 
@@ -96,7 +99,9 @@ def main(args, cfg_env=None):
     config = default_cfg
 
     # evaluation environment
-    eval_env = safety_gymnasium.make(args.task)
+    eval_env = safety_gymnasium.make(
+        args.task, render_mode="rgb_array", camera_name="track"
+    )
     eval_env.reset(seed=None)
 
     # set model
@@ -242,11 +247,13 @@ def main(args, cfg_env=None):
         training_end_time = time.time()
 
         eval_start_time = time.time()
-        eval_episodes = 1 if epoch < num_epochs - 1 else 1
+        is_last_epoch = epoch >= num_epochs - 1
+        eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
             config["act_high"] = act_space.high
             config["act_low"] = act_space.low
-            for _ in range(eval_episodes):
+            true_cost, pred_cost = [], []
+            for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
                 eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
@@ -260,6 +267,7 @@ def main(args, cfg_env=None):
                     0.0,
                     0.0,
                 )
+                ep_frames = []
                 act = torch.zeros(
                     (config["horizon"], act_space.shape[0]),
                     dtype=torch.float32,
@@ -292,11 +300,33 @@ def main(args, cfg_env=None):
                     eval_horizon_cost += horizon_cost.item()
                     eval_len += 1
                     eval_done = terminated or truncated
+                    if is_last_epoch:
+                        ep_frames.append(eval_env.render())
+                        true_cost.append(cost)
+                        pred_cost.append(critic_cost.item())
+                if is_last_epoch:
+                    save_video(
+                        ep_frames,
+                        prefix_name=f"video_{id}",
+                        video_dir=osp.join(args.log_dir, "video"),
+                    )
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
                 eval_critic_deque.append(eval_critic)
                 eval_horizon_cost_deque.append(eval_horizon_cost)
                 eval_len_deque.append(eval_len)
+            if is_last_epoch:
+                critic_confusion_metrix = binary_confusion_matrix(
+                    input=torch.as_tensor(
+                        pred_cost, dtype=torch.float32, device=device
+                    ),
+                    target=torch.as_tensor(true_cost, dtype=torch.int32, device=device),
+                ).tolist()
+                print(critic_confusion_metrix)
+                logger.save_dict_data(
+                    data={"critic_confusion_metrix": critic_confusion_metrix},
+                    data_file_name="critic_confusion_metrix.json",
+                )
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),

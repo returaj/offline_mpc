@@ -191,6 +191,12 @@ class Logger:
         )
         self.log_current_row[key] = val
 
+    def save_dict_data(self, data, data_file_name):
+        data = convert_json(data)
+        output = json.dumps(data, separators=(",", ":\t"), indent=4, sort_keys=True)
+        with open(osp.join(self.log_dir, data_file_name), "w") as out:
+            out.write(output)
+
     def save_config(self, config):
         """
         Save the experiment configuration as a JSON file.

@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset
+from torcheval.metrics.functional import binary_confusion_matrix
 
 import safety_gymnasium
 from baselines.utils.models import VCritic, MLP
@@ -233,6 +234,7 @@ def main(args, cfg_env=None):
         if args.use_eval:
             config["act_high"] = act_space.high
             config["act_low"] = act_space.low
+            true_cost, pred_cost = [], []
             for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
@@ -282,16 +284,31 @@ def main(args, cfg_env=None):
                     eval_done = terminated or truncated
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
-                save_video(
-                    ep_frames,
-                    prefix_name=f"video_{id}",
-                    video_dir=osp.join(args.log_dir, "video"),
-                )
+                        true_cost.append(cost)
+                        pred_cost.append(critic_cost.item())
+                if is_last_epoch:
+                    save_video(
+                        ep_frames,
+                        prefix_name=f"video_{id}",
+                        video_dir=osp.join(args.log_dir, "video"),
+                    )
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
                 eval_critic_deque.append(eval_critic)
                 eval_horizon_cost_deque.append(eval_horizon_cost)
                 eval_len_deque.append(eval_len)
+            if is_last_epoch:
+                critic_confusion_metrix = binary_confusion_matrix(
+                    input=torch.as_tensor(
+                        pred_cost, dtype=torch.float32, device=device
+                    ),
+                    target=torch.as_tensor(true_cost, dtype=torch.int32, device=device),
+                ).tolist()
+                print(critic_confusion_metrix)
+                logger.save_dict_data(
+                    data={"critic_confusion_metrix": critic_confusion_metrix},
+                    data_file_name="critic_confusion_metrix.json",
+                )
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),
