@@ -46,13 +46,6 @@ def create_arguments():
             "help": "The device id to run the model on",
         },
         {
-            "name": "hidden-sizes",
-            "type": int,
-            "nargs": "+",
-            "default": default_cfg["hidden_sizes"],
-            "help": "hidden layer sizes for NN",
-        },
-        {
             "name": "num-trajectories",
             "type": int,
             "default": default_cfg["num_trajectories"],
@@ -100,7 +93,7 @@ def calculate_critic_confusion_metric(args):
     device = torch.device(f"{args.device}:{args.device_id}")
     critic = load_critic_model(
         obs_dim=2 * obs_space.shape[0],
-        hidden_sizes=args.hidden_sizes,
+        hidden_sizes=default_cfg["hidden_sizes"],
         path=args.model_path,
         device=device,
     )
