@@ -125,7 +125,10 @@ def calculate_critic_confusion_metric(args):
     env.close()
 
     metric = torcheval.metrics.BinaryConfusionMatrix()
-    metric.update(pred_cost, true_cost)
+    metric.update(
+        torch.as_tensor(pred_cost, dtype=torch.float32),
+        torch.as_tensor(true_cost, dtype=torch.int32),
+    )
     cm = metric.compute()
     print(cm)
     return cm
