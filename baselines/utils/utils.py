@@ -105,8 +105,8 @@ def calculate_critic_confusion_metric(args):
         eval_config = {"total_return": 0.0, "total_cost": 0.0, "total_critic": 0.0}
         obs, _ = env.reset(seed=args.seed + id)
         obs = (obs - obs_norm["mu_obs"]) / (obs_norm["std_obs"] + EP)
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
         while not done:
-            obs = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             next_obs, reward, cost, terminated, truncated, _ = env.step(
                 act_space.sample()
             )
