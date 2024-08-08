@@ -46,19 +46,19 @@ def create_arguments():
             "help": "The device id to run the model on",
         },
         {
-            "name": "num-trajectories",
+            "name": "--num-trajectories",
             "type": int,
-            "default": 100,
+            "default": default_cfg["num_trajectories"],
             "help": "num of trajectories",
         },
         {
-            "name": "model-path",
+            "name": "--model-path",
             "type": str,
             "default": "../runs",
             "help": "model path used for loading the model",
         },
         {
-            "name": "state-path",
+            "name": "--state-path",
             "type": str,
             "default": "../run/state.pkl",
             "help": "path of saved environment state",
