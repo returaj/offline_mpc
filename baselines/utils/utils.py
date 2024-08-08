@@ -48,7 +48,7 @@ def create_arguments():
         {
             "name": "num-trajectories",
             "type": int,
-            "default": default_cfg["num_trajectories"],
+            "default": 100,
             "help": "num of trajectories",
         },
         {
