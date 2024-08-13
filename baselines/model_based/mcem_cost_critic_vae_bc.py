@@ -29,8 +29,8 @@ default_cfg = {
     "hidden_sizes": [512, 512],
     "max_grad_norm": 40.0,
     "elite_portion": 0.1,
-    "num_samples": 40,  # 400
-    "horizon": 2,  # 10
+    "num_samples": 400,  # 400
+    "horizon": 10,  # 10
 }
 
 
@@ -241,7 +241,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 1 if is_last_epoch else 1
+        eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
@@ -321,7 +321,7 @@ def main(args, cfg_env=None):
             if args.use_eval:
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular(
-                "Time/Update_dynamics_critic", training_end_time - training_start_time
+                "Time/TrainingUpdate", training_end_time - training_start_time
             )
             logger.log_tabular("Time/Total", eval_end_time - training_start_time)
             logger.dump_tabular()
