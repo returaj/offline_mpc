@@ -23,6 +23,9 @@ import torch.optim
 from torch.distributions import Normal
 
 
+EPS = 1e-7
+
+
 def build_mlp_network(sizes, activation=None):
     """
     Build a multi-layer perceptron (MLP) neural network.
@@ -220,3 +223,104 @@ class GaussianMLP(nn.Module):
         mean = self.mean(x)
         std = torch.exp(self.log_std)
         return mean, std
+
+
+def atanh(x):
+    one_plus_x = (1 + x).clamp(min=EPS)
+    one_minus_x = (1 - x).clamp(min=EPS)
+    return 0.5 * torch.log(one_plus_x / one_minus_x)
+
+
+class TanhActor(nn.Module):
+    def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64]):
+        super().__init__()
+        self.mean = build_mlp_network([obs_dim] + hidden_sizes + [act_dim])
+        self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
+
+    def forward(self, obs: torch.Tensor):
+        mu = self.mean(obs)
+        std = torch.exp(self.log_std)
+        dist = Normal(mu, std)
+        raw_action = dist.rsample()
+        return torch.tanh(raw_action), raw_action
+
+    def log_prob(self, obs, action=None, raw_action=None):
+        mu = self.mean(obs)
+        std = torch.exp(self.log_std)
+        dist = Normal(mu, std)
+        if raw_action is None:
+            raw_action = atanh(action)
+        if action is None:
+            action = torch.tanh(raw_action)
+        log_normal = dist.log_prob(raw_action).sum(-1)
+        log_prob = log_normal - (1.0 - action.pow(2)).clamp(min=EPS).log().sum(-1)
+        return log_prob
+
+
+class BcqVAE(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        latent_dim: int = 750,
+        device: torch.device = torch.device("cpu"),
+    ):
+        super().__init__()
+        self.pre_encoder_layer = nn.Sequential(
+            nn.Linear(obs_dim + act_dim, 750), nn.ReLU(), nn.Linear(750, 750), nn.ReLU()
+        )
+        self.encoder_mean = nn.Linear(750, latent_dim)
+        self.encoder_log_std = nn.Linear(750, latent_dim)
+
+        self.pre_decoder_layer = nn.Sequential(
+            nn.Linear(obs_dim + latent_dim, 750),
+            nn.ReLU(),
+            nn.Linear(750, 750),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Linear(750, act_dim)
+
+        self.latent_dim = latent_dim
+        self.device = device
+
+    def forward(self, obs: torch.Tensor, act: torch.Tensor):
+        z = self.pre_encoder_layer(torch.cat([obs, act], dim=1))
+        mean = self.encoder_mean(z)
+        # clamped for numerical stability
+        # see BEAR algo implementation by @aviralkumar
+        log_std = self.encoder_log_std(z).clamp(-4, 15)
+        std = torch.exp(log_std)
+        z = Normal(mean, std).rsample()
+
+        u = self.decode(obs, z)
+        return u, mean, std
+
+    def decode(self, obs, z):
+        action = self.pre_decoder_layer(torch.cat([obs, z], dim=1))
+        return torch.tanh(self.decoder(action))
+
+    def decode_bc(self, obs, z=None):
+        if z is None:
+            z = torch.normal(
+                0,
+                1,
+                size=(obs.size(0), self.latent_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
+        return self.decode(obs, z)
+
+    def decode_bc_multiple(self, obs, z=None, num_decodes=10):
+        if z is None:
+            z = torch.normal(
+                0,
+                1,
+                size=(obs.size(0) * num_decodes, self.latent_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
+        # repeats obs and form a size of Batch X NumDecodes X obs_dim
+        repeat_obs = obs.unsqueeze(1).repeat(1, num_decodes, 1).view(-1, obs.size(1))
+        action = self.decode(repeat_obs, z)
+        batch_action = action.view(obs.size(0), num_decodes, -1)
+        return batch_action
