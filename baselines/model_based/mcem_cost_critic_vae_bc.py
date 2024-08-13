@@ -29,17 +29,17 @@ default_cfg = {
     "hidden_sizes": [512, 512],
     "max_grad_norm": 40.0,
     "elite_portion": 0.1,
-    "num_samples": 400,  # 400
-    "horizon": 10,  # 10
+    "num_samples": 40,  # 400
+    "horizon": 2,  # 10
 }
 
 
-def mcem_policy(dynamics, critic, policy, obs, config):
+def mcem_policy(dynamics, critic, policy, obs, config, device):
     horizon = config["horizon"]
     num_samples = config["num_samples"]
     num_elite = int(config["elite_portion"] * num_samples)
     samples = []
-    costs = torch.zeros(num_samples)
+    costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
     all_obs = obs.repeat(num_samples, 1)
     with torch.no_grad():
         for _ in range(horizon):
@@ -241,7 +241,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 5 if is_last_epoch else 1
+        eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
@@ -265,6 +265,7 @@ def main(args, cfg_env=None):
                         policy=bc_vae_policy,
                         obs=eval_obs,
                         config=config,
+                        device=device,
                     )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
