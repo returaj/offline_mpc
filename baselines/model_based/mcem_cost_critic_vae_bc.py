@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from torcheval.metrics.functional import binary_confusion_matrix
 
 import safety_gymnasium
-from baselines.utils.models import Actor, VCritic, MLP
+from baselines.utils.models import MorelDynamics, BcqVAE, VCritic
 from baselines.utils.logger import EpochLogger
 from baselines.utils.save_video import save_video
 from baselines.model_based.utils import single_agent_args
@@ -28,65 +28,30 @@ EP = 1e-6
 default_cfg = {
     "hidden_sizes": [512, 512],
     "max_grad_norm": 40.0,
-    "sampling_smoothing": 0.0,
-    "evolution_smoothing": 0.1,
     "elite_portion": 0.1,
-    "max_iter": 10,  # 10
     "num_samples": 400,  # 400
     "horizon": 10,  # 10
 }
 
 
-def get_initial_action(dynamics, bc_policy, init_state, horizon):
-    actions = []
-    state = init_state
+def mcem_policy(dynamics, critic, policy, obs, config):
+    horizon = config["horizon"]
+    num_samples = config["num_samples"]
+    num_elite = int(config["elite_portion"] * num_samples)
+    samples = []
+    costs = torch.zeros(num_samples)
+    all_obs = obs.repeat(num_samples, 1)
     with torch.no_grad():
         for _ in range(horizon):
-            act = bc_policy(state).mean
-            actions.append(act)
-            state = state + dynamics(torch.cat([state, act], dim=1))
-    return torch.cat(actions, dim=0)
-
-
-def get_horizon_cost(dynamics, critic, init_state, controls):
-    next_states = []
-    state = init_state
-    controls = controls.unsqueeze(1)
-    with torch.no_grad():
-        for act in controls:
-            state = state + dynamics(torch.cat([state, act], dim=1))
-            next_states.append(state)
-        next_states = torch.cat(next_states, dim=0)
-        states = torch.cat([init_state, next_states[:-1]], dim=0)
-        state_next_state = torch.cat([states, next_states], dim=1)
-        costs = torch.vmap(critic, in_dims=0)(state_next_state)
-    return torch.sum(nn.functional.sigmoid(costs))
-
-
-def cem_policy(dynamics, critic, eval_obs, act, config, device):
-    mean = act
-    # act_high, act_low = config["act_high"], config["act_low"]
-    act_high = torch.as_tensor(config["act_high"], dtype=torch.float32, device=device)
-    act_low = torch.as_tensor(config["act_low"], dtype=torch.float32, device=device)
-    std = (act_high - act_low) / 2.0
-    std = std.repeat(act.shape[0], 1).to(dtype=torch.float32)
-
-    num_elits = int(config["num_samples"] * config["elite_portion"])
-    smoothing = config["evolution_smoothing"]
-    cost_fn = partial(get_horizon_cost, dynamics, critic, eval_obs)
-    for _ in range(config["max_iter"]):
-        gaussian_dist = torch.distributions.Normal(mean, std)
-        samples = gaussian_dist.sample((config["num_samples"],))
-        samples = torch.clip(samples, act_low, act_high)
-        costs = torch.vmap(cost_fn, in_dims=0)(samples)
-        best_control_idx = torch.argsort(costs)[:num_elits]
-        elite_controls = samples[best_control_idx]
-        new_mean = torch.mean(elite_controls, dim=0)
-        new_std = torch.std(elite_controls, dim=0)
-        mean = smoothing * mean + (1 - smoothing) * new_mean
-        std = smoothing * std + (1 - smoothing) * new_std
-    horizon_cost = cost_fn(mean)
-    return mean, horizon_cost
+            all_act = policy.decode_bc(all_obs)
+            all_obs = dynamics(all_obs, all_act)
+            costs += nn.functional.sigmoid(critic(all_obs))
+            samples.append(all_act.unsqueeze(1))
+    samples = torch.cat(samples, dim=1)
+    best_control_idx = torch.argsort(costs)[:num_elite]
+    elite_controls = samples[best_control_idx]
+    elite_costs = costs[best_control_idx]
+    return elite_controls.mean(dim=0), elite_costs.mean()
 
 
 def main(args, cfg_env=None):
@@ -107,20 +72,24 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    bc_policy = Actor(
+    # See BEAR implementation from @aviralkumar
+    latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
+    config["latent_dim"] = latent_dim
+    bc_vae_policy = BcqVAE(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
-        hidden_sizes=config["hidden_sizes"],
+        latent_dim=latent_dim,
+        device=device,
     ).to(device)
-    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=3e-4)
+    bc_vae_policy_optimizer = torch.optim.Adam(bc_vae_policy.parameters(), lr=3e-4)
     critic = VCritic(
-        obs_dim=2 * obs_space.shape[0],
+        obs_dim=obs_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=3e-4)
-    dynamics = MLP(
-        in_dim=obs_space.shape[0] + act_space.shape[0],
-        out_dim=obs_space.shape[0],
+    dynamics = MorelDynamics(
+        obs_dim=obs_space.shape[0],
+        act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     dynamics_optimizer = torch.optim.Adam(dynamics.parameters(), lr=3e-4)
@@ -195,6 +164,10 @@ def main(args, cfg_env=None):
         sampler=weighted_sampler,
     )
 
+    # set state diff standard deviation
+    state_diff_std = (next_observations - observations).std(dim=0)
+    dynamics.set_state_diff_std(state_diff_std)
+
     # set logger
     eval_rew_deque = deque(maxlen=5)
     eval_cost_deque = deque(maxlen=5)
@@ -208,56 +181,59 @@ def main(args, cfg_env=None):
         seed=str(args.seed),
     )
     logger.save_config(dict_args)
-    logger.log("Start with critic and dynamics training.")
+    logger.log("Start with bc_policy, dynamics and critic training.")
 
     # train critic and dynamics model
     for epoch in range(num_epochs):
         training_start_time = time.time()
-        for target_obs, target_act, target_next_obs, label in dataloader:
-            bc_policy_optimizer.zero_grad()
-            dynamics_optimizer.zero_grad()
-            critic_optimizer.zero_grad()
-            pred_act = bc_policy(target_obs).rsample()
-            bc_policy_loss = nn.functional.mse_loss(target_act, pred_act)
-            if config.get("use_critic_norm", True):
-                for params in bc_policy.parameters():
-                    bc_policy_loss += params.pow(2).sum() * 0.001
-            pred_next_obs = target_obs + dynamics(
-                torch.cat([target_obs, target_act], dim=1)
+        for target_obs, target_act, target_next_obs, target_label in dataloader:
+            pred_act, bc_mean, bc_std = bc_vae_policy(target_obs, target_act)
+            bc_policy_recon_loss = nn.functional.mse_loss(target_act, pred_act)
+            bc_policy_kl_loss = (
+                -0.5
+                * (1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)).mean()
             )
+            # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+            bc_policy_loss = bc_policy_recon_loss + 0.5 * bc_policy_kl_loss
+            bc_vae_policy_optimizer.zero_grad()
+            bc_policy_loss.backward()
+            clip_grad_norm_(bc_vae_policy.parameters(), config["max_grad_norm"])
+            bc_vae_policy_optimizer.step()
+
+            pred_next_obs = dynamics(target_obs, target_act)
             dynamics_loss = nn.functional.mse_loss(target_next_obs, pred_next_obs)
             if config.get("use_critic_norm", True):
                 for params in dynamics.parameters():
                     dynamics_loss += params.pow(2).sum() * 0.001
-            # pos_weight = (label.shape[0] - label.sum()) / (
-            #     label.sum() + EP
-            # )  # num_neg_samples / num_pos_samples
-            true_logits = critic(torch.cat([target_obs, target_next_obs], dim=1))
+            dynamics_optimizer.zero_grad()
+            dynamics_loss.backward()
+            clip_grad_norm_(dynamics.parameters(), config["max_grad_norm"])
+            dynamics_optimizer.step()
+
+            true_logits = critic(target_next_obs)
             critic_loss = nn.functional.binary_cross_entropy_with_logits(
-                true_logits, label
+                true_logits, target_label
             )
             if config.get("use_critic_norm", True):
                 for params in critic.parameters():
                     critic_loss += params.pow(2).sum() * 0.001
-            cyclic_logits = critic(torch.cat([target_obs, pred_next_obs], dim=1))
+            with torch.no_grad():
+                pred_next_obs = dynamics(target_obs, target_act)
+            cyclic_logits = critic(pred_next_obs)
             cyclic_loss = nn.functional.binary_cross_entropy_with_logits(
-                cyclic_logits, label
+                cyclic_logits, target_label
             )
-            loss = bc_policy_loss + dynamics_loss + critic_loss + cyclic_loss
-            loss.backward()
-            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            critic_loss = critic_loss + cyclic_loss
+            critic_optimizer.zero_grad()
+            critic_loss.backward()
             clip_grad_norm_(critic.parameters(), config["max_grad_norm"])
-            clip_grad_norm_(dynamics.parameters(), config["max_grad_norm"])
-            bc_policy_optimizer.step()
             critic_optimizer.step()
-            dynamics_optimizer.step()
+
             logger.store(
                 **{
-                    "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
-                    "Loss/Loss_dynamics": dynamics_loss.mean().item(),
-                    "Loss/Loss_critic": critic_loss.mean().item(),
-                    "Loss/Loss_cyclic": cyclic_loss.mean().item(),
-                    "Loss/Loss_dynamics_critic": loss.mean().item(),
+                    "Loss/Loss_bc_policy": bc_policy_loss.item(),
+                    "Loss/Loss_dynamics": dynamics_loss.item(),
+                    "Loss/Loss_critic": critic_loss.item(),
                 }
             )
             logger.logged = False
@@ -267,9 +243,6 @@ def main(args, cfg_env=None):
         is_last_epoch = epoch >= num_epochs - 1
         eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
-            config["act_high"] = act_space.high
-            config["act_low"] = act_space.low
-            true_cost, pred_cost = [], []
             for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
@@ -286,19 +259,12 @@ def main(args, cfg_env=None):
                 )
                 ep_frames = []
                 while not eval_done:
-                    init_act = get_initial_action(
-                        dynamics=dynamics,
-                        bc_policy=bc_policy,
-                        init_state=eval_obs,
-                        horizon=config["horizon"],
-                    )
-                    act, horizon_cost = cem_policy(
+                    act, horizon_cost = mcem_policy(
                         dynamics=dynamics,
                         critic=critic,
-                        eval_obs=eval_obs,
-                        act=init_act,
+                        policy=bc_vae_policy,
+                        obs=eval_obs,
                         config=config,
-                        device=device,
                     )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
@@ -308,9 +274,7 @@ def main(args, cfg_env=None):
                         next_obs, dtype=torch.float32, device=device
                     ).unsqueeze(0)
                     with torch.no_grad():
-                        critic_cost = nn.functional.sigmoid(
-                            critic(torch.cat([eval_obs, next_obs], dim=1))
-                        )
+                        critic_cost = nn.functional.sigmoid(critic(next_obs))
                     eval_obs = next_obs
                     eval_reward += reward
                     eval_cost += cost
@@ -320,8 +284,6 @@ def main(args, cfg_env=None):
                     eval_done = terminated or truncated
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
-                        true_cost.append(cost)
-                        pred_cost.append(critic_cost.item())
                 if is_last_epoch:
                     save_video(
                         ep_frames,
@@ -333,18 +295,6 @@ def main(args, cfg_env=None):
                 eval_critic_deque.append(eval_critic)
                 eval_horizon_cost_deque.append(eval_horizon_cost)
                 eval_len_deque.append(eval_len)
-            if is_last_epoch:
-                critic_confusion_metrix = binary_confusion_matrix(
-                    input=torch.as_tensor(
-                        pred_cost, dtype=torch.float32, device=device
-                    ),
-                    target=torch.as_tensor(true_cost, dtype=torch.int32, device=device),
-                ).tolist()
-                print(critic_confusion_metrix)
-                logger.save_dict_data(
-                    data={"critic_confusion_metrix": critic_confusion_metrix},
-                    data_file_name="critic_confusion_metrix.json",
-                )
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),
@@ -367,8 +317,6 @@ def main(args, cfg_env=None):
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_critic")
-            logger.log_tabular("Loss/Loss_cyclic")
-            logger.log_tabular("Loss/Loss_dynamics_critic")
             if args.use_eval:
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular(
@@ -378,10 +326,12 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if (epoch + 1) % 20 == 0 or epoch == 0:
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy"
+                    itr=epoch,
+                    torch_saver_elements=bc_vae_policy,
+                    prefix="bc_vae_policy",
                 )
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=dynamics, prefix="dynamics"
+                    itr=epoch, torch_saver_elements=dynamics, prefix="morel_dynamics"
                 )
                 logger.torch_save(
                     itr=epoch, torch_saver_elements=critic, prefix="critic"
@@ -393,8 +343,10 @@ def main(args, cfg_env=None):
                     },
                     itr=epoch,
                 )
-    logger.torch_save(itr=epoch, torch_saver_elements=bc_policy, prefix="bc_policy")
-    logger.torch_save(itr=epoch, torch_saver_elements=dynamics, prefix="dynamics")
+    logger.torch_save(
+        itr=epoch, torch_saver_elements=bc_vae_policy, prefix="bc_vae_policy"
+    )
+    logger.torch_save(itr=epoch, torch_saver_elements=dynamics, prefix="morel_dynamics")
     logger.torch_save(itr=epoch, torch_saver_elements=critic, prefix="critic")
     logger.save_state(
         state_dict={

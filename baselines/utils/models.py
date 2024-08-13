@@ -242,7 +242,7 @@ class TanhActor(nn.Module):
         std = torch.exp(self.log_std)
         dist = Normal(mu, std)
         raw_action = dist.rsample()
-        return torch.tanh(raw_action), raw_action
+        return torch.tanh(raw_action), mu, raw_action
 
     def log_prob(self, obs, action=None, raw_action=None):
         mu = self.mean(obs)
@@ -324,3 +324,60 @@ class BcqVAE(nn.Module):
         action = self.decode(repeat_obs, z)
         batch_action = action.view(obs.size(0), num_decodes, -1)
         return batch_action
+
+
+class MorelDynamics(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        hidden_sizes: list = [64, 64],
+        state_diff_std: float = 0.01,
+    ):
+        super().__init__()
+        self.model = MLP(obs_dim + act_dim, obs_dim, hidden_sizes)
+        self._state_diff_std = state_diff_std
+
+    def set_state_diff_std(self, state_diff_std):
+        self._state_diff_std = state_diff_std
+
+    def forward(self, obs, act):
+        next_obs = obs + self._state_diff_std * self.model(torch.cat([obs, act], dim=1))
+        return next_obs
+
+
+class EnsembleDynamics(nn.Module):
+    def __init__(
+        self,
+        num_ds: int,
+        obs_dim: int,
+        act_dim: int,
+        hidden_sizes: list = [64, 64],
+        state_diff_std: float = 0.01,
+    ):
+        self.models = [
+            MorelDynamics(obs_dim, act_dim, hidden_sizes, state_diff_std)
+            for _ in range(num_ds)
+        ]
+
+    def set_state_diff_std(self, state_diff_std):
+        for m in self.models:
+            m.set_state_diff_std(state_diff_std)
+
+    def forward(self, obs, act, with_var=False):
+        all_next_obs = [m(obs, act) for m in self.models]
+        all_next_obs = torch.cat([no.unsqueeze(0) for no in all_next_obs], dim=0)
+        if with_var:
+            assert (
+                len(self.models) > 1
+            ), "There is only one model and std needs atleast two models to be defined."
+            std = torch.std(all_next_obs, dim=0, unbiased=False)
+            return all_next_obs, std
+        return all_next_obs
+
+    def m1(self, obs, act):
+        m1 = self.models[0]
+        return m1(obs, act)
+
+    def m_all(self, obs, act, with_var=False):
+        return self.forward(obs, act, with_var)
