@@ -421,9 +421,9 @@ def main(args, cfg_env=None):
                     eval_done = terminated or truncated
                     logger.store(
                         **{
-                            "Metrics/EvalHorizonCostMean": hcost_mu,
-                            "Metrics/EvalHorizonCostMin": hcost_min,
-                            "Metrics/EvalHorizonCostMax": hcost_max,
+                            "Metrics/EvalHorizonCostMean": hcost_mu.item(),
+                            "Metrics/EvalHorizonCostMin": hcost_min.item(),
+                            "Metrics/EvalHorizonCostMax": hcost_max.item(),
                         }
                     )
                     if is_last_epoch:
