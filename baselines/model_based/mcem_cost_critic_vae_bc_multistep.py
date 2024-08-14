@@ -5,7 +5,6 @@ import time
 import re
 from collections import deque
 
-from functools import partial
 import random
 import numpy as np
 import h5py
@@ -28,7 +27,7 @@ EP = 1e-6
 default_cfg = {
     "hidden_sizes": [512, 512],
     "max_grad_norm": 40.0,
-    "elite_portion": 0.1,
+    "elite_portion": 0.01,  # 0.01
     "num_samples": 400,  # 400
     "horizon": 10,  # 10
 }
@@ -132,7 +131,12 @@ def mcem_policy(dynamics, critic, policy, obs, config, device):
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
     elite_costs = costs[best_control_idx]
-    return elite_controls.mean(dim=0), elite_costs.mean()
+    return (
+        elite_controls.mean(dim=0),
+        elite_costs.mean(),
+        elite_costs.min(),
+        elite_costs.max(),
+    )
 
 
 def main(args, cfg_env=None):
@@ -255,7 +259,6 @@ def main(args, cfg_env=None):
     eval_rew_deque = deque(maxlen=5)
     eval_cost_deque = deque(maxlen=5)
     eval_critic_deque = deque(maxlen=5)
-    eval_horizon_cost_deque = deque(maxlen=5)
     eval_len_deque = deque(maxlen=5)
     dict_args = vars(args)
     dict_args.update(config)
@@ -326,8 +329,7 @@ def main(args, cfg_env=None):
                 eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
                 ).unsqueeze(0)
-                eval_reward, eval_cost, eval_critic, eval_horizon_cost, eval_len = (
-                    0.0,
+                eval_reward, eval_cost, eval_critic, eval_len = (
                     0.0,
                     0.0,
                     0.0,
@@ -335,7 +337,7 @@ def main(args, cfg_env=None):
                 )
                 ep_frames = []
                 while not eval_done:
-                    act, horizon_cost = mcem_policy(
+                    act, hcost_mu, hcost_min, hcost_max = mcem_policy(
                         dynamics=dynamics,
                         critic=critic,
                         policy=bc_vae_policy,
@@ -356,9 +358,15 @@ def main(args, cfg_env=None):
                     eval_reward += reward
                     eval_cost += cost
                     eval_critic += critic_cost.item()
-                    eval_horizon_cost += horizon_cost.item()
                     eval_len += 1
                     eval_done = terminated or truncated
+                    logger.store(
+                        **{
+                            "Metrics/EvalHorizonCostMean": hcost_mu,
+                            "Metrics/EvalHorizonCostMin": hcost_min,
+                            "Metrics/EvalHorizonCostMax": hcost_max,
+                        }
+                    )
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
                 if is_last_epoch:
@@ -370,14 +378,12 @@ def main(args, cfg_env=None):
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
                 eval_critic_deque.append(eval_critic)
-                eval_horizon_cost_deque.append(eval_horizon_cost)
                 eval_len_deque.append(eval_len)
             logger.store(
                 **{
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),
                     "Metrics/EvalEpCost": np.mean(eval_cost_deque),
                     "Metrics/EvalCriticCost": np.mean(eval_critic_deque),
-                    "Metrics/EvalHorizonCost": np.mean(eval_horizon_cost_deque),
                     "Metrics/EvalEpLen": np.mean(eval_len_deque),
                 }
             )
@@ -388,8 +394,16 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalCriticCost")
-                logger.log_tabular("Metrics/EvalHorizonCost")
                 logger.log_tabular("Metrics/EvalEpLen")
+                logger.log_tabular(
+                    "Metrics/EvalHorizonCostMean", min_and_max=True, std=True
+                )
+                logger.log_tabular(
+                    "Metrics/EvalHorizonCostMin", min_and_max=True, std=True
+                )
+                logger.log_tabular(
+                    "Metrics/EvalHorizonCostMax", min_and_max=True, std=True
+                )
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
