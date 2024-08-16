@@ -555,6 +555,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_critic")
             logger.log_tabular("Loss/Loss_value_cost")
+            logger.log_tabular("Loss/Loss_total")
             if args.use_eval:
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular(
