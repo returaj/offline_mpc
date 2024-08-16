@@ -355,6 +355,7 @@ class EnsembleDynamics(nn.Module):
         hidden_sizes: list = [64, 64],
         state_diff_std: float = 0.01,
     ):
+        super().__init__()
         self.models = [
             MorelDynamics(obs_dim, act_dim, hidden_sizes, state_diff_std)
             for _ in range(num_ds)
@@ -381,3 +382,13 @@ class EnsembleDynamics(nn.Module):
 
     def m_all(self, obs, act, with_var=False):
         return self.forward(obs, act, with_var)
+
+
+class EnsembleValue(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        self._V1 = VCritic(obs_dim=obs_dim, hidden_sizes=hidden_sizes)
+        self._V2 = VCritic(obs_dim=obs_dim, hidden_sizes=hidden_sizes)
+
+    def V(self, obs):
+        return self._V1(obs), self._V2(obs)

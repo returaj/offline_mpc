@@ -3,6 +3,7 @@ import os.path as osp
 import sys
 import time
 import re
+from copy import deepcopy
 from collections import deque
 
 from functools import partial
@@ -17,7 +18,7 @@ from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from torcheval.metrics.functional import binary_confusion_matrix
 
 import safety_gymnasium
-from baselines.utils.models import MorelDynamics, BcqVAE, VCritic
+from baselines.utils.models import MorelDynamics, BcqVAE, VCritic, EnsembleValue
 from baselines.utils.logger import EpochLogger
 from baselines.utils.save_video import save_video
 from baselines.model_based.utils import single_agent_args
@@ -30,10 +31,23 @@ default_cfg = {
     "max_grad_norm": 40.0,
     "gamma": 0.99,
     "lambda_c": 0.95,
-    "elite_portion": 0.01,  # 0.01
-    "num_samples": 400,  # 400
-    "horizon": 10,  # 10
+    "update_freq": 1,
+    "update_tau": 0.005,
+    "elite_portion": 0.1,  # 0.01
+    "num_samples": 20,  # 400
+    "inference_horizon": 1,  # 10
+    "train_horizon": 2,
 }
+
+
+def ema(m, m_target, tau):
+    """Update slow-moving average of online network (target network) at rate tau."""
+    # implementation from td-mpc
+    # target_params = (1-tau) * target_params + tau * params
+    # tau is generally a small number.
+    with torch.no_grad():
+        for p, p_target in zip(m.parameters(), m_target.parameters()):
+            p_target.data.lerp_(p.data, tau)
 
 
 def bc_policy_loss_fn(bc_policy, target_obs, target_act):
@@ -111,7 +125,8 @@ def critic_loss_fn(
 def calculate_target_value(config, value, obs, next_obs, label):
     gamma, lambda_c = config["gamma"], config["lambda_c"]
     with torch.no_grad():
-        value_obs, value_next_obs = value(obs), value(next_obs)
+        value_obs = torch.min(*value.V(obs))
+        value_next_obs = torch.min(*value.V(next_obs))
     # GAE formula: A_t = \sum_{k=0}^{n-1} (lam*gamma)^k delta_{t+k}
     adavantage_c = label + gamma * value_next_obs - value_obs
     length = adavantage_c.shape[0]
@@ -124,6 +139,7 @@ def calculate_target_value(config, value, obs, next_obs, label):
 
 def value_cost_loss_fn(
     value,
+    value_target,
     dynamics,
     target_obs,
     target_act,
@@ -132,29 +148,30 @@ def value_cost_loss_fn(
     config,
     self_force=False,
 ):
-    target_value_fn = partial(calculate_target_value, config, value)
+    target_value_fn = partial(calculate_target_value, config, value_target)
     true_target_value = torch.vmap(target_value_fn, in_dims=(0, 0, 0))(
         target_obs, target_next_obs, target_label
     )
-    true_pred_value = torch.vmap(value, in_dims=(0,))(target_obs)
-    recon_loss = nn.functional.mse_loss(true_pred_value, true_target_value)
-    return recon_loss
+    true_pred_v1, true_pred_v2 = torch.vmap(value.V, in_dims=(0,))(target_obs)
+    recon_loss1 = nn.functional.mse_loss(true_pred_v1, true_target_value)
+    recon_loss2 = nn.functional.mse_loss(true_pred_v2, true_target_value)
+    return recon_loss1 + recon_loss2
 
 
 def mcem_policy(dynamics, critic, policy, value, obs, config, device):
-    horizon = config["horizon"]
+    horizon = config["inference_horizon"]
     num_samples = config["num_samples"]
     num_elite = int(config["elite_portion"] * num_samples)
     samples = []
     costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
     all_obs = obs.repeat(num_samples, 1)
     with torch.no_grad():
-        for _ in range(horizon - 1):
+        for _ in range(horizon):
             all_act = policy.decode_bc(all_obs)
             all_obs = dynamics(all_obs, all_act)
             costs += nn.functional.sigmoid(critic(all_obs))
             samples.append(all_act.unsqueeze(1))
-        costs += value(all_obs)
+        costs += torch.min(*value.V(all_obs))
     samples = torch.cat(samples, dim=1)
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
@@ -214,11 +231,13 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
+    dynamics_target = deepcopy(dynamics)
     dynamics_optimizer = torch.optim.Adam(dynamics.parameters(), lr=3e-4)
-    value_cost = VCritic(
+    value_cost = EnsembleValue(
         obs_dim=obs_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
+    value_cost_target = deepcopy(value_cost)
     value_cost_optimizer = torch.optim.Adam(value_cost.parameters(), lr=3e-4)
 
     # set training steps
@@ -234,16 +253,16 @@ def main(args, cfg_env=None):
         filepath = os.path.join(args.data_path, file)
         with h5py.File(filepath, "r") as d:
             observations = sample_data_in_sequence(
-                np.array(d["obs"]).squeeze(), timestep=config["horizon"]
+                np.array(d["obs"]).squeeze(), timestep=config["train_horizon"]
             )
             actions = sample_data_in_sequence(
-                np.array(d["act"]).squeeze(), timestep=config["horizon"]
+                np.array(d["act"]).squeeze(), timestep=config["train_horizon"]
             )
             next_observations = sample_data_in_sequence(
-                np.array(d["next_obs"]).squeeze(), timestep=config["horizon"]
+                np.array(d["next_obs"]).squeeze(), timestep=config["train_horizon"]
             )
             costs = sample_data_in_sequence(
-                np.array(d["cost"]).squeeze(), timestep=config["horizon"]
+                np.array(d["cost"]).squeeze(), timestep=config["train_horizon"]
             )
             avg_reward = np.mean(np.sum(d["reward"], axis=1))
             avg_cost = np.mean(np.sum(d["cost"], axis=1))
@@ -296,6 +315,7 @@ def main(args, cfg_env=None):
     # set state diff standard deviation
     state_diff_std = (next_observations - observations).std(dim=(0, 1))
     dynamics.set_state_diff_std(state_diff_std)
+    dynamics_target.set_state_diff_std(state_diff_std)
 
     # set logger
     eval_rew_deque = deque(maxlen=5)
@@ -312,8 +332,10 @@ def main(args, cfg_env=None):
     logger.log("Start with bc_policy, dynamics and critic training.")
 
     # train critic and dynamics model
+    step = 0
     for epoch in range(num_epochs):
         training_start_time = time.time()
+        step += 1
         for target_obs, target_act, target_next_obs, target_label in dataloader:
             bc_policy_loss = bc_policy_loss_fn(bc_vae_policy, target_obs, target_act)
             bc_vae_policy_optimizer.zero_grad()
@@ -321,7 +343,7 @@ def main(args, cfg_env=None):
             clip_grad_norm_(bc_vae_policy.parameters(), config["max_grad_norm"])
             bc_vae_policy_optimizer.step()
 
-            self_force = True if epoch > 10 else False
+            self_force = True if epoch > 5 else False
             dynamics_loss = dynamics_loss_fn(
                 dynamics=dynamics,
                 target_obs=target_obs,
@@ -337,7 +359,7 @@ def main(args, cfg_env=None):
 
             critic_loss = critic_loss_fn(
                 critic=critic,
-                dynamics=dynamics,
+                dynamics=dynamics_target,
                 target_obs=target_obs,
                 target_act=target_act,
                 target_next_obs=target_next_obs,
@@ -352,7 +374,8 @@ def main(args, cfg_env=None):
 
             value_cost_loss = value_cost_loss_fn(
                 value=value_cost,
-                dynamics=dynamics,
+                value_target=value_cost_target,
+                dynamics=dynamics_target,
                 target_obs=target_obs,
                 target_act=target_act,
                 target_next_obs=target_next_obs,
@@ -364,6 +387,10 @@ def main(args, cfg_env=None):
             value_cost_loss.backward()
             clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
             value_cost_optimizer.step()
+
+            if (step % config["update_freq"]) == 0:
+                ema(dynamics, dynamics_target, config["update_tau"])
+                ema(value_cost, value_cost_target, config["update_tau"])
 
             logger.store(
                 **{
@@ -378,7 +405,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 5 if is_last_epoch else 1
+        eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
@@ -424,6 +451,9 @@ def main(args, cfg_env=None):
                             "Metrics/EvalHorizonCostMean": hcost_mu.item(),
                             "Metrics/EvalHorizonCostMin": hcost_min.item(),
                             "Metrics/EvalHorizonCostMax": hcost_max.item(),
+                            "Metrics/EvalHorizonCostGap": (
+                                hcost_max - hcost_min
+                            ).item(),
                         }
                     )
                     if is_last_epoch:
@@ -462,6 +492,9 @@ def main(args, cfg_env=None):
                 )
                 logger.log_tabular(
                     "Metrics/EvalHorizonCostMax", min_and_max=True, std=True
+                )
+                logger.log_tabular(
+                    "Metrics/EvalHorizonCostGap", min_and_max=True, std=True
                 )
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Loss/Loss_bc_policy")
