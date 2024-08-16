@@ -13,6 +13,7 @@ import h5py
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from torcheval.metrics.functional import binary_confusion_matrix
@@ -28,15 +29,20 @@ EP = 1e-6
 
 default_cfg = {
     "hidden_sizes": [512, 512],
-    "max_grad_norm": 40.0,
+    "max_grad_norm": 10.0,
     "gamma": 0.99,
     "lambda_c": 0.95,
     "update_freq": 1,
     "update_tau": 0.005,
+    "dynamics_coef": 2.0,  # TDMPC update coef
+    "cost_coef": 0.5,  # TDMPC update coef
+    "value_coef": 0.1,  # TDMPC update coef
+    "use_dynamics_norm": False,
+    "use_critic_norm": False,
     "elite_portion": 0.01,  # 0.01
     "num_samples": 400,  # 400
-    "inference_horizon": 5,  # 10
-    "train_horizon": 10,
+    "inference_horizon": 5,  # 5
+    "train_horizon": 5,  # 5
 }
 
 
@@ -56,7 +62,7 @@ def bc_policy_loss_fn(bc_policy, target_obs, target_act):
     reshaped_pred_act, bc_mean, bc_std = bc_policy(
         reshaped_target_obs, reshaped_target_act
     )
-    recon_loss = nn.functional.mse_loss(reshaped_pred_act, reshaped_target_act)
+    recon_loss = F.mse_loss(reshaped_pred_act, reshaped_target_act)
     kl_loss = (
         -0.5
         * (1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)).sum(-1).mean()
@@ -66,24 +72,27 @@ def bc_policy_loss_fn(bc_policy, target_obs, target_act):
 
 
 def dynamics_loss_fn(
-    dynamics, target_obs, target_act, target_next_obs, config, self_force=False
+    dynamics, target_obs, target_act, target_next_obs, config, self_force=True
 ):
     target_obs = target_obs.permute(1, 0, 2)
     target_act = target_act.permute(1, 0, 2)
     target_next_obs = target_next_obs.permute(1, 0, 2)
+    gamma, horizon = config["gamma"], config["train_horizon"]
     dynamics_loss = 0.0
-    for to, ta, tno in zip(target_obs, target_act, target_next_obs):
-        pred_no = dynamics(to, ta)
-        dynamics_loss += nn.functional.mse_loss(pred_no, tno)
-
     if self_force:
         pred_to = target_obs[0]
-        for ta, tno in zip(target_act, target_next_obs):
+        for t in range(horizon):
+            ta, tno = target_act[t], target_next_obs[t]
             pred_no = dynamics(pred_to, ta)
-            dynamics_loss += nn.functional.mse_loss(pred_no, tno)
+            dynamics_loss += (gamma**t) * F.mse_loss(pred_no, tno)
             pred_to = pred_no
+    else:
+        for t in range(horizon):
+            to, ta, tno = target_obs[t], target_act[t], target_next_obs[t]
+            pred_no = dynamics(to, ta)
+            dynamics_loss += (gamma**t) * F.mse_loss(pred_no, tno)
 
-    if config.get("use_dynamics_norm", True):
+    if config.get("use_dynamics_norm", False):
         for params in dynamics.parameters():
             dynamics_loss += params.pow(2).sum() * 0.001
     return dynamics_loss
@@ -97,26 +106,27 @@ def critic_loss_fn(
     target_next_obs,
     target_label,
     config,
-    self_force=False,
+    self_force=True,
 ):
     target_obs = target_obs.permute(1, 0, 2)
     target_act = target_act.permute(1, 0, 2)
     target_next_obs = target_next_obs.permute(1, 0, 2)
     target_label = target_label.permute(1, 0)
+    gamma, horizon = config["gamma"], config["train_horizon"]
     critic_loss = 0.0
-    for tno, tl in zip(target_next_obs, target_label):
-        critic_loss += nn.functional.binary_cross_entropy_with_logits(critic(tno), tl)
-
     if self_force:
         pred_to = target_obs[0]
-        for ta, tl in zip(target_act, target_label):
-            with torch.no_grad():
-                pred_no = dynamics(pred_to, ta)
+        for t in range(horizon):
+            ta, tl = target_act[t], target_label[t]
+            pred_no = dynamics(pred_to, ta)
             logits = critic(pred_no)
-            critic_loss += nn.functional.binary_cross_entropy_with_logits(logits, tl)
+            critic_loss += (gamma**t) * F.binary_cross_entropy_with_logits(logits, tl)
             pred_to = pred_no
+    else:
+        for tno, tl in zip(target_next_obs, target_label):
+            critic_loss += F.binary_cross_entropy_with_logits(critic(tno), tl)
 
-    if config.get("use_critic_norm", True):
+    if config.get("use_critic_norm", False):
         for params in critic.parameters():
             critic_loss += params.pow(2).sum() * 0.001
     return critic_loss
@@ -146,32 +156,59 @@ def value_cost_loss_fn(
     target_next_obs,
     target_label,
     config,
-    self_force=False,
+    self_force=True,
 ):
+    gamma, horizon = config["gamma"], config["train_horizon"]
     target_value_fn = partial(calculate_target_value, config, value_target)
-    true_target_value = torch.vmap(target_value_fn, in_dims=(0, 0, 0))(
+    target_value = torch.vmap(target_value_fn, in_dims=(0, 0, 0))(
         target_obs, target_next_obs, target_label
     )
-    true_pred_v1, true_pred_v2 = torch.vmap(value.V, in_dims=(0,))(target_obs)
-    recon_loss1 = nn.functional.mse_loss(true_pred_v1, true_target_value)
-    recon_loss2 = nn.functional.mse_loss(true_pred_v2, true_target_value)
-    return recon_loss1 + recon_loss2
+
+    # def discounded_loss(pred, target):
+    #     mse_loss = 0.0
+    #     horizon = target.shape[0]
+    #     for t in range(horizon):
+    #         mse_loss += (gamma**t) * F.mse_loss(pred[t], target[t])
+    #     return mse_loss
+    #
+    # true_pred_v1, true_pred_v2 = torch.vmap(value.V, in_dims=(0,))(target_obs)
+    # true_recon_loss1 = torch.vmap(discounded_loss, in_dims=(0, 0))(
+    #     true_pred_v1, target_value
+    # )
+    # true_recon_loss2 = torch.vmap(discounded_loss, in_dims=(0, 0))(
+    #     true_pred_v2, target_value
+    # )
+    # true_recon_loss = true_recon_loss1 + true_recon_loss2
+
+    pred_to = target_obs[:, 0, :]
+    target_act = target_act.permute(1, 0, 2)
+    target_value = target_value.permute(1, 0)
+    value_loss = 0.0
+    for t in range(horizon):
+        pred_v1, pred_v2 = value.V(pred_to)
+        value_loss += (gamma**t) * (
+            F.mse_loss(pred_v1, target_value[t]) + F.mse_loss(pred_v2, target_value[t])
+        )
+        pred_to = dynamics(pred_to, target_act[t])
+
+    return value_loss
 
 
 def mcem_policy(dynamics, critic, policy, value, obs, config, device):
     horizon = config["inference_horizon"]
     num_samples = config["num_samples"]
     num_elite = int(config["elite_portion"] * num_samples)
+    gamma = config["gamma"]
     samples = []
     costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
     all_obs = obs.repeat(num_samples, 1)
     with torch.no_grad():
-        for _ in range(horizon):
+        for t in range(horizon):
             all_act = policy.decode_bc(all_obs)
             all_obs = dynamics(all_obs, all_act)
-            costs += nn.functional.sigmoid(critic(all_obs))
+            costs += (gamma**t) * nn.functional.sigmoid(critic(all_obs))
             samples.append(all_act.unsqueeze(1))
-        costs += torch.min(*value.V(all_obs))
+        costs += (gamma**t) * torch.min(*value.V(all_obs))
     samples = torch.cat(samples, dim=1)
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
@@ -181,6 +218,8 @@ def mcem_policy(dynamics, critic, policy, value, obs, config, device):
         elite_costs.mean(),
         elite_costs.min(),
         elite_costs.max(),
+        costs.mean(),
+        costs.max() - costs.min(),
     )
 
 
@@ -231,7 +270,6 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
-    dynamics_target = deepcopy(dynamics)
     dynamics_optimizer = torch.optim.Adam(dynamics.parameters(), lr=3e-4)
     value_cost = EnsembleValue(
         obs_dim=obs_space.shape[0],
@@ -315,7 +353,6 @@ def main(args, cfg_env=None):
     # set state diff standard deviation
     state_diff_std = (next_observations - observations).std(dim=(0, 1))
     dynamics.set_state_diff_std(state_diff_std)
-    dynamics_target.set_state_diff_std(state_diff_std)
 
     # set logger
     eval_rew_deque = deque(maxlen=5)
@@ -343,8 +380,9 @@ def main(args, cfg_env=None):
             clip_grad_norm_(bc_vae_policy.parameters(), config["max_grad_norm"])
             bc_vae_policy_optimizer.step()
 
-            self_force = True if epoch > 5 else False
-            dynamics_loss = dynamics_loss_fn(
+            self_force = True  # True if epoch > 5 else False
+            config["train_horizon"] = 5 if epoch > 5 else 1
+            recon_loss = dynamics_loss_fn(
                 dynamics=dynamics,
                 target_obs=target_obs,
                 target_act=target_act,
@@ -352,14 +390,10 @@ def main(args, cfg_env=None):
                 config=config,
                 self_force=self_force,
             )
-            dynamics_optimizer.zero_grad()
-            dynamics_loss.backward()
-            clip_grad_norm_(dynamics.parameters(), config["max_grad_norm"])
-            dynamics_optimizer.step()
 
             critic_loss = critic_loss_fn(
                 critic=critic,
-                dynamics=dynamics_target,
+                dynamics=dynamics,
                 target_obs=target_obs,
                 target_act=target_act,
                 target_next_obs=target_next_obs,
@@ -367,37 +401,47 @@ def main(args, cfg_env=None):
                 config=config,
                 self_force=self_force,
             )
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-            clip_grad_norm_(critic.parameters(), config["max_grad_norm"])
-            critic_optimizer.step()
 
-            value_cost_loss = value_cost_loss_fn(
+            value_loss = value_cost_loss_fn(
                 value=value_cost,
                 value_target=value_cost_target,
-                dynamics=dynamics_target,
+                dynamics=dynamics,
                 target_obs=target_obs,
                 target_act=target_act,
                 target_next_obs=target_next_obs,
                 target_label=target_label,
                 config=config,
-                self_force=self_force,
+                self_force=True,
             )
+
+            total_loss = (
+                config["dynamics_coef"] * recon_loss
+                + config["cost_coef"] * critic_loss
+                + config["value_coef"] * value_loss
+            )
+            total_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+
+            dynamics_optimizer.zero_grad()
+            critic_optimizer.zero_grad()
             value_cost_optimizer.zero_grad()
-            value_cost_loss.backward()
+            total_loss.backward()
+            clip_grad_norm_(dynamics.parameters(), config["max_grad_norm"])
+            clip_grad_norm_(critic.parameters(), config["max_grad_norm"])
             clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
+            dynamics_optimizer.step()
+            critic_optimizer.step()
             value_cost_optimizer.step()
 
             if (step % config["update_freq"]) == 0:
-                ema(dynamics, dynamics_target, config["update_tau"])
                 ema(value_cost, value_cost_target, config["update_tau"])
 
             logger.store(
                 **{
                     "Loss/Loss_bc_policy": bc_policy_loss.item(),
-                    "Loss/Loss_dynamics": dynamics_loss.item(),
+                    "Loss/Loss_dynamics": recon_loss.item(),
                     "Loss/Loss_critic": critic_loss.item(),
-                    "Loss/Loss_value_cost": value_cost_loss.item(),
+                    "Loss/Loss_value_cost": value_loss.item(),
+                    "Loss/Loss_total": total_loss.item(),
                 }
             )
             logger.logged = False
@@ -422,14 +466,16 @@ def main(args, cfg_env=None):
                 )
                 ep_frames = []
                 while not eval_done:
-                    act, hcost_mu, hcost_min, hcost_max = mcem_policy(
-                        dynamics=dynamics,
-                        critic=critic,
-                        policy=bc_vae_policy,
-                        value=value_cost,
-                        obs=eval_obs,
-                        config=config,
-                        device=device,
+                    act, hcost_mu, hcost_min, hcost_max, samples_mu, samples_gap = (
+                        mcem_policy(
+                            dynamics=dynamics,
+                            critic=critic,
+                            policy=bc_vae_policy,
+                            value=value_cost,
+                            obs=eval_obs,
+                            config=config,
+                            device=device,
+                        )
                     )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
@@ -454,6 +500,8 @@ def main(args, cfg_env=None):
                             "Metrics/EvalHorizonCostGap": (
                                 hcost_max - hcost_min
                             ).item(),
+                            "Metrics/EvalSamplesCostMean": samples_mu.item(),
+                            "Metrics/EvalSamplesCostGap": samples_gap.item(),
                         }
                     )
                     if is_last_epoch:
@@ -495,6 +543,12 @@ def main(args, cfg_env=None):
                 )
                 logger.log_tabular(
                     "Metrics/EvalHorizonCostGap", min_and_max=True, std=True
+                )
+                logger.log_tabular(
+                    "Metrics/EvalSamplesCostMean", min_and_max=True, std=True
+                )
+                logger.log_tabular(
+                    "Metrics/EvalSamplesCostGap", min_and_max=True, std=True
                 )
             logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Loss/Loss_bc_policy")
