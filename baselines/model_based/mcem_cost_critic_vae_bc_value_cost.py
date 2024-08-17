@@ -21,7 +21,7 @@ from torcheval.metrics.functional import binary_confusion_matrix
 import safety_gymnasium
 from baselines.utils.models import MorelDynamics, BcqVAE, VCritic, EnsembleValue
 from baselines.utils.logger import EpochLogger
-from baselines.utils.save_video import save_video
+from baselines.utils.save_video_with_value import save_video
 from baselines.model_based.utils import single_agent_args
 
 
@@ -464,7 +464,7 @@ def main(args, cfg_env=None):
                     0.0,
                     0.0,
                 )
-                ep_frames = []
+                ep_frames, ep_values = [], []
                 while not eval_done:
                     act, hcost_mu, hcost_min, hcost_max, samples_mu, samples_gap = (
                         mcem_policy(
@@ -506,9 +506,12 @@ def main(args, cfg_env=None):
                     )
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
+                        value = torch.min(*value_cost.V(eval_obs)).item()
+                        ep_values.append(value)
                 if is_last_epoch:
                     save_video(
                         ep_frames,
+                        ep_values,
                         prefix_name=f"video_{id}",
                         video_dir=osp.join(args.log_dir, "video"),
                     )
