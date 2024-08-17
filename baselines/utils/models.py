@@ -392,3 +392,31 @@ class EnsembleValue(nn.Module):
 
     def V(self, obs):
         return self._V1(obs), self._V2(obs)
+
+
+class Encoder(nn.Module):
+    def __init__(self, obs_dim, latent_dim, enc_dim=256):
+        super().__init__()
+        # TDMPC encoder
+        self.model = nn.Sequential(
+            nn.Linear(obs_dim, enc_dim), nn.ELU(), nn.Linear(enc_dim, latent_dim)
+        )
+
+    def forward(self, obs):
+        return self.model(obs)
+
+
+class TdmpcDynamics(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        sizes = [obs_dim + act_dim] + hidden_sizes + [obs_dim]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            layers += [affine_layer, act]
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, obs, act):
+        x = torch.cat([obs, act], dim=1)
+        return self.model(x)
