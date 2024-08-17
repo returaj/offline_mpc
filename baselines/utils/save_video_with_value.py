@@ -7,6 +7,7 @@ import cv2
 import joblib
 import json
 import torch
+import torch.nn as nn
 import safety_gymnasium
 
 from baselines.utils.models import MorelDynamics, BcqVAE, VCritic, EnsembleValue
@@ -187,7 +188,7 @@ def main(args):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
-        state_diff_std=torch.FloatTensor(state_diff_std),
+        state_diff_std=torch.FloatTensor(state_diff_std, device=device),
         path=args.model_path,
         device=device,
     )
