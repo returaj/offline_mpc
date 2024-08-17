@@ -10,7 +10,6 @@ import torch
 import safety_gymnasium
 
 from baselines.utils.models import MorelDynamics, BcqVAE, VCritic, EnsembleValue
-from baselines.model_based.mcem_cost_critic_vae_bc_value_cost import mcem_policy
 
 
 EP = 1e-6
@@ -82,6 +81,35 @@ def create_arguments():
 
     args = parser.parse_args()
     return args
+
+
+def mcem_policy(dynamics, critic, policy, value, obs, config, device):
+    horizon = config["inference_horizon"]
+    num_samples = config["num_samples"]
+    num_elite = int(config["elite_portion"] * num_samples)
+    gamma = config["gamma"]
+    samples = []
+    costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
+    all_obs = obs.repeat(num_samples, 1)
+    with torch.no_grad():
+        for t in range(horizon):
+            all_act = policy.decode_bc(all_obs)
+            all_obs = dynamics(all_obs, all_act)
+            costs += (gamma**t) * nn.functional.sigmoid(critic(all_obs))
+            samples.append(all_act.unsqueeze(1))
+        costs += (gamma**t) * torch.min(*value.V(all_obs))
+    samples = torch.cat(samples, dim=1)
+    best_control_idx = torch.argsort(costs)[:num_elite]
+    elite_controls = samples[best_control_idx]
+    elite_costs = costs[best_control_idx]
+    return (
+        elite_controls.mean(dim=0),
+        elite_costs.mean(),
+        elite_costs.min(),
+        elite_costs.max(),
+        costs.mean(),
+        costs.max() - costs.min(),
+    )
 
 
 def load_model(obs_dim, act_dim, hidden_sizes, state_diff_std, path, device):
