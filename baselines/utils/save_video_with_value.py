@@ -188,7 +188,9 @@ def main(args):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
-        state_diff_std=torch.FloatTensor(state_diff_std, device=device),
+        state_diff_std=torch.as_tensor(
+            state_diff_std, dtype=torch.float32, device=device
+        ),
         path=args.model_path,
         device=device,
     )
