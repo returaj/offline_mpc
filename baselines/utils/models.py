@@ -384,11 +384,57 @@ class EnsembleDynamics(nn.Module):
         return self.forward(obs, act, with_var)
 
 
+def orthogonal_init(m):
+    """Orthogonal layer initialization."""
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+
+class TdmpcCostModel(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        sizes = [obs_dim] + hidden_sizes + [1]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            layers += [affine_layer, act]
+        self.model = nn.Sequential(*layers)
+        self.apply(orthogonal_init)
+        self.model.weight.data.fill_(0)
+        self.model.bias.data.fill_(0)
+
+    def forward(self, obs):
+        return torch.squeeze(self.model(obs), -1)
+
+
+class TdmpcValue(nn.Module):
+    def __init__(self, obs_dim, hidden_size=512):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(obs_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, 1),
+        )
+        self.apply(orthogonal_init)
+        for m in [self._V1, self._V2]:
+            m[-1].weight.data.fill_(0)
+            m[-1].bias.data.fill_(0)
+
+    def forward(self, obs):
+        return torch.squeeze(self.model(obs), -1)
+
+
 class EnsembleValue(nn.Module):
     def __init__(self, obs_dim, hidden_sizes=[64, 64]):
         super().__init__()
-        self._V1 = VCritic(obs_dim=obs_dim, hidden_sizes=hidden_sizes)
-        self._V2 = VCritic(obs_dim=obs_dim, hidden_sizes=hidden_sizes)
+        self._V1 = TdmpcValue(obs_dim=obs_dim)
+        self._V2 = TdmpcValue(obs_dim=obs_dim)
 
     def V(self, obs):
         return self._V1(obs), self._V2(obs)
@@ -401,6 +447,7 @@ class Encoder(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(obs_dim, enc_dim), nn.ELU(), nn.Linear(enc_dim, latent_dim)
         )
+        self.apply(orthogonal_init)
 
     def forward(self, obs):
         return self.model(obs)
@@ -416,6 +463,7 @@ class TdmpcDynamics(nn.Module):
             affine_layer = nn.Linear(sizes[j], sizes[j + 1])
             layers += [affine_layer, act]
         self.model = nn.Sequential(*layers)
+        self.apply(orthogonal_init)
 
     def forward(self, obs, act):
         x = torch.cat([obs, act], dim=1)

@@ -21,7 +21,8 @@ import safety_gymnasium
 from baselines.utils.models import (
     TdmpcDynamics,
     BcqVAE,
-    VCritic,
+    TdmpcValue,
+    TdmpcCostModel,
     EnsembleValue,
     Encoder,
 )
@@ -260,7 +261,7 @@ def main(args, cfg_env=None):
         device=device,
     ).to(device)
     bc_vae_policy_optimizer = torch.optim.Adam(bc_vae_policy.parameters(), lr=3e-4)
-    critic = VCritic(
+    critic = TdmpcCostModel(
         obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
@@ -457,7 +458,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 5 if is_last_epoch else 1
+        eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
