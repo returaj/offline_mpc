@@ -403,8 +403,8 @@ class TdmpcCostModel(nn.Module):
             layers += [affine_layer, act]
         self.model = nn.Sequential(*layers)
         self.apply(orthogonal_init)
-        self.model.weight.data.fill_(0)
-        self.model.bias.data.fill_(0)
+        self.model[-1].weight.data.fill_(0)
+        self.model[-1].bias.data.fill_(0)
 
     def forward(self, obs):
         return torch.squeeze(self.model(obs), -1)
