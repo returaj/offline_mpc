@@ -422,9 +422,8 @@ class TdmpcValue(nn.Module):
             nn.Linear(hidden_size, 1),
         )
         self.apply(orthogonal_init)
-        for m in [self._V1, self._V2]:
-            m[-1].weight.data.fill_(0)
-            m[-1].bias.data.fill_(0)
+        self.model[-1].weight.data.fill_(0)
+        self.model[-1].bias.data.fill_(0)
 
     def forward(self, obs):
         return torch.squeeze(self.model(obs), -1)
