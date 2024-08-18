@@ -371,7 +371,7 @@ def main(args, cfg_env=None):
         training_start_time = time.time()
         for target_obs, target_act, target_next_obs, target_label in dataloader:
             step += 1
-            config["train_horizon"] = 5 if epoch > 5 else 1
+            # config["train_horizon"] = 5 if epoch > 5 else 1
 
             recon_loss = dynamics_loss_fn(
                 dynamics=dynamics,
@@ -458,7 +458,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 1 if is_last_epoch else 1
+        eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
