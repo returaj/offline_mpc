@@ -133,10 +133,15 @@ def critic_loss_fn(
     pred_tz = encoder(target_obs[0])
     for t in range(horizon):
         ta, tl = target_act[t], target_label[t]
-        pred_nz = dynamics(pred_tz, ta)
-        logits = critic(pred_nz)
+        ## use only next state (s')
+        # pred_nz = dynamics(pred_tz, ta)
+        # logits = critic(pred_nz)
+        # critic_loss += (gamma**t) * F.binary_cross_entropy_with_logits(logits, tl)
+        # pred_tz = pred_nz
+        ## use (s, a)
+        logits = critic(torch.cat([pred_tz, ta], dim=1))
         critic_loss += (gamma**t) * F.binary_cross_entropy_with_logits(logits, tl)
-        pred_tz = pred_nz
+        pred_tz = dynamics(pred_tz, ta)
 
     if config.get("use_critic_norm", False):
         for params in critic.parameters():
@@ -204,8 +209,12 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
             all_act = all_act + config["explore_noise_std"] * torch.randn_like(
                 all_act, device=device, dtype=torch.float32
             )
+            costs += (gamma**t) * nn.functional.sigmoid(
+                critic(torch.cat([all_z, all_act], dim=1))
+            )
             all_z = dynamics(all_z, all_act)
-            costs += (gamma**t) * nn.functional.sigmoid(critic(all_z))
+            # use next state (s')
+            # costs += (gamma**t) * nn.functional.sigmoid(critic(all_z))
             samples.append(all_act.unsqueeze(1))
         costs += (gamma**t) * torch.min(*value.V(all_z))
     samples = torch.cat(samples, dim=1)
@@ -265,7 +274,8 @@ def main(args, cfg_env=None):
     ).to(device)
     bc_vae_policy_optimizer = torch.optim.Adam(bc_vae_policy.parameters(), lr=3e-4)
     critic = TdmpcCostModel(
-        obs_dim=config["latent_obs_dim"],
+        # (s,a)
+        obs_dim=config["latent_obs_dim"] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=3e-4)
@@ -498,7 +508,14 @@ def main(args, cfg_env=None):
                         next_obs, dtype=torch.float32, device=device
                     ).unsqueeze(0)
                     with torch.no_grad():
-                        critic_cost = nn.functional.sigmoid(critic(encoder(next_obs)))
+                        critic_cost = F.sigmoid(
+                            critic(
+                                torch.cat(
+                                    [encoder(eval_obs), act[0].unsqueeze(0)], dim=1
+                                )
+                            )
+                        )
+                        # critic_cost = nn.functional.sigmoid(critic(encoder(next_obs)))
                     eval_obs = next_obs
                     eval_reward += reward
                     eval_cost += cost
