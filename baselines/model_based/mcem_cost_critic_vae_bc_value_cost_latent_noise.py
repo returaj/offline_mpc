@@ -38,6 +38,7 @@ default_cfg = {
     "max_grad_norm": 10.0,
     "gamma": 0.99,
     "lambda_c": 0.95,
+    "cost_smoothing_timestep": 5,
     "explore_noise_std": 0.5,
     "update_freq": 1,
     "update_tau": 0.005,
@@ -231,10 +232,20 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     )
 
 
-def sample_data_in_sequence(data: np.array, timestep=1):
+def sample_data_in_sequence(data: np.array, timestep=1, prev_timestep=None):
     resample_data = []
     excluding_self_timestep = timestep - 1
     for d in data:
+        if prev_timestep is not None:
+            j, k = 0, 0
+            while k < d.shape[0]:
+                if d[k] == 1.0:
+                    while j < k:
+                        d[j] = 1.0
+                        j += 1
+                k += 1
+                if j + prev_timestep == k:
+                    j += 1
         for i in range(d.shape[0] - excluding_self_timestep):
             resample_data.append(d[i : i + timestep])
     return np.array(resample_data)
@@ -314,7 +325,9 @@ def main(args, cfg_env=None):
                 np.array(d["next_obs"]).squeeze(), timestep=config["train_horizon"]
             )
             costs = sample_data_in_sequence(
-                np.array(d["cost"]).squeeze(), timestep=config["train_horizon"]
+                np.array(d["cost"]).squeeze(),
+                timestep=config["train_horizon"],
+                prev_timestep=config["cost_smoothing_timestep"],
             )
             avg_reward = np.mean(np.sum(d["reward"], axis=1))
             avg_cost = np.mean(np.sum(d["cost"], axis=1))
