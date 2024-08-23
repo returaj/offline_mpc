@@ -141,7 +141,8 @@ def critic_loss_fn(
         # pred_tz = pred_nz
         ## use (s, a)
         logits = critic(torch.cat([pred_tz, ta], dim=1))
-        critic_loss += (gamma**t) * F.binary_cross_entropy_with_logits(logits, tl)
+        # critic_loss += (gamma**t) * F.binary_cross_entropy_with_logits(logits, tl)
+        critic_loss += (gamma**t) * F.mse_loss(logits, tl)
         pred_tz = dynamics(pred_tz, ta)
 
     if config.get("use_critic_norm", False):
