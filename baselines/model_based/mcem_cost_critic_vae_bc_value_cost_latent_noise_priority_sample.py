@@ -363,7 +363,7 @@ def main(args, cfg_env=None):
     for epoch in range(num_epochs):
         training_start_time = time.time()
         idxs, priorities = [], []
-        for _ in range(buffer.capacity):
+        for _ in range(buffer.capacity // batch_size):
             (
                 target_obs,
                 target_next_obs,
