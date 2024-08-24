@@ -45,10 +45,10 @@ default_cfg = {
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
-    "elite_portion": 0.1,  # 0.01
-    "num_samples": 40,  # 400
-    "inference_horizon": 2,  # 5
-    "train_horizon": 2,  # 5
+    "elite_portion": 0.01,  # 0.01
+    "num_samples": 400,  # 400
+    "inference_horizon": 5,  # 5
+    "train_horizon": 5,  # 5
 }
 
 
@@ -470,7 +470,7 @@ def main(args, cfg_env=None):
 
         eval_start_time = time.time()
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 1 if is_last_epoch else 1
+        eval_episodes = 5 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
