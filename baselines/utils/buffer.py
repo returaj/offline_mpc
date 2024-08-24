@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import torch
-import torch
+import numpy as np
 
 
 def get_shape_from_obs_space(obs_space):
@@ -207,3 +207,110 @@ def calculate_adv_and_value_targets(
     adv = discount_cumsum(deltas, gamma * lam)
     target_value = adv + values[:-1]
     return adv, target_value
+
+
+class PriorityBuffer:
+    """
+    TD-MPC code modified.
+
+    Storage and sampling functionality for training TD-MPC / TOLD.
+    The replay buffer is stored in GPU memory when training from state.
+    Uses prioritized experience replay by default.
+    """
+
+    def __init__(
+        self, obs_dim, act_dim, data_size, horizon, batch_size, device, ep_len=1000
+    ):
+        self.horizon = horizon
+        self.batch_size = batch_size
+        self.capacity = data_size
+        self.ep_len = ep_len
+        self.device = torch.device(device)
+        dtype = torch.float32
+        self._obs = torch.empty(
+            (self.capacity + 1, obs_dim), dtype=dtype, device=self.device
+        )
+        self._last_obs = torch.empty(
+            (self.capacity // ep_len, obs_dim), dtype=dtype, device=self.device
+        )
+        self._action = torch.empty(
+            (self.capacity, act_dim), dtype=dtype, device=self.device
+        )
+        self._cost = torch.empty((self.capacity,), dtype=dtype, device=self.device)
+        self._priorities = torch.ones(
+            (self.capacity,), dtype=torch.float32, device=self.device
+        )
+        self._eps = 1e-6
+        self._full = False
+        self.idx = 0
+
+    def add(self, obs: np.array, act: np.array, cost: np.array):
+        self._obs[self.idx : self.idx + self.ep_len] = obs
+        self._last_obs[self.idx // self.ep_len] = obs[-1]
+        self._action[self.idx : self.idx + self.ep_len] = act
+        self._cost[self.idx : self.idx + self.ep_len] = cost
+        max_priority = 1.0
+        mask = torch.arange(self.ep_len) >= self.ep_len - self.horizon
+        new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
+        new_priorities[mask] = 0
+        self._priorities[self.idx : self.idx + self.ep_len] = new_priorities
+        self.idx = (self.idx + self.ep_len) % self.capacity
+        self._full = self._full or self.idx == 0
+
+    def update_priorities(self, idxs, priorities):
+        self._priorities[idxs] = priorities.to(self.device) + self._eps
+
+    def _get_obs(self, arr, idxs):
+        return arr[idxs]
+
+    def sample(self):
+        probs = (
+            self._priorities if self._full else self._priorities[: self.idx]
+        ) ** 0.6  # per_alpha = 0.6, value from TD-MPC implementation
+        probs /= probs.sum()
+        total = len(probs)
+        idxs = torch.from_numpy(
+            np.random.choice(
+                total,
+                self.batch_size,
+                p=probs.cpu().numpy(),
+                replace=not self._full,
+            )
+        ).to(self.device)
+        weights = (total * probs[idxs]) ** (-0.4)  # per_beta = 0.4, value from TD-MPC
+        weights /= weights.max()
+
+        obs = self._get_obs(self._obs, idxs)
+        next_obs_shape = self._last_obs.shape[1:]
+        next_obs = torch.empty(
+            (self.horizon + 1, self.batch_size, *next_obs_shape),
+            dtype=obs.dtype,
+            device=obs.device,
+        )
+        action = torch.empty(
+            (self.horizon + 1, self.batch_size, *self._action.shape[1:]),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        cost = torch.empty(
+            (self.horizon + 1, self.batch_size),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        for t in range(self.horizon + 1):
+            _idxs = idxs + t
+            next_obs[t] = self._get_obs(self._obs, _idxs + 1)
+            action[t] = self._action[_idxs]
+            cost[t] = self._cost[_idxs]
+
+        mask = (_idxs + 1) % self.ep_len == 0
+        next_obs[-1, mask] = self._last_obs[_idxs[mask] // self.ep_len].cuda().float()
+        if not action.is_cuda:
+            action, cost, idxs, weights = (
+                action.cuda(),
+                cost.cuda(),
+                idxs.cuda(),
+                weights.cuda(),
+            )
+
+        return obs, next_obs, action, cost, idxs, weights
