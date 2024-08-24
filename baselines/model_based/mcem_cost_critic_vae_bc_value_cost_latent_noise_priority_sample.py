@@ -120,22 +120,6 @@ def cost_loss_fn(
     return critic_loss.sum(-1)
 
 
-def calculate_target_value_2(config, value, encoder, obs, next_obs, label):
-    gamma, lambda_c = config["gamma"], config["lambda_c"]
-    with torch.no_grad():
-        z, next_z = encoder(obs), encoder(next_obs)
-        value_z = torch.min(*value.V(z))
-        value_next_z = torch.min(*value.V(next_z))
-    # GAE formula: A_t = \sum_{k=0}^{n-1} (lam*gamma)^k delta_{t+k}
-    adavantage_c = label + gamma * value_next_z - value_z
-    length = adavantage_c.shape[0]
-    cumsum = adavantage_c[-1]
-    for idx in reversed(range(length - 1)):
-        cumsum = adavantage_c[idx] + gamma * lambda_c * cumsum
-        adavantage_c[idx] = cumsum
-    return adavantage_c + value_z
-
-
 @torch.no_grad
 def calculate_target_value(config, value, encoder, obs, next_obs, cost):
     gamma, lambda_c = config["gamma"], config["lambda_c"]
@@ -188,6 +172,48 @@ def value_cost_loss_fn(
     return value_loss, priority_loss
 
 
+@torch.no_grad
+def calculate_td_target(value, encoder, policy, next_obs, cost, gamma):
+    next_z = encoder(next_obs)
+    pred_act = policy.decode_bc(next_z)
+    value_next_z = torch.min(*value.V(torch.cat([next_z, pred_act], dim=1)))
+    return cost + gamma * value_next_z
+
+
+def action_value_cost_fn(
+    value,
+    value_target,
+    dynamics,
+    policy,
+    encoder,
+    target_obs,
+    target_act,
+    target_next_obs,
+    target_label,
+    config,
+):
+    gamma, horizon = config["gamma"], config["train_horizon"]
+    pred_tz = encoder(target_obs)
+    value_loss, priority_loss = 0.0, 0.0
+    for t in range(horizon):
+        tno, ta, tl = target_next_obs[t], target_act[t], target_label[t]
+        pred_q1, pred_q2 = value.V(torch.cat([pred_tz, ta], dim=1))
+        with torch.no_grad():
+            td_target = calculate_td_target(
+                value_target, encoder, policy, tno, tl, gamma
+            )
+        value_loss += (gamma**t) * (
+            F.mse_loss(pred_q1, td_target, reduction="none")
+            + F.mse_loss(pred_q2, td_target, reduction="none")
+        )
+        priority_loss += (gamma**t) * (
+            F.l1_loss(pred_q1, td_target, reduction="none")
+            + F.l1_loss(pred_q2, td_target, reduction="none")
+        )
+        pred_tz = dynamics(pred_tz, ta)
+    return value_loss, priority_loss
+
+
 def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     horizon = config["inference_horizon"]
     num_samples = config["num_samples"]
@@ -205,7 +231,9 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
             costs += (gamma**t) * critic(torch.cat([all_z, all_act], dim=1))
             all_z = dynamics(all_z, all_act)
             samples.append(all_act.unsqueeze(1))
-        costs += (gamma**t) * torch.min(*value.V(all_z))
+        costs += (gamma**t) * torch.min(
+            *value.V(torch.cat([all_z, policy.decode_bc(all_z)], dim=1))
+        )
     samples = torch.cat(samples, dim=1)
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
@@ -285,7 +313,7 @@ def main(args, cfg_env=None):
     ).to(device)
     dynamics_optimizer = torch.optim.Adam(dynamics.parameters(), lr=3e-4)
     value_cost = EnsembleValue(
-        obs_dim=config["latent_obs_dim"],
+        obs_dim=config["latent_obs_dim"] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     value_cost_target = deepcopy(value_cost)
@@ -320,9 +348,6 @@ def main(args, cfg_env=None):
             union_actions = actions
             union_costs = costs
     observations = np.concatenate([neg_observations, union_observations], axis=0)
-    # mu_obs = observations.mean(axis=(0, 1))
-    # std_obs = observations.std(axis=(0, 1))
-    # observations = (observations - mu_obs) / (std_obs + EP)
     observations = torch.as_tensor(observations, dtype=torch.float32, device=device)
     actions = np.concatenate([neg_actions, union_actions], axis=0)
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
@@ -404,10 +429,11 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
-            value_loss, priority_loss = value_cost_loss_fn(
+            value_loss, priority_loss = action_value_cost_fn(
                 value=value_cost,
                 value_target=value_cost_target,
                 dynamics=dynamics,
+                policy=bc_vae_policy,
                 encoder=encoder,
                 target_obs=target_obs,
                 target_act=target_act,
@@ -507,9 +533,11 @@ def main(args, cfg_env=None):
                         next_obs, dtype=torch.float32, device=device
                     ).unsqueeze(0)
                     with torch.no_grad():
-                        critic_cost = critic(
-                            torch.cat([encoder(eval_obs), act[0].unsqueeze(0)], dim=1)
+                        tmp_za = torch.cat(
+                            [encoder(eval_obs), act[0].unsqueeze(0)], dim=1
                         )
+                        critic_cost = critic(tmp_za)
+                        value = torch.min(*value_cost.V(tmp_za)).item()
                     eval_obs = next_obs
                     eval_reward += reward
                     eval_cost += cost
@@ -530,7 +558,6 @@ def main(args, cfg_env=None):
                     )
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
-                        value = torch.min(*value_cost.V(encoder(eval_obs))).item()
                         ep_values.append(value)
                 if is_last_epoch:
                     save_video(
@@ -603,28 +630,18 @@ def main(args, cfg_env=None):
                     itr=epoch, torch_saver_elements=critic, prefix="critic"
                 )
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=value_cost, prefix="value_cost"
+                    itr=epoch,
+                    torch_saver_elements=value_cost,
+                    prefix="action_value_cost",
                 )
-                # logger.save_state(
-                #     state_dict={
-                #         "mu_obs": mu_obs,
-                #         "std_obs": std_obs,
-                #     },
-                #     itr=epoch,
-                # )
     logger.torch_save(
         itr=epoch, torch_saver_elements=bc_vae_policy, prefix="bc_vae_policy"
     )
     logger.torch_save(itr=epoch, torch_saver_elements=dynamics, prefix="morel_dynamics")
     logger.torch_save(itr=epoch, torch_saver_elements=critic, prefix="critic")
-    logger.torch_save(itr=epoch, torch_saver_elements=value_cost, prefix="value_cost")
-    # logger.save_state(
-    #     state_dict={
-    #         "mu_obs": mu_obs,
-    #         "std_obs": std_obs,
-    #     },
-    #     itr=epoch,
-    # )
+    logger.torch_save(
+        itr=epoch, torch_saver_elements=value_cost, prefix="action_value_cost"
+    )
     logger.close()
 
 
