@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 import safety_gymnasium
 from baselines.utils.models import (
@@ -231,9 +230,10 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
             costs += (gamma**t) * critic(torch.cat([all_z, all_act], dim=1))
             all_z = dynamics(all_z, all_act)
             samples.append(all_act.unsqueeze(1))
-        costs += (gamma**t) * torch.min(
-            *value.V(torch.cat([all_z, policy.decode_bc(all_z)], dim=1))
-        )
+        # costs += (gamma**t) * torch.min(
+        #     *value.V(torch.cat([all_z, policy.decode_bc(all_z)], dim=1))
+        # )
+        costs += (gamma**t) * torch.min(*value.V(all_z))
     samples = torch.cat(samples, dim=1)
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
@@ -313,7 +313,7 @@ def main(args, cfg_env=None):
     ).to(device)
     dynamics_optimizer = torch.optim.Adam(dynamics.parameters(), lr=3e-4)
     value_cost = EnsembleValue(
-        obs_dim=config["latent_obs_dim"] + act_space.shape[0],
+        obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     value_cost_target = deepcopy(value_cost)
@@ -429,11 +429,10 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
-            value_loss, priority_loss = action_value_cost_fn(
+            value_loss, priority_loss = value_cost_loss_fn(
                 value=value_cost,
                 value_target=value_cost_target,
                 dynamics=dynamics,
-                policy=bc_vae_policy,
                 encoder=encoder,
                 target_obs=target_obs,
                 target_act=target_act,
@@ -537,7 +536,7 @@ def main(args, cfg_env=None):
                             [encoder(eval_obs), act[0].unsqueeze(0)], dim=1
                         )
                         critic_cost = critic(tmp_za)
-                        value = torch.min(*value_cost.V(tmp_za)).item()
+                        value = torch.min(*value_cost.V(encoder(eval_obs))).item()
                     eval_obs = next_obs
                     eval_reward += reward
                     eval_cost += cost
