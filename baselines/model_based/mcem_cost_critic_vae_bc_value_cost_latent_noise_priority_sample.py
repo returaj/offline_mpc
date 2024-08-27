@@ -221,7 +221,7 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     num_elite = int(config["elite_portion"] * num_samples)
     gamma = config["gamma"]
     mask = torch.arange(num_samples) >= num_samples // 2
-    noise_std = mask.unsqueeze(1) * config["explore_noise_std"]
+    noise_std = mask.to(device).unsqueeze(1) * config["explore_noise_std"]
     samples = []
     costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
     all_z = encoder(obs.repeat(num_samples, 1))
