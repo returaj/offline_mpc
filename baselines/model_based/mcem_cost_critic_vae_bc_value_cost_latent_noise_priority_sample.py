@@ -220,15 +220,18 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     num_samples = config["num_samples"]
     num_elite = int(config["elite_portion"] * num_samples)
     gamma = config["gamma"]
+    mask = torch.arange(num_samples) >= num_samples // 2
+    noise_std = mask.unsqueeze(1) * config["explore_noise_std"]
     samples = []
     costs = torch.zeros(num_samples, dtype=torch.float32, device=device)
     all_z = encoder(obs.repeat(num_samples, 1))
     with torch.no_grad():
         for t in range(horizon):
             all_act = policy.decode_bc(all_z)
-            all_act = all_act + config["explore_noise_std"] * torch.randn_like(
+            noise_act = noise_std * torch.randn_like(
                 all_act, device=device, dtype=torch.float32
             )
+            all_act = all_act + noise_act
             costs += (gamma**t) * critic(torch.cat([all_z, all_act], dim=1))
             all_z = dynamics(all_z, all_act)
             samples.append(all_act.unsqueeze(1))
