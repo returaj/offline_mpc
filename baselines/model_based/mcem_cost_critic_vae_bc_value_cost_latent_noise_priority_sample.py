@@ -46,6 +46,7 @@ default_cfg = {
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
+    "cost_weight_temp": 0.5,  # TDMPC temperature coef
     "elite_portion": 0.01,  # 0.01
     "num_samples": 400,  # 400
     "inference_horizon": 5,  # 5
@@ -243,8 +244,16 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
     elite_costs = costs[best_control_idx]
+    weights = torch.exp(config["cost_weight_temp"] * (elite_costs - elite_costs.max()))
+    weights /= weights.sum()
+    weighted_cost = (elite_costs * weights).sum() / (weights.sum() + EP)
+    weighted_controls = torch.sum(
+        weights.view(-1, 1, 1).repeat(1, horizon, 1) * elite_controls, dim=0
+    ) / (weights.sum() + EP)
     return (
-        elite_controls.mean(dim=0),
+        weighted_controls,
+        weighted_cost,
+        # elite_controls.mean(dim=0),
         elite_costs.mean(),
         elite_costs.min(),
         elite_costs.max(),
@@ -543,17 +552,23 @@ def main(args, cfg_env=None):
                 )
                 ep_frames, ep_values = [], []
                 while not eval_done:
-                    act, hcost_mu, hcost_min, hcost_max, samples_mu, samples_gap = (
-                        mcem_policy(
-                            dynamics=dynamics,
-                            critic=critic,
-                            policy=bc_vae_policy,
-                            value=value_cost,
-                            encoder=encoder,
-                            obs=eval_obs,
-                            config=config,
-                            device=device,
-                        )
+                    (
+                        act,
+                        hcost_weight,
+                        hcost_mu,
+                        hcost_min,
+                        hcost_max,
+                        samples_mu,
+                        samples_gap,
+                    ) = mcem_policy(
+                        dynamics=dynamics,
+                        critic=critic,
+                        policy=bc_vae_policy,
+                        value=value_cost,
+                        encoder=encoder,
+                        obs=eval_obs,
+                        config=config,
+                        device=device,
                     )
                     next_obs, reward, cost, terminated, truncated, _ = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
@@ -576,6 +591,7 @@ def main(args, cfg_env=None):
                     eval_done = terminated or truncated
                     logger.store(
                         **{
+                            "Metrics/EvalHorizonCostWeight": hcost_weight.item(),
                             "Metrics/EvalHorizonCostMean": hcost_mu.item(),
                             "Metrics/EvalHorizonCostMin": hcost_min.item(),
                             "Metrics/EvalHorizonCostMax": hcost_max.item(),
@@ -616,6 +632,9 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalCriticCost")
                 logger.log_tabular("Metrics/EvalEpLen")
+                logger.log_tabular(
+                    "Metrics/EvalHorizonCostWeight", min_and_max=True, std=True
+                )
                 logger.log_tabular(
                     "Metrics/EvalHorizonCostMean", min_and_max=True, std=True
                 )
