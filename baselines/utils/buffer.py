@@ -305,14 +305,14 @@ class PriorityBuffer:
 
         mask = (_idxs + 1) % self.ep_len == 0
         next_obs[-1, mask] = (
-            self._last_obs[_idxs[mask] // self.ep_len].cuda(obs.device).float()
+            self._last_obs[_idxs[mask] // self.ep_len].to(obs.device).float()
         )
         if not action.is_cuda:
             action, cost, idxs, weights = (
-                action.cuda(obs.device),
-                cost.cuda(obs.device),
-                idxs.cuda(obs.device),
-                weights.cuda(obs.device),
+                action.to(obs.device),
+                cost.to(obs.device),
+                idxs.to(obs.device),
+                weights.to(obs.device),
             )
 
         return obs, next_obs, action, cost, idxs, weights

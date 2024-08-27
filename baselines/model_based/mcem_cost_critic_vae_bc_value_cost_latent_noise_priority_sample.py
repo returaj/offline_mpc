@@ -26,6 +26,7 @@ from baselines.utils.models import (
 from baselines.utils.buffer import PriorityBuffer
 from baselines.utils.logger import EpochLogger
 from baselines.utils.save_video_with_value import save_video
+from baselines.model_based.utils import ActionRepeater
 from baselines.model_based.utils import single_agent_args
 
 
@@ -37,6 +38,7 @@ default_cfg = {
     "max_grad_norm": 10.0,
     "gamma": 0.99,
     "lambda_c": 0.95,
+    "action_repeat": 2,  # set to 2, min value is 1
     "explore_noise_std": 0.5,
     "update_freq": 1,
     "update_tau": 0.005,
@@ -267,6 +269,24 @@ def sample_data_in_sequence(data: np.array, timestep=1, prev_timestep=None):
     return np.array(resample_data)
 
 
+def fold_sa_pair(data: np.array, num_folds):
+    assert num_folds > 0, "number of folds cannot be less than 1."
+    folded_data = []
+    for traj in data:
+        folded_traj = []
+        t = 0
+        while t < traj.shape[0]:
+            v = traj[t]
+            t += 1
+            for _ in range(1, num_folds):
+                t += 1
+                if (t < traj.shape[0]) and (np.isscalar(traj[t])):
+                    v += traj[t]
+            folded_traj.append(v)
+        folded_data.append(folded_traj)
+    return np.array(folded_data)
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -281,6 +301,7 @@ def main(args, cfg_env=None):
     eval_env = safety_gymnasium.make(
         args.task, render_mode="rgb_array", camera_name="track"
     )
+    eval_env = ActionRepeater(eval_env, num_repeats=config["action_repeat"])
     eval_env.reset(seed=None)
 
     # set model
@@ -331,9 +352,15 @@ def main(args, cfg_env=None):
             continue
         filepath = os.path.join(args.data_path, file)
         with h5py.File(filepath, "r") as d:
-            observations = np.array(d["obs"]).squeeze()
-            actions = np.array(d["act"]).squeeze()
-            costs = np.array(d["cost"]).squeeze()
+            observations = fold_sa_pair(
+                data=np.array(d["obs"]).squeeze(), num_folds=config["action_repeat"]
+            )
+            actions = fold_sa_pair(
+                data=np.array(d["act"]).squeeze(), num_folds=config["action_repeat"]
+            )
+            costs = fold_sa_pair(
+                data=np.array(d["cost"]).squeeze(), num_folds=config["action_repeat"]
+            )
             avg_reward = np.mean(np.sum(d["reward"], axis=1))
             avg_cost = np.mean(np.sum(d["cost"], axis=1))
         print(f"Added data: {filepath}")
@@ -354,9 +381,10 @@ def main(args, cfg_env=None):
     labels = np.concatenate([neg_costs, union_costs], axis=0)  # use costs as labels
     labels = torch.as_tensor(labels, dtype=torch.float32, device=device)
 
+    ep_len = 1000 // config["action_repeat"] + (1000 % config["action_repeat"] > 0)
     assert (
-        observations.shape[1] == 1000
-    ), f"{observations.shape[1]} episode length is different from 1000"
+        observations.shape[1] == ep_len
+    ), f"{observations.shape[1]} episode length is different from {ep_len}"
     buffer = PriorityBuffer(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
@@ -364,7 +392,7 @@ def main(args, cfg_env=None):
         horizon=config["train_horizon"],
         batch_size=batch_size,
         device=device,
-        ep_len=observations.shape[1],
+        ep_len=ep_len,
     )
     for obs, act, label in zip(observations, actions, labels):
         buffer.add(obs, act, label)

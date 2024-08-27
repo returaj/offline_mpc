@@ -1,6 +1,32 @@
 import argparse
 from distutils.util import strtobool
 
+import gymnasium
+
+
+class ActionRepeater(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
+    def __init__(self, env: gymnasium.Env, num_repeats: int, discount: int = 1.0):
+        gymnasium.utils.RecordConstructorArgs.__init__(self)
+        gymnasium.Wrapper.__init__(self, env)
+        self._num_repeats = num_repeats
+        self._discount = discount
+
+    def step(self, action):
+        # Check the equivalent code from TD-MPC
+        reward, cost = 0.0, 0.0
+        discount = 1.0
+        for i in range(self._num_repeats):
+            obs, r, c, term, trun, infos = self.env.step(action)
+            reward += discount * (r or 0.0)
+            cost += discount * (c or 0.0)
+            discount *= self._discount
+            if term or trun:
+                break
+        return obs, reward, cost, term, trun, infos
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
 
 def single_agent_args():
     custom_parameters = [
