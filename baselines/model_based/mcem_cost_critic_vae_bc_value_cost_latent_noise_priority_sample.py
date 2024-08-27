@@ -244,7 +244,7 @@ def mcem_policy(dynamics, critic, policy, value, encoder, obs, config, device):
     best_control_idx = torch.argsort(costs)[:num_elite]
     elite_controls = samples[best_control_idx]
     elite_costs = costs[best_control_idx]
-    weights = torch.exp(config["cost_weight_temp"] * (elite_costs - elite_costs.max()))
+    weights = torch.exp(-config["cost_weight_temp"] * elite_costs)
     weights /= weights.sum()
     weighted_cost = (elite_costs * weights).sum() / (weights.sum() + EP)
     weighted_controls = torch.sum(
