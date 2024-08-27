@@ -349,8 +349,8 @@ def main(args, cfg_env=None):
 
     # data
     for file in os.listdir(args.data_path):
-        negative_matched = re.search("^.*?neg_.*$", file)
-        positive_matched = re.search("^.*?pos_.*$", file)
+        negative_matched = re.search("^.*?n_100.*$", file)
+        positive_matched = re.search("^.*?p_100.*$", file)
         if not (negative_matched or positive_matched):
             continue
         filepath = os.path.join(args.data_path, file)
