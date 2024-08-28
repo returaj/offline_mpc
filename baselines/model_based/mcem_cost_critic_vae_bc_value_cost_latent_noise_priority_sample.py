@@ -435,6 +435,10 @@ def main(args, cfg_env=None):
     for epoch in range(num_epochs):
         training_start_time = time.time()
         idxs, priorities = [], []
+        assert (
+            len(bc_vae_scheduler.get_last_lr()) == 1
+        ), f"multiple learning rates found {bc_vae_scheduler.get_last_lr()}"
+        lr = bc_vae_scheduler.get_last_lr()[0]
         for _ in range(buffer.capacity // batch_size):
             (
                 target_obs,
@@ -662,6 +666,7 @@ def main(args, cfg_env=None):
                     "Metrics/EvalSamplesCostGap", min_and_max=True, std=True
                 )
             logger.log_tabular("Train/Epoch", epoch + 1)
+            logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_critic")
