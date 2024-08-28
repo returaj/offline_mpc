@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
+from torch.optim.lr_scheduler import LinearLR
 
 import safety_gymnasium
 from baselines.utils.models import (
@@ -47,7 +48,7 @@ default_cfg = {
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
     "cost_weight_temp": 0.5,  # TDMPC temperature coef
-    "elite_portion": 0.01,  # 0.01
+    "elite_portion": 0.1,  # 0.1
     "num_samples": 400,  # 400
     "inference_horizon": 5,  # 5
     "train_horizon": 5,  # 5
@@ -316,6 +317,10 @@ def main(args, cfg_env=None):
     eval_env = ActionRepeater(eval_env, num_repeats=config["action_repeat"])
     eval_env.reset(seed=None)
 
+    # set training steps
+    num_epochs = config.get("num_epochs", args.num_epochs)
+    batch_size = config.get("batch_size", args.batch_size)
+
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
     encoder = Encoder(
@@ -333,6 +338,13 @@ def main(args, cfg_env=None):
         device=device,
     ).to(device)
     bc_vae_policy_optimizer = torch.optim.Adam(bc_vae_policy.parameters(), lr=3e-4)
+    bc_vae_scheduler = LinearLR(
+        bc_vae_policy_optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=num_epochs,
+        verbose=False,
+    )
     critic = TdmpcCostModel(
         # (s,a)
         obs_dim=config["latent_obs_dim"] + act_space.shape[0],
@@ -351,10 +363,6 @@ def main(args, cfg_env=None):
     ).to(device)
     value_cost_target = deepcopy(value_cost)
     value_cost_optimizer = torch.optim.Adam(value_cost.parameters(), lr=3e-4)
-
-    # set training steps
-    num_epochs = config.get("num_epochs", args.num_epochs)
-    batch_size = config.get("batch_size", args.batch_size)
 
     # data
     for file in os.listdir(args.data_path):
@@ -531,6 +539,7 @@ def main(args, cfg_env=None):
 
         idxs, priorities = torch.cat(idxs), torch.cat(priorities)
         buffer.update_priorities(idxs, priorities)
+        bc_vae_scheduler.step()
         training_end_time = time.time()
 
         eval_start_time = time.time()
