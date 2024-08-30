@@ -286,17 +286,18 @@ def fold_sa_pair(data: np.array, num_folds):
     assert num_folds > 0, "number of folds cannot be less than 1."
     folded_data = []
     for traj in data:
-        folded_traj = []
-        t = 0
-        while t < traj.shape[0]:
-            v = traj[t]
-            t += 1
-            for _ in range(1, num_folds):
+        for idx in range(num_folds):
+            t = idx
+            folded_traj = []
+            while t < traj.shape[0]:
+                v = traj[t]
                 t += 1
-                if (t < traj.shape[0]) and (np.isscalar(traj[t])):
-                    v += traj[t]
-            folded_traj.append(v)
-        folded_data.append(folded_traj)
+                for _ in range(1, num_folds):
+                    t += 1
+                    if (t < traj.shape[0]) and (np.isscalar(traj[t])):
+                        v += traj[t]
+                folded_traj.append(v)
+            folded_data.append(folded_traj)
     return np.array(folded_data)
 
 
