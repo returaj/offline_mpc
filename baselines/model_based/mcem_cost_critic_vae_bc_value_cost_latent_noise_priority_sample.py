@@ -328,6 +328,8 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0], latent_dim=config["latent_obs_dim"]
     ).to(device)
     encoder_target = deepcopy(encoder)
+    # [TODO] linearly decreasing encoder learning rate is a possible exploration idea.
+    # keeping all the other lr same.
     encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=3e-4)
     # See BEAR implementation from @aviralkumar
     bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
