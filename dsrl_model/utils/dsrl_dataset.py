@@ -11,16 +11,15 @@ def get_post_processed_dataset(env, data, config, task):
         cbins, rbins = density_cfg["cbins"], density_cfg["rbins"]
         max_npb, min_npb = density_cfg["max_npb"], density_cfg["min_npb"]
 
-    for inpaint_range in config["inpaint_ranges"]:
-        data = env.pre_process_data(
-            data_dict=data,
-            inpaint_ranges=(inpaint_range,),
-            density=density,
-            cbins=cbins,
-            rbins=rbins,
-            max_npb=max_npb,
-            min_npb=min_npb,
-        )
+    data = env.pre_process_data(
+        data_dict=data,
+        inpaint_ranges=config["inpaint_ranges"],
+        density=density,
+        cbins=cbins,
+        rbins=rbins,
+        max_npb=max_npb,
+        min_npb=min_npb,
+    )
     return data
 
 

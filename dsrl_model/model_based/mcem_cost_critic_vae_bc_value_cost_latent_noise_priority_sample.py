@@ -51,9 +51,9 @@ default_cfg = {
     "value_coef": 0.1,  # TDMPC update coef
     "cost_weight_temp": 0.5,  # TDMPC temperature coef
     "elite_portion": 0.1,  # 0.1
-    "num_samples": 40,  # 400
-    "inference_horizon": 2,  # 5
-    "train_horizon": 2,  # 5
+    "num_samples": 400,  # 400
+    "inference_horizon": 5,  # 5
+    "train_horizon": 5,  # 5
 }
 
 trajectory_cfg = {
@@ -245,7 +245,9 @@ def main(args, cfg_env=None):
     config = {**default_cfg, **trajectory_cfg}
 
     # evaluation environment
-    eval_env = gym.make(args.task, render_mode="rgb_array", camera_name="track")
+    eval_env = gym.make(args.task)
+    eval_env.render_parameters.mode = "rgb_array"
+    eval_env.render_parameters.camera_name = "track"
     eval_env.set_target_cost(config["target_cost"])
     eval_env = ActionRepeater(eval_env, num_repeats=config["action_repeat"])
     eval_env.reset(seed=None)
