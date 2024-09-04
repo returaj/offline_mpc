@@ -156,7 +156,12 @@ cython_debug/
 
 # data folders
 data/
-runs/
+*/runs/
+*/notebooks/
+
+# image files
+*.png
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
