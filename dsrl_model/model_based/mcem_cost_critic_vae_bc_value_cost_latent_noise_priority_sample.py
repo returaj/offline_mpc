@@ -275,12 +275,12 @@ def main(args, cfg_env=None):
         device=device,
     ).to(device)
     bc_vae_policy_optimizer = torch.optim.Adam(bc_vae_policy.parameters(), lr=3e-4)
-    bc_vae_scheduler = LinearLR(
-        bc_vae_policy_optimizer,
-        start_factor=1.0,
-        end_factor=0.0,
-        total_iters=num_epochs,
-    )
+    # bc_vae_scheduler = LinearLR(
+    #     bc_vae_policy_optimizer,
+    #     start_factor=1.0,
+    #     end_factor=0.0,
+    #     total_iters=num_epochs,
+    # )
     critic = TdmpcCostModel(
         # (s,a)
         obs_dim=config["latent_obs_dim"] + act_space.shape[0],
@@ -346,10 +346,10 @@ def main(args, cfg_env=None):
     for epoch in range(num_epochs):
         training_start_time = time.time()
         idxs, priorities = [], []
-        assert (
-            len(bc_vae_scheduler.get_last_lr()) == 1
-        ), f"multiple learning rates found {bc_vae_scheduler.get_last_lr()}"
-        lr = bc_vae_scheduler.get_last_lr()[0]
+        # assert (
+        #     len(bc_vae_scheduler.get_last_lr()) == 1
+        # ), f"multiple learning rates found {bc_vae_scheduler.get_last_lr()}"
+        # lr = bc_vae_scheduler.get_last_lr()[0]
         for _ in range(buffer.capacity // batch_size):
             (
                 target_obs,
@@ -453,7 +453,7 @@ def main(args, cfg_env=None):
 
         idxs, priorities = torch.cat(idxs), torch.cat(priorities)
         buffer.update_priorities(idxs, priorities)
-        bc_vae_scheduler.step()
+        # bc_vae_scheduler.step()
         training_end_time = time.time()
 
         eval_start_time = time.time()
@@ -578,7 +578,7 @@ def main(args, cfg_env=None):
                     "Metrics/EvalSamplesCostGap", min_and_max=True, std=True
                 )
             logger.log_tabular("Train/Epoch", epoch + 1)
-            logger.log_tabular("Train/learning_rate", lr)
+            # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_dynamics")
             logger.log_tabular("Loss/Loss_critic")
