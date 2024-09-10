@@ -60,3 +60,36 @@ def get_dataset_in_d4rl_format(env, config, task, num_folds=1):
     d4rl_data = to_d4rl_format(data)
     keys = ["observations", "actions", "rewards", "costs"]
     return {k: fold_sa_pair(d4rl_data[k], num_folds) for k in keys}
+
+
+def get_neg_and_union_data(d4rl_data, config):
+    traj_cost = np.sum(d4rl_data["costs"], axis=1)
+
+    num_neg_traj = config["num_negative_trajectories"]
+    num_uneg_traj = config["num_union_negative_trajectories"]
+    num_upos_traj = config["num_union_positive_trajectories"]
+
+    neg_idx = np.where(traj_cost > 75.0)[0]
+    pos_idx = np.where(traj_cost < 25.0)[0]
+
+    keys = ["observations", "actions", "rewards", "costs"]
+    neg_data = {k: d4rl_data[k][neg_idx[:num_neg_traj]] for k in keys}
+    union_neg_data = {
+        k: d4rl_data[k][neg_idx[num_neg_traj : num_neg_traj + num_uneg_traj]]
+        for k in keys
+    }
+    union_pos_data = {k: d4rl_data[k][pos_idx[:num_upos_traj]] for k in keys}
+
+    print(f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}")
+    print(
+        f"Number of union negative trajectory dataset: {union_neg_data['observations'].shape[0]}"
+    )
+    print(
+        f"Number of union positive trajectory dataset: {union_pos_data['observations'].shape[0]}"
+    )
+
+    union_data = {
+        k: np.concatenate([union_neg_data[k], union_pos_data[k]], axis=0) for k in keys
+    }
+
+    return neg_data, union_data
