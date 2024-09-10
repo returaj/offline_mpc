@@ -2,6 +2,9 @@ import numpy as np
 import dsrl.infos as dsrl_infos
 
 
+EP = 1e-7
+
+
 def get_post_processed_dataset(env, data, config, task):
     density = config["density"]
     cbins, rbins = 10, 50
@@ -93,3 +96,18 @@ def get_neg_and_union_data(d4rl_data, config):
     }
 
     return neg_data, union_data
+
+
+def get_normalized_data(neg_d4rl_data, union_d4rl_data):
+    neg_obs, union_obs = neg_d4rl_data["observations"], union_d4rl_data["observations"]
+    mu_obs = (
+        neg_obs.mean(axis=(0, 1)) * neg_obs.shape[0]
+        + union_obs.mean(axis=(0, 1)) * union_obs.shape[0]
+    ) / (neg_obs.shape[0] + union_obs.shape[0])
+    std_obs = (
+        neg_obs.std(axis=(0, 1)) * neg_obs.shape[0]
+        + union_obs.std(axis=(0, 1)) * union_obs.shape[0]
+    ) / (neg_obs.shape[0] + union_obs.shape[0])
+    neg_d4rl_data["observations"] = np.array((neg_obs - mu_obs) / (std_obs + EP))
+    union_d4rl_data["observations"] = np.array((union_obs - mu_obs) / (std_obs + EP))
+    return neg_d4rl_data, union_d4rl_data, mu_obs, std_obs

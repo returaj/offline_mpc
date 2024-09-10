@@ -26,6 +26,7 @@ from dsrl_model.utils.save_video_with_value import save_video
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
     get_neg_and_union_data,
+    get_normalized_data,
 )
 from dsrl_model.utils.utils import ActionRepeater
 from dsrl_model.utils.utils import single_agent_args
@@ -47,7 +48,7 @@ default_cfg = {
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
     "cost_weight_temp": 0.5,  # TDMPC temperature coef
-    "inference_horizon": 5,  # 5
+    "use_bc_policy_norm": True,  # False
     "train_horizon": 5,  # 5
 }
 
@@ -83,7 +84,8 @@ def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
     raw_weight = cost_model(torch.cat([target_obs, target_act], dim=2))
     min_raw_weight = torch.min(raw_weight, dim=0)[0]
     assert min_raw_weight.shape[0] == raw_weight.shape[1], "batch size did not match."
-    exp_weight = torch.exp(-raw_weight + min_raw_weight)
+    beta = config["cost_weight_temp"]
+    exp_weight = torch.exp(beta * (-raw_weight + min_raw_weight))
     weight = exp_weight / torch.sum(exp_weight, dim=0)
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
@@ -163,6 +165,7 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, config["action_repeat"]
     )
     neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
+    neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
     )
@@ -278,7 +281,7 @@ def main(args, cfg_env=None):
             for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
-                # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
+                eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
                 eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
                 ).unsqueeze(0)
