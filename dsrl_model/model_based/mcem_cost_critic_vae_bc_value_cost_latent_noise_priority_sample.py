@@ -16,7 +16,7 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 
 import gymnasium as gym
-import dsrl.offline_safety_gymnasium
+import dsrl.offline_safety_gymnasium  # type: ignore
 
 from dsrl_model.utils.models import (
     TdmpcDynamics,
