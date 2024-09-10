@@ -29,8 +29,8 @@ from dsrl_model.utils.bufffer import PriorityBuffer
 from dsrl_model.utils.logger import EpochLogger
 from dsrl_model.utils.save_video_with_value import save_video
 from dsrl_model.utils.dsrl_dataset import get_dataset_in_d4rl_format
-from dsrl_model.model_based.utils import ActionRepeater
-from dsrl_model.model_based.utils import single_agent_args
+from dsrl_model.utils.utils import ActionRepeater
+from dsrl_model.utils.utils import single_agent_args
 
 
 EP = 1e-6
