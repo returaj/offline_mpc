@@ -47,7 +47,7 @@ default_cfg = {
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
-    "cost_weight_temp": 0.5,
+    "cost_weight_temp": 1.5,
     "train_horizon": 20,  # 20
 }
 
@@ -80,11 +80,15 @@ def ema(m, m_target, tau):
 def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
     gamma, horizon = config["gamma"], config["train_horizon"]
     discount, loss = 1.0, 0.0
-    weight = cost_model(torch.cat([target_obs, target_act], dim=2))
-    inv_weight = (1 / weight) ** config["cost_weight_temp"]
+    weight = (
+        cost_model(torch.cat([target_obs, target_act], dim=2))
+        ** config["cost_weight_temp"]
+    )
+    norm_weight = weight / weight.sum(dim=0)
+    # inv_weight = (1 / weight) ** config["cost_weight_temp"]
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
-        loss += -discount * inv_weight[t] * bc_policy.log_prob(to, action=ta)
+        loss += -discount * (1 - norm_weight[t]) * bc_policy.log_prob(to, action=ta)
         discount *= gamma
     return torch.mean(loss)
 
