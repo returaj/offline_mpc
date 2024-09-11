@@ -234,19 +234,27 @@ def atanh(x):
 class TanhActor(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden_sizes: list = [64, 64]):
         super().__init__()
-        self.mean = build_mlp_network([obs_dim] + hidden_sizes + [act_dim])
-        self.log_std = nn.Parameter(torch.zeros(act_dim), requires_grad=True)
+        del hidden_sizes
+        self.pre_encoder_layer = nn.Sequential(
+            nn.Linear(obs_dim, 512), nn.ReLU(), nn.Linear(512, 512), nn.ReLU()
+        )
+        self.mean = nn.Linear(512, act_dim)
+        self.log_std = nn.Linear(512, act_dim)
 
     def forward(self, obs: torch.Tensor):
-        mu = self.mean(obs)
-        std = torch.exp(self.log_std)
+        z = self.pre_encoder_layer(obs)
+        mu = self.mean(z)
+        # clamped for numerical stability
+        std = torch.exp(self.log_std(z).clamp(-4, 15))
         dist = Normal(mu, std)
         raw_action = dist.rsample()
         return torch.tanh(raw_action), mu, raw_action
 
     def log_prob(self, obs, action=None, raw_action=None):
-        mu = self.mean(obs)
-        std = torch.exp(self.log_std)
+        z = self.pre_encoder_layer(obs)
+        mu = self.mean(z)
+        # clamped for numerical stability
+        std = torch.exp(self.log_std(z).clamp(-4, 15))
         dist = Normal(mu, std)
         if raw_action is None:
             raw_action = atanh(action)
@@ -390,6 +398,26 @@ def orthogonal_init(m):
         nn.init.orthogonal_(m.weight.data)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
+
+
+class ExpCostModel(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        sizes = [obs_dim] + hidden_sizes + [1]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            layers += [affine_layer, act]
+        self.model = nn.Sequential(*layers)
+        self.apply(orthogonal_init)
+        self.model[-2].weight.data.fill_(0)
+        self.model[-2].bias.data.fill_(0)
+
+    def forward(self, obs):
+        # clamped for numerical stability
+        log_cost = torch.squeeze(self.model(obs).clamp(-4, 3), -1)
+        return torch.exp(log_cost)
 
 
 class TdmpcCostModel(nn.Module):

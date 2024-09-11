@@ -29,6 +29,16 @@ class ActionRepeater(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
         return self.env.reset(**kwargs)
 
 
+def get_params_norm(params, grads=False):
+    total_norm = 0.0
+    for p in params:
+        if grads:
+            total_norm += p.grad.detach().data.norm(2).item()
+        else:
+            total_norm += p.data.norm(2).item()
+    return total_norm
+
+
 def single_agent_args():
     custom_parameters = [
         {"name": "--seed", "type": int, "default": 0, "help": "Random seed"},

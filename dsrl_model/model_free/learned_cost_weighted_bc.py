@@ -18,7 +18,7 @@ import dsrl.offline_safety_gymnasium  # type: ignore
 
 from dsrl_model.utils.models import (
     TanhActor,
-    VCritic,
+    ExpCostModel,
 )
 from dsrl_model.utils.bufffer import OnPolicyBuffer
 from dsrl_model.utils.logger import EpochLogger
@@ -29,7 +29,7 @@ from dsrl_model.utils.dsrl_dataset import (
     get_normalized_data,
 )
 from dsrl_model.utils.utils import ActionRepeater
-from dsrl_model.utils.utils import single_agent_args
+from dsrl_model.utils.utils import single_agent_args, get_params_norm
 
 
 EP = 1e-6
@@ -47,9 +47,8 @@ default_cfg = {
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
     "value_coef": 0.1,  # TDMPC update coef
-    "cost_weight_temp": 0.5,  # TDMPC temperature coef
-    "use_bc_policy_norm": True,  # False
-    "train_horizon": 5,  # 5
+    "cost_weight_temp": 0.5,
+    "train_horizon": 20,  # 20
 }
 
 trajectory_cfg = {
@@ -81,17 +80,13 @@ def ema(m, m_target, tau):
 def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
     gamma, horizon = config["gamma"], config["train_horizon"]
     discount, loss = 1.0, 0.0
-    raw_weight = cost_model(torch.cat([target_obs, target_act], dim=2))
-    min_raw_weight = torch.min(raw_weight, dim=0)[0]
-    assert min_raw_weight.shape[0] == raw_weight.shape[1], "batch size did not match."
-    beta = config["cost_weight_temp"]
-    exp_weight = torch.exp(beta * (-raw_weight + min_raw_weight))
-    weight = exp_weight / torch.sum(exp_weight, dim=0)
+    weight = cost_model(torch.cat([target_obs, target_act], dim=2))
+    inv_weight = (1 / weight) ** config["cost_weight_temp"]
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
-        loss += -(discount * weight[t] * bc_policy.log_prob(to, action=ta))
+        loss += -discount * inv_weight[t] * bc_policy.log_prob(to, action=ta)
         discount *= gamma
-    return torch.sum(loss)
+    return torch.mean(loss)
 
 
 def cost_loss_fn(
@@ -108,10 +103,8 @@ def cost_loss_fn(
     for t in range(horizon):
         tno, tna = target_neg_obs[t], target_neg_act[t]
         tuo, tua = target_union_obs[t], target_union_act[t]
-        total_neg_cost += discount * torch.exp(cost_model(torch.cat([tno, tna], dim=1)))
-        total_union_cost += discount * torch.exp(
-            cost_model(torch.cat([tuo, tua], dim=1))
-        )
+        total_neg_cost += discount * cost_model(torch.cat([tno, tna], dim=1))
+        total_union_cost += discount * cost_model(torch.cat([tuo, tua], dim=1))
         discount *= gamma
     expected_neg_cost = torch.mean(total_neg_cost)
     expected_union_cost = torch.mean(total_union_cost)
@@ -153,7 +146,7 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=3e-4)
-    cost_model = VCritic(
+    cost_model = ExpCostModel(
         # (s,a)
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
@@ -165,7 +158,7 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, config["action_repeat"]
     )
     neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
-    neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
+    # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
     )
@@ -219,7 +212,7 @@ def main(args, cfg_env=None):
         training_start_time = time.time()
         # assert (
         #     len(bc_scheduler.get_last_lr()) == 1
-        # ), f"multiple learning rates found {bc_vae_scheduler.get_last_lr()}"
+        # ), f"multiple learning rates found {bc_scheduler.get_last_lr()}"
         # lr = bc_scheduler.get_last_lr()[0]
         for (
             target_neg_obs,
@@ -281,7 +274,7 @@ def main(args, cfg_env=None):
             for id in range(eval_episodes):
                 eval_done = False
                 eval_obs, _ = eval_env.reset()
-                eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
+                # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
                 eval_obs = torch.as_tensor(
                     eval_obs, dtype=torch.float32, device=device
                 ).unsqueeze(0)
@@ -345,6 +338,12 @@ def main(args, cfg_env=None):
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_cost")
             logger.log_tabular("Loss/Loss_total")
+            logger.log_tabular(
+                "Norm/bc_policy", get_params_norm(bc_policy.parameters(), grads=False)
+            )
+            logger.log_tabular(
+                "Norm/cost_model", get_params_norm(cost_model.parameters(), grads=False)
+            )
             if args.use_eval:
                 logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
             logger.log_tabular(
