@@ -39,14 +39,12 @@ default_cfg = {
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
     "gamma": 0.99,
-    "lambda_c": 0.95,
+    "cost_lambda": 0.0,
     "action_repeat": 2,  # set to 2, min value is 1
     "update_freq": 1,
     "update_tau": 0.005,
-    "dynamics_coef": 2.0,  # TDMPC update coef
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
-    "value_coef": 0.1,  # TDMPC update coef
     "cost_weight_temp": 1.5,
     "train_horizon": 20,  # 20
 }
@@ -102,7 +100,7 @@ def cost_loss_fn(
     config,
 ):
     gamma, horizon = config["gamma"], config["train_horizon"]
-    alpha = config["alpha"]
+    alpha, cost_lambda = config["alpha"], config["cost_lambda"]
     discount, total_neg_cost, total_union_cost = 1.0, 0.0, 0.0
     for t in range(horizon):
         tno, tna = target_neg_obs[t], target_neg_act[t]
@@ -116,7 +114,7 @@ def cost_loss_fn(
         expected_union_cost - alpha * expected_neg_cost
     )
     z = torch.log(expected_neg_cost + expected_pos_cost)
-    return -torch.log(expected_neg_cost) + z
+    return -torch.log(expected_neg_cost) + z + cost_lambda * expected_pos_cost**2
 
 
 def main(args, cfg_env=None):

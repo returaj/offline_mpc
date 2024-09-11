@@ -226,10 +226,6 @@ class OnPolicyBuffer:
                 _n_idx, _u_idx = n_idx + t, u_idx + t
                 h_neg_obs[t] = self._neg_obs[_n_idx]
                 h_neg_act[t] = self._neg_act[_n_idx]
-                if 50000 in _u_idx:
-                    print("ok")
-                    print(self._union_obs[50000])
-                    raise Exception
                 h_union_obs[t] = self._union_obs[_u_idx]
                 h_union_act[t] = self._union_act[_u_idx]
 
