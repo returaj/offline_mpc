@@ -145,13 +145,13 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
-    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=3e-4)
+    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=args.lr)
     cost_model = ExpCostModel(
         # (s,a)
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
-    cost_model_optimizer = torch.optim.Adam(cost_model.parameters(), lr=3e-4)
+    cost_model_optimizer = torch.optim.Adam(cost_model.parameters(), lr=args.lr)
 
     # data
     data = get_dataset_in_d4rl_format(

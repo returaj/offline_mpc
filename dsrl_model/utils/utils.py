@@ -96,6 +96,12 @@ def single_agent_args():
             "default": 128,
             "help": "The number of steps to run in each environment per policy rollout",
         },
+        {
+            "name": "--lr",
+            "type": float,
+            "default": 3e-4,
+            "help": "Default common learning rate for the models",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
