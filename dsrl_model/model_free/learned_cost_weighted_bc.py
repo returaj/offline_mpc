@@ -45,12 +45,12 @@ default_cfg = {
     "update_tau": 0.005,
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
-    "cost_weight_temp": 1.5,
+    "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
 }
 
 trajectory_cfg = {
-    "density": 0.5,
+    "density": 1.0,
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
     "inpaint_ranges": (
         (0.0, 0.5, 0.0, 0.5),
@@ -60,8 +60,8 @@ trajectory_cfg = {
     "target_cost": 25.0,
     "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 50,
-    "num_union_positive_trajectories": 50,
+    "num_union_negative_trajectories": 100,
+    "num_union_positive_trajectories": 100,
 }
 
 
@@ -78,15 +78,12 @@ def ema(m, m_target, tau):
 def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
     gamma, horizon = config["gamma"], config["train_horizon"]
     discount, loss = 1.0, 0.0
-    weight = (
-        cost_model(torch.cat([target_obs, target_act], dim=2))
-        ** config["cost_weight_temp"]
-    )
-    norm_weight = weight / weight.sum(dim=0)
-    # inv_weight = (1 / weight) ** config["cost_weight_temp"]
+    with torch.no_grad():
+        weight = cost_model(torch.cat([target_obs, target_act], dim=2))
+        inv_weight = (1 / weight) ** config["cost_weight_temp"]
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
-        loss += -discount * (1 - norm_weight[t]) * bc_policy.log_prob(to, action=ta)
+        loss += -discount * inv_weight[t] * bc_policy.log_prob(to, action=ta)
         discount *= gamma
     return torch.mean(loss)
 
@@ -113,8 +110,12 @@ def cost_loss_fn(
     expected_pos_cost = (1 / (1 - alpha)) * (
         expected_union_cost - alpha * expected_neg_cost
     )
-    z = torch.log(expected_neg_cost + expected_pos_cost)
-    return -torch.log(expected_neg_cost) + z + cost_lambda * expected_pos_cost**2
+    z = torch.log(expected_neg_cost + expected_pos_cost + EP)
+    return (
+        -torch.log(expected_neg_cost + EP)
+        + z
+        + cost_lambda * torch.log(expected_pos_cost)
+    )
 
 
 def main(args, cfg_env=None):
@@ -197,6 +198,8 @@ def main(args, cfg_env=None):
     # set logger
     eval_rew_deque = deque(maxlen=5)
     eval_cost_deque = deque(maxlen=5)
+    eval_norm_rew_deque = deque(maxlen=5)
+    eval_norm_cost_deque = deque(maxlen=5)
     eval_pred_cost_deque = deque(maxlen=5)
     eval_len_deque = deque(maxlen=5)
     dict_args = vars(args)
@@ -315,6 +318,11 @@ def main(args, cfg_env=None):
                         prefix_name=f"video_{id}",
                         video_dir=osp.join(args.log_dir, "video"),
                     )
+                norm_reward, norm_cost = eval_env.get_normalized_score(
+                    eval_reward, eval_cost
+                )
+                eval_norm_rew_deque.append(norm_reward)
+                eval_norm_cost_deque.append(norm_cost)
                 eval_rew_deque.append(eval_reward)
                 eval_cost_deque.append(eval_cost)
                 eval_pred_cost_deque.append(eval_pred_cost)
@@ -324,6 +332,8 @@ def main(args, cfg_env=None):
                     "Metrics/EvalEpRet": np.mean(eval_rew_deque),
                     "Metrics/EvalEpCost": np.mean(eval_cost_deque),
                     "Metrics/EvalEpPredCost": np.mean(eval_pred_cost_deque),
+                    "Metrics/EvalEpNormRet": np.mean(eval_norm_rew_deque),
+                    "Metrics/EvalEpNormCost": np.mean(eval_norm_cost_deque),
                     "Metrics/EvalEpLen": np.mean(eval_len_deque),
                 }
             )
@@ -334,6 +344,8 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpRet")
                 logger.log_tabular("Metrics/EvalEpCost")
                 logger.log_tabular("Metrics/EvalEpPredCost")
+                logger.log_tabular("Metrics/EvalEpNormRet")
+                logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
