@@ -18,6 +18,7 @@ import dsrl.offline_safety_gymnasium  # type: ignore
 
 from dsrl_model.utils.models import (
     TanhActor,
+    BcqVAE,
     ExpCostModel,
 )
 from dsrl_model.utils.bufffer import OnPolicyBuffer
@@ -60,8 +61,8 @@ trajectory_cfg = {
     "target_cost": 25.0,
     "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 100,
-    "num_union_positive_trajectories": 100,
+    "num_union_negative_trajectories": 50,
+    "num_union_positive_trajectories": 50,
 }
 
 
@@ -83,7 +84,13 @@ def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
         inv_weight = (1 / weight) ** config["cost_weight_temp"]
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
-        loss += -discount * inv_weight[t] * bc_policy.log_prob(to, action=ta)
+        pred_act, bc_mean, bc_std = bc_policy(to, ta)
+        recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+        kl_loss = -0.5 * (
+            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
+        ).sum(dim=1)
+        # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+        loss += discount * inv_weight[t] * (recon_loss + 0.5 * kl_loss)
         discount *= gamma
     return torch.mean(loss)
 
@@ -143,10 +150,14 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    bc_policy = TanhActor(
+    # See BEAR implementation from @aviralkumar
+    bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
+    config["bc_latent_dim"] = bc_latent_dim
+    bc_policy = BcqVAE(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
-        hidden_sizes=config["hidden_sizes"],
+        latent_dim=bc_latent_dim,
+        device=device,
     ).to(device)
     bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=args.lr)
     cost_model = ExpCostModel(
@@ -291,7 +302,7 @@ def main(args, cfg_env=None):
                 )
                 ep_frames, ep_pred_cost = [], []
                 while not eval_done:
-                    act, _, _ = bc_policy(eval_obs)
+                    act = bc_policy.decode_bc(eval_obs)
                     next_obs, reward, terminated, truncated, info = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
                     )
