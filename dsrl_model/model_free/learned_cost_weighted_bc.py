@@ -116,8 +116,11 @@ def cost_loss_fn(
     expected_union_cost = torch.mean(total_union_cost)
     expected_pos_cost = (1 / (1 - alpha)) * (
         expected_union_cost - alpha * expected_neg_cost
-    )
+    ).clamp(min=EP)
     z = torch.log(expected_neg_cost + expected_pos_cost + EP)
+    # print(
+    #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
+    # )
     return (
         -torch.log(expected_neg_cost + EP)
         + z
