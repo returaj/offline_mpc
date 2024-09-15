@@ -39,6 +39,7 @@ default_cfg = {
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
+    "bag_size": 1,
     "gamma": 0.99,
     "cost_lambda": 0.0,
     "action_repeat": 2,  # set to 2, min value is 1
@@ -203,6 +204,7 @@ def main(args, cfg_env=None):
         batch_size=batch_size,
         device=device,
         ep_len=ep_len,
+        bag_size=config["bag_size"],
     )
     for obs, act in zip(neg_observations, neg_actions):
         buffer.add(obs, act, is_negative=True)
@@ -239,6 +241,12 @@ def main(args, cfg_env=None):
             target_union_obs,
             target_union_act,
         ) in buffer.sample():
+
+            target_neg_obs = target_neg_obs.squeeze().permute(1, 0, 2)
+            target_neg_act = target_neg_act.squeeze().permute(1, 0, 2)
+            target_union_obs = target_union_obs.squeeze().permute(1, 0, 2)
+            target_union_act = target_union_act.squeeze().permute(1, 0, 2)
+
             step += 1
 
             cost_loss = cost_loss_fn(
