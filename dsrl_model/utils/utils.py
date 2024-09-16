@@ -97,6 +97,18 @@ def single_agent_args():
             "help": "The number of steps to run in each environment per policy rollout",
         },
         {
+            "name": "--bag-size",
+            "type": int,
+            "default": 512,
+            "help": "The number of elements per bag",
+        },
+        {
+            "name": "--train-horizon",
+            "type": int,
+            "default": 20,
+            "help": "The horizon length used for training the models",
+        },
+        {
             "name": "--lr",
             "type": float,
             "default": 3e-4,  # 1e-3 performs better

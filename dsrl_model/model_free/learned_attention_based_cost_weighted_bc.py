@@ -41,7 +41,6 @@ default_cfg = {
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "num_attention_heads": 2,
-    "bag_size": 3,
     "max_grad_norm": 10.0,
     "gamma": 0.99,
     "cost_lambda": 0.0,
@@ -51,7 +50,7 @@ default_cfg = {
     "bc_coef": 0.5,
     "cost_coef": 0.5,  # TDMPC update coef
     "cost_weight_temp": 0.6,
-    "train_horizon": 20,  # 20
+    "train_horizon": 20,  # controlled through args
 }
 
 trajectory_cfg = {
@@ -193,6 +192,7 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
     config = {**default_cfg, **trajectory_cfg}
+    config["train_horizon"] = args.train_horizon or config["train_horizon"]
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -272,7 +272,7 @@ def main(args, cfg_env=None):
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
-        bag_size=config["bag_size"],
+        bag_size=args.bag_size,
         device=device,
         ep_len=ep_len,
     )
