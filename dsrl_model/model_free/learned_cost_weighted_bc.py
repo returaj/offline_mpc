@@ -17,7 +17,6 @@ import gymnasium as gym
 import dsrl.offline_safety_gymnasium  # type: ignore
 
 from dsrl_model.utils.models import (
-    TanhActor,
     BcqVAE,
     ExpCostModel,
 )
@@ -60,9 +59,9 @@ trajectory_cfg = {
         (0.25, 0.75, 0.0, 1.0),
     ),
     "target_cost": 25.0,
-    "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
+    "alpha": 0.0,  # dU = alpha * dN + (1-alpha) * dP
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 50,
+    "num_union_negative_trajectories": 0,
     "num_union_positive_trajectories": 50,
 }
 
@@ -78,8 +77,12 @@ def ema(m, m_target, tau):
 
 
 def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
-    gamma, horizon = config["gamma"], config["train_horizon"]
+    gamma = config["gamma"]
     discount, loss = 1.0, 0.0
+    # Horizon X Batch X Bag X obs/act_dim
+    horizon, batch_size, bag_size, _ = target_obs.shape
+    target_obs = target_obs.view(horizon, batch_size * bag_size, -1)
+    target_act = target_act.view(horizon, batch_size * bag_size, -1)
     with torch.no_grad():
         weight = cost_model(torch.cat([target_obs, target_act], dim=2))
         inv_weight = (1 / weight) ** config["cost_weight_temp"]
@@ -104,17 +107,29 @@ def cost_loss_fn(
     target_union_act,
     config,
 ):
-    gamma, horizon = config["gamma"], config["train_horizon"]
+    gamma = config["gamma"]
     alpha, cost_lambda = config["alpha"], config["cost_lambda"]
     discount, total_neg_cost, total_union_cost = 1.0, 0.0, 0.0
+
+    # Horizon X Batch X Bag X obs/act_dim
+    horizon, batch_size, bag_size, _ = target_neg_obs.shape
+    # Horizon X batch_bag X obs/act_dim
+    target_neg_obs = target_neg_obs.view(horizon, batch_size * bag_size, -1)
+    target_neg_act = target_neg_act.view(horizon, batch_size * bag_size, -1)
+    target_union_obs = target_union_obs.view(horizon, batch_size * bag_size, -1)
+    target_union_act = target_union_act.view(horizon, batch_size * bag_size, -1)
+
     for t in range(horizon):
         tno, tna = target_neg_obs[t], target_neg_act[t]
         tuo, tua = target_union_obs[t], target_union_act[t]
         total_neg_cost += discount * cost_model(torch.cat([tno, tna], dim=1))
         total_union_cost += discount * cost_model(torch.cat([tuo, tua], dim=1))
         discount *= gamma
-    expected_neg_cost = torch.mean(total_neg_cost)
-    expected_union_cost = torch.mean(total_union_cost)
+
+    total_neg_cost = total_neg_cost.view(batch_size, bag_size)
+    total_union_cost = total_union_cost.view(batch_size, bag_size)
+    expected_neg_cost = torch.mean(total_neg_cost, dim=1)
+    expected_union_cost = torch.mean(total_union_cost, dim=1)
     expected_pos_cost = (1 / (1 - alpha)) * (
         expected_union_cost - alpha * expected_neg_cost
     ).clamp(min=EP)
@@ -126,7 +141,7 @@ def cost_loss_fn(
         -torch.log(expected_neg_cost + EP)
         + z
         + cost_lambda * torch.log(expected_pos_cost)
-    )
+    ).mean()
 
 
 def main(args, cfg_env=None):
@@ -139,6 +154,7 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
     config = {**default_cfg, **trajectory_cfg}
+    config["train_horizon"] = args.train_horizon or config.get("train_horizon")
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -204,7 +220,7 @@ def main(args, cfg_env=None):
         batch_size=batch_size,
         device=device,
         ep_len=ep_len,
-        bag_size=config["bag_size"],
+        bag_size=args.bag_size,
     )
     for obs, act in zip(neg_observations, neg_actions):
         buffer.add(obs, act, is_negative=True)
@@ -242,10 +258,11 @@ def main(args, cfg_env=None):
             target_union_act,
         ) in buffer.sample():
 
-            target_neg_obs = target_neg_obs.squeeze().permute(1, 0, 2)
-            target_neg_act = target_neg_act.squeeze().permute(1, 0, 2)
-            target_union_obs = target_union_obs.squeeze().permute(1, 0, 2)
-            target_union_act = target_union_act.squeeze().permute(1, 0, 2)
+            # updated shape: Horizon X Batch X Bag X obs/act_dim
+            target_neg_obs = target_neg_obs.permute(2, 0, 1, 3)
+            target_neg_act = target_neg_act.permute(2, 0, 1, 3)
+            target_union_obs = target_union_obs.permute(2, 0, 1, 3)
+            target_union_act = target_union_act.permute(2, 0, 1, 3)
 
             step += 1
 
