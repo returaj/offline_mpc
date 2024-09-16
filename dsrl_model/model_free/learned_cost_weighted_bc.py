@@ -44,8 +44,8 @@ default_cfg = {
     "action_repeat": 2,  # set to 2, min value is 1
     "update_freq": 1,
     "update_tau": 0.005,
-    "bc_coef": 0.5,
-    "cost_coef": 0.5,  # TDMPC update coef
+    "bc_coef": 0.2,
+    "cost_coef": 0.8,  # TDMPC update coef
     "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
 }
@@ -130,17 +130,17 @@ def cost_loss_fn(
     total_union_cost = total_union_cost.view(batch_size, bag_size)
     expected_neg_cost = torch.mean(total_neg_cost, dim=1)
     expected_union_cost = torch.mean(total_union_cost, dim=1)
-    expected_pos_cost = (1 / (1 - alpha)) * (
-        expected_union_cost - alpha * expected_neg_cost
-    ).clamp(min=EP)
-    z = torch.log(expected_neg_cost + expected_pos_cost + EP)
-    # print(
-    #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
-    # )
+    # expected_pos_cost = (1 / (1 - alpha)) * (
+    #     expected_union_cost - alpha * expected_neg_cost
+    # ).clamp(min=EP)
+    # z = torch.log(expected_neg_cost + expected_pos_cost + EP)
+    # # print(
+    # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
+    # # )
     return (
         -torch.log(expected_neg_cost + EP)
-        + z
-        + cost_lambda * torch.log(expected_pos_cost)
+        # + z
+        + torch.log(expected_union_cost + EP)
     ).mean()
 
 
