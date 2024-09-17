@@ -50,6 +50,8 @@ default_cfg = {
     "cost_coef": 0.8,  # TDMPC update coef
     "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
+    "use_policy_norm": True,
+    "use_cost_norm": True,
 }
 
 trajectory_cfg = {
@@ -102,7 +104,11 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
         # 0.5 weight is from BCQ implementation See @aviralkumar implementation
         loss += discount * inv_weight * (recon_loss + 0.5 * kl_loss)
         discount *= gamma
-    return torch.mean(loss)
+    policy_loss = 0.0
+    if config.get("use_policy_norm", False):
+        for params in bc_policy.parameters():
+            policy_loss += params.pow(2).sum() * 0.001
+    return torch.mean(loss) + policy_loss
 
 
 def cost_loss_fn(
@@ -147,11 +153,15 @@ def cost_loss_fn(
     # # print(
     # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
     # # )
-    return (
-        -torch.log(expected_neg_cost + EP)
-        # + z
-        + torch.log(expected_union_cost + EP)
-    ).mean()
+    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP) + z
+    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    cost_loss = 0.0
+    if config.get("use_cost_norm", False):
+        for params in cost_model.parameters():
+            cost_loss += params.pow(2).sum() * 0.001
+        for params in encoder.parameters():
+            cost_loss += params.pow(2).sum() * 0.001
+    return torch.mean(loss) + cost_loss
 
 
 def main(args, cfg_env=None):
