@@ -18,6 +18,7 @@ import dsrl.offline_safety_gymnasium  # type: ignore
 
 from dsrl_model.utils.models import (
     BcqVAE,
+    Encoder,
     ExpCostModel,
 )
 from dsrl_model.utils.bufffer import OnPolicyBuffer
@@ -33,6 +34,7 @@ from dsrl_model.utils.utils import single_agent_args, get_params_norm
 
 
 EP = 1e-6
+EP2 = 1e-3
 
 default_cfg = {
     "hidden_sizes": [512, 512],
@@ -76,7 +78,7 @@ def ema(m, m_target, tau):
             p_target.data.lerp_(p.data, tau)
 
 
-def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
+def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, config):
     gamma = config["gamma"]
     discount, loss = 1.0, 0.0
     # Horizon X Batch X Bag X obs/act_dim
@@ -84,8 +86,12 @@ def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
     target_obs = target_obs.view(horizon, batch_size * bag_size, -1)
     target_act = target_act.view(horizon, batch_size * bag_size, -1)
     with torch.no_grad():
-        weight = cost_model(torch.cat([target_obs, target_act], dim=2))
-        inv_weight = (1 / weight) ** config["cost_weight_temp"]
+        target = encoder(torch.cat([target_obs, target_act], dim=-1))
+        weight = (
+            cost_model(target, use_sigmoid=True).sum(dim=0)
+            ** config["cost_weight_temp"]
+        )
+        inv_weight = 1 / (weight + EP2)
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
         pred_act, bc_mean, bc_std = bc_policy(to, ta)
@@ -94,12 +100,13 @@ def bc_policy_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
             1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
         ).sum(dim=1)
         # 0.5 weight is from BCQ implementation See @aviralkumar implementation
-        loss += discount * inv_weight[t] * (recon_loss + 0.5 * kl_loss)
+        loss += discount * inv_weight * (recon_loss + 0.5 * kl_loss)
         discount *= gamma
     return torch.mean(loss)
 
 
 def cost_loss_fn(
+    encoder,
     cost_model,
     target_neg_obs,
     target_neg_act,
@@ -119,11 +126,14 @@ def cost_loss_fn(
     target_union_obs = target_union_obs.view(horizon, batch_size * bag_size, -1)
     target_union_act = target_union_act.view(horizon, batch_size * bag_size, -1)
 
+    # encoded s,a pair
+    target_neg = encoder(torch.cat([target_neg_obs, target_neg_act], dim=-1))
+    target_union = encoder(torch.cat([target_union_obs, target_union_act], dim=-1))
+
     for t in range(horizon):
-        tno, tna = target_neg_obs[t], target_neg_act[t]
-        tuo, tua = target_union_obs[t], target_union_act[t]
-        total_neg_cost += discount * cost_model(torch.cat([tno, tna], dim=1))
-        total_union_cost += discount * cost_model(torch.cat([tuo, tua], dim=1))
+        tn, tu = target_neg[t], target_union[t]
+        total_neg_cost += discount * cost_model(tn, use_sigmoid=True)
+        total_union_cost += discount * cost_model(tu, use_sigmoid=True)
         discount *= gamma
 
     total_neg_cost = total_neg_cost.view(batch_size, bag_size)
@@ -162,7 +172,7 @@ def main(args, cfg_env=None):
     eval_env.render_parameters.camera_name = "track"
     eval_env.set_target_cost(config["target_cost"])
     eval_env = ActionRepeater(eval_env, num_repeats=config["action_repeat"])
-    eval_env.reset(seed=None)
+    eval_env.reset(seed=args.seed)
 
     # set training steps
     num_epochs = config.get("num_epochs", args.num_epochs)
@@ -180,9 +190,14 @@ def main(args, cfg_env=None):
         device=device,
     ).to(device)
     bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=args.lr)
-    cost_model = ExpCostModel(
+    encoder = Encoder(
         # (s,a)
         obs_dim=obs_space.shape[0] + act_space.shape[0],
+        latent_dim=config["latent_obs_dim"],
+    ).to(device)
+    encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=args.lr)
+    cost_model = ExpCostModel(
+        obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     cost_model_optimizer = torch.optim.Adam(cost_model.parameters(), lr=args.lr)
@@ -267,6 +282,7 @@ def main(args, cfg_env=None):
             step += 1
 
             cost_loss = cost_loss_fn(
+                encoder=encoder,
                 cost_model=cost_model,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
@@ -277,6 +293,7 @@ def main(args, cfg_env=None):
 
             bc_policy_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
+                encoder=encoder,
                 cost_model=cost_model,
                 target_obs=target_union_obs,
                 target_act=target_union_act,
@@ -288,11 +305,14 @@ def main(args, cfg_env=None):
             )
             total_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
             bc_policy_optimizer.zero_grad()
+            encoder_optimizer.zero_grad()
             cost_model_optimizer.zero_grad()
             total_loss.backward()
             clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            clip_grad_norm_(encoder.parameters(), config["max_grad_norm"])
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             bc_policy_optimizer.step()
+            encoder_optimizer.step()
             cost_model_optimizer.step()
 
             # if (step % config["update_freq"]) == 0:
@@ -340,16 +360,18 @@ def main(args, cfg_env=None):
                         next_obs, dtype=torch.float32, device=device
                     ).unsqueeze(0)
                     with torch.no_grad():
-                        pred_cost = cost_model(torch.cat([eval_obs, act], dim=1))
+                        pred_cost = cost_model(
+                            encoder(torch.cat([eval_obs, act], dim=1)), use_sigmoid=True
+                        ).item()
                     eval_obs = next_obs
                     eval_reward += reward
                     eval_cost += cost
-                    eval_pred_cost += pred_cost.item()
+                    eval_pred_cost += pred_cost
                     eval_len += 1
                     eval_done = terminated or truncated
                     if is_last_epoch:
                         ep_frames.append(eval_env.render())
-                        ep_pred_cost.append(pred_cost.item())
+                        ep_pred_cost.append(pred_cost)
                 if is_last_epoch:
                     save_video(
                         ep_frames,
