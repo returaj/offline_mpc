@@ -234,8 +234,8 @@ def main(args, cfg_env=None):
     eval_norm_cost_deque = deque(maxlen=5)
     eval_pred_cost_deque = deque(maxlen=5)
     eval_len_deque = deque(maxlen=5)
-    dict_args = vars(args)
-    dict_args.update(config)
+    dict_args = config
+    dict_args.update(vars(args))
     logger = EpochLogger(
         log_dir=args.log_dir,
         seed=str(args.seed),
