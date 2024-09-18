@@ -103,6 +103,12 @@ def single_agent_args():
             "help": "The number of elements per bag",
         },
         {
+            "name": "--warmup-bc",
+            "type": int,
+            "default": -1,
+            "help": "Number of epochs that we want to skip before we start training bc model",
+        },
+        {
             "name": "--train-horizon",
             "type": int,
             "default": 20,

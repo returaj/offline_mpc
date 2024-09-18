@@ -38,6 +38,7 @@ EP2 = 1e-3
 
 default_cfg = {
     "save_freq": 10,
+    "warmup_bc": -1,  # set -1 if no warmup is needed in bc learning
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
@@ -176,6 +177,7 @@ def main(args, cfg_env=None):
     device = torch.device(f"{args.device}:{args.device_id}")
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
+    config["warmup_bc"] = args.warmup_bc or config["warmup_bc"]
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -302,14 +304,16 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
-            bc_policy_loss = bc_policy_loss_fn(
-                bc_policy=bc_policy,
-                encoder=encoder,
-                cost_model=cost_model,
-                target_obs=target_union_obs,
-                target_act=target_union_act,
-                config=config,
-            )
+            bc_policy_loss = torch.as_tensor(0.0)
+            if (epoch + 1) > config["warmup_bc"]:
+                bc_policy_loss = bc_policy_loss_fn(
+                    bc_policy=bc_policy,
+                    encoder=encoder,
+                    cost_model=cost_model,
+                    target_obs=target_union_obs,
+                    target_act=target_union_act,
+                    config=config,
+                )
 
             total_loss = (
                 config["bc_coef"] * bc_policy_loss + config["cost_coef"] * cost_loss
