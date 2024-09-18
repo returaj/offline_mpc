@@ -37,6 +37,7 @@ EP = 1e-6
 EP2 = 1e-3
 
 default_cfg = {
+    "save_freq": 10,
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
@@ -46,8 +47,8 @@ default_cfg = {
     "action_repeat": 2,  # set to 2, min value is 1
     "update_freq": 1,
     "update_tau": 0.005,
-    "bc_coef": 0.2,
-    "cost_coef": 0.8,  # TDMPC update coef
+    "bc_coef": 0.1,
+    "cost_coef": 0.9,
     "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
     "use_policy_norm": True,
@@ -342,8 +343,9 @@ def main(args, cfg_env=None):
         training_end_time = time.time()
 
         eval_start_time = time.time()
+        is_save = (epoch + 1) % config["save_freq"] == 0 or epoch == 0
         is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 5 if is_last_epoch else 1
+        eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
                 eval_done = False
@@ -379,14 +381,14 @@ def main(args, cfg_env=None):
                     eval_pred_cost += pred_cost
                     eval_len += 1
                     eval_done = terminated or truncated
-                    if is_last_epoch:
+                    if is_save or is_last_epoch:
                         ep_frames.append(eval_env.render())
                         ep_pred_cost.append(pred_cost)
-                if is_last_epoch:
+                if is_save or is_last_epoch:
                     save_video(
                         ep_frames,
                         ep_pred_cost,
-                        prefix_name=f"video_{id}",
+                        prefix_name=f"video_{epoch}_{id}",
                         video_dir=osp.join(args.log_dir, "video"),
                     )
                 norm_reward, norm_cost = eval_env.get_normalized_score(
@@ -436,7 +438,7 @@ def main(args, cfg_env=None):
             )
             logger.log_tabular("Time/Total", eval_end_time - training_start_time)
             logger.dump_tabular()
-            if (epoch + 1) % 20 == 0 or epoch == 0:
+            if is_save:
                 logger.torch_save(
                     itr=epoch, torch_saver_elements=bc_policy, prefix="bc_tanh_policy"
                 )
