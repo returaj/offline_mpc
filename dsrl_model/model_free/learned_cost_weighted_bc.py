@@ -52,8 +52,8 @@ default_cfg = {
     "cost_coef": 0.9,
     "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
-    "use_policy_norm": True,
-    "use_cost_norm": True,
+    "weight_decay_bc": 0.001,
+    "weight_decay_cost": 0.001,
 }
 
 trajectory_cfg = {
@@ -203,18 +203,30 @@ def main(args, cfg_env=None):
         latent_dim=bc_latent_dim,
         device=device,
     ).to(device)
-    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=config["bc_lr"])
+    bc_policy_optimizer = torch.optim.Adam(
+        bc_policy.parameters(),
+        lr=config["bc_lr"],
+        weight_decay=config["weight_decay_bc"],
+    )
     encoder = Encoder(
         # (s,a)
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         latent_dim=config["latent_obs_dim"],
     ).to(device)
-    encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=args.lr)
+    encoder_optimizer = torch.optim.Adam(
+        encoder.parameters(),
+        lr=args.lr,
+        weight_decay=config["weight_decay_cost"],
+    )
     cost_model = ExpCostModel(
         obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
-    cost_model_optimizer = torch.optim.Adam(cost_model.parameters(), lr=args.lr)
+    cost_model_optimizer = torch.optim.Adam(
+        cost_model.parameters(),
+        lr=args.lr,
+        weight_decay=config["weight_decay_cost"],
+    )
 
     # data
     data = get_dataset_in_d4rl_format(
@@ -451,14 +463,16 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if is_save:
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_tanh_policy"
+                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_vae_policy"
+                )
+                logger.torch_save(
+                    itr=epoch, torch_saver_elements=encoder, prefix="encoder"
                 )
                 logger.torch_save(
                     itr=epoch, torch_saver_elements=cost_model, prefix="cost_model"
                 )
-    logger.torch_save(
-        itr=epoch, torch_saver_elements=bc_policy, prefix="bc_tanh_policy"
-    )
+    logger.torch_save(itr=epoch, torch_saver_elements=bc_policy, prefix="bc_vae_policy")
+    logger.torch_save(itr=epoch, torch_saver_elements=encoder, prefix="encoder")
     logger.torch_save(itr=epoch, torch_saver_elements=cost_model, prefix="cost_model")
     logger.close()
 
