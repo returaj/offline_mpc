@@ -156,16 +156,24 @@ def save_video(frames, values, prefix_name, video_dir, fps=20):
     writer = imageio.get_writer(video_path, fps=fps)
     font = cv2.FONT_HERSHEY_COMPLEX_SMALL
     for f, v in zip(frames, values):
-        f = cv2.putText(
-            np.array(f),
-            f"V(s) = {v:.4f}",
-            (5, 20),
-            font,
-            1,
-            (255, 0, 0),
-            2,
-            cv2.LINE_4,
-        )
+        if isinstance(v, dict):
+            message_key = "/".join(v.keys())
+            message_value = "/".join(f"{x:.4f}" for x in v.values())
+        else:
+            message_key = "V(s)"
+            message_value = f"{v:.2f}"
+        f = np.array(f)
+        for m, p in ((message_key, (5, 20)), (message_value, (5, 40))):
+            f = cv2.putText(
+                f,
+                m,
+                p,
+                font,
+                0.75,
+                (255, 0, 0),
+                2,
+                cv2.LINE_4,
+            )
         writer.append_data(f)
     writer.close()
 

@@ -196,13 +196,14 @@ def main(args, cfg_env=None):
     # See BEAR implementation from @aviralkumar
     bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
     config["bc_latent_dim"] = bc_latent_dim
+    config["bc_lr"] = 1e-5
     bc_policy = BcqVAE(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         latent_dim=bc_latent_dim,
         device=device,
     ).to(device)
-    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=args.lr)
+    bc_policy_optimizer = torch.optim.Adam(bc_policy.parameters(), lr=config["bc_lr"])
     encoder = Encoder(
         # (s,a)
         obs_dim=obs_space.shape[0] + act_space.shape[0],
@@ -263,7 +264,7 @@ def main(args, cfg_env=None):
     eval_pred_cost_deque = deque(maxlen=5)
     eval_len_deque = deque(maxlen=5)
     dict_args = config
-    dict_args.update(vars(args))
+    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
     logger = EpochLogger(
         log_dir=args.log_dir,
         seed=str(args.seed),
@@ -387,7 +388,13 @@ def main(args, cfg_env=None):
                     eval_done = terminated or truncated
                     if is_save or is_last_epoch:
                         ep_frames.append(eval_env.render())
-                        ep_pred_cost.append(pred_cost)
+                        ep_pred_cost.append(
+                            {
+                                "C(s,a)": cost,
+                                "pC(s,a)": pred_cost,
+                                "tC(s,a)": eval_pred_cost,
+                            }
+                        )
                 if is_save or is_last_epoch:
                     save_video(
                         ep_frames,

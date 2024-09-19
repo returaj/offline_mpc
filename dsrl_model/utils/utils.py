@@ -105,13 +105,13 @@ def single_agent_args():
         {
             "name": "--warmup-bc",
             "type": int,
-            "default": -1,
+            "default": None,
             "help": "Number of epochs that we want to skip before we start training bc model",
         },
         {
             "name": "--train-horizon",
             "type": int,
-            "default": 20,
+            "default": None,
             "help": "The horizon length used for training the models",
         },
         {
