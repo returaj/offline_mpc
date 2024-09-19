@@ -392,7 +392,7 @@ def main(args, cfg_env=None):
                             {
                                 "C(s,a)": cost,
                                 "pC(s,a)": pred_cost,
-                                "tC(s,a)": eval_pred_cost,
+                                "tC(s,a)": eval_cost,
                             }
                         )
                 if is_save or is_last_epoch:
