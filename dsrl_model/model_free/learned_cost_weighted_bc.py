@@ -85,10 +85,8 @@ def ema(m, m_target, tau):
 def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, config):
     gamma = config["gamma"]
     discount, loss = 1.0, 0.0
-    # Horizon X Batch X Bag X obs/act_dim
-    horizon, batch_size, bag_size, _ = target_obs.shape
-    target_obs = target_obs.view(horizon, batch_size * bag_size, -1)
-    target_act = target_act.view(horizon, batch_size * bag_size, -1)
+    # Horizon X Batch_Bag X obs/act_dim
+    horizon, batch_bag_size, _ = target_obs.shape
     with torch.no_grad():
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
         weight = (
@@ -122,17 +120,13 @@ def cost_loss_fn(
     target_union_act,
     config,
 ):
-    gamma = config["gamma"]
+    gamma, bag_size = config["gamma"], config["bag_size"]
     alpha, cost_lambda = config["alpha"], config["cost_lambda"]
     discount, total_neg_cost, total_union_cost = 1.0, 0.0, 0.0
 
-    # Horizon X Batch X Bag X obs/act_dim
-    horizon, batch_size, bag_size, _ = target_neg_obs.shape
-    # Horizon X batch_bag X obs/act_dim
-    target_neg_obs = target_neg_obs.view(horizon, batch_size * bag_size, -1)
-    target_neg_act = target_neg_act.view(horizon, batch_size * bag_size, -1)
-    target_union_obs = target_union_obs.view(horizon, batch_size * bag_size, -1)
-    target_union_act = target_union_act.view(horizon, batch_size * bag_size, -1)
+    # Horizon X Batch_Bag X obs/act_dim
+    horizon, batch_bag_size, _ = target_neg_obs.shape
+    batch_size = batch_bag_size // bag_size
 
     # encoded s,a pair
     target_neg = encoder(torch.cat([target_neg_obs, target_neg_act], dim=-1))
@@ -178,6 +172,7 @@ def main(args, cfg_env=None):
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["warmup_bc"] = args.warmup_bc or config["warmup_bc"]
+    config["bag_size"] = args.bag_size or config["bag_size"]
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -188,8 +183,8 @@ def main(args, cfg_env=None):
     eval_env.reset(seed=args.seed)
 
     # set training steps
-    num_epochs = config.get("num_epochs", args.num_epochs)
-    batch_size = config.get("batch_size", args.batch_size)
+    num_epochs = args.num_epochs or config.get("num_epochs")
+    batch_size = args.batch_size or config.get("batch_size")
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
@@ -258,10 +253,9 @@ def main(args, cfg_env=None):
         neg_data_size=np.prod(neg_observations.shape[:-1]),
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
-        batch_size=batch_size,
+        batch_size=batch_size * config["bag_size"],
         device=device,
         ep_len=ep_len,
-        bag_size=args.bag_size,
     )
     for obs, act in zip(neg_observations, neg_actions):
         buffer.add(obs, act, is_negative=True)
@@ -292,18 +286,14 @@ def main(args, cfg_env=None):
         #     len(bc_scheduler.get_last_lr()) == 1
         # ), f"multiple learning rates found {bc_scheduler.get_last_lr()}"
         # lr = bc_scheduler.get_last_lr()[0]
+
+        # shape: Horizon X Batch_Bag X obs/act_dim
         for (
             target_neg_obs,
             target_neg_act,
             target_union_obs,
             target_union_act,
         ) in buffer.sample():
-
-            # updated shape: Horizon X Batch X Bag X obs/act_dim
-            target_neg_obs = target_neg_obs.permute(2, 0, 1, 3)
-            target_neg_act = target_neg_act.permute(2, 0, 1, 3)
-            target_union_obs = target_union_obs.permute(2, 0, 1, 3)
-            target_union_act = target_union_act.permute(2, 0, 1, 3)
 
             step += 1
 

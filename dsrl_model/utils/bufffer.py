@@ -123,12 +123,10 @@ class OnPolicyBuffer:
         horizon,
         batch_size,
         device,
-        bag_size=1,
         ep_len=1000,
     ):
         self.horizon = horizon
         self.batch_size = batch_size
-        self.bag_size = bag_size
         self.neg_capacity = neg_data_size
         self.union_capacity = union_data_size
         self.ep_len = ep_len
@@ -180,8 +178,6 @@ class OnPolicyBuffer:
     def sample(self):
         batch_size = self.batch_size
         steps_per_epoch = self.union_capacity // batch_size
-        bag_size = self.bag_size
-        horizon = self.horizon
 
         union_probs = self._union_priorities
         union_probs /= union_probs.sum()
@@ -189,7 +185,7 @@ class OnPolicyBuffer:
         union_idxs = torch.from_numpy(
             np.random.choice(
                 union_total,
-                (steps_per_epoch, batch_size, bag_size),
+                (steps_per_epoch, batch_size),
                 p=union_probs.cpu().numpy(),
                 replace=True,
             )
@@ -201,7 +197,7 @@ class OnPolicyBuffer:
         neg_idxs = torch.from_numpy(
             np.random.choice(
                 neg_total,
-                (steps_per_epoch, batch_size, bag_size),
+                (steps_per_epoch, batch_size),
                 p=neg_probs.cpu().numpy(),
                 replace=True,
             )
@@ -211,12 +207,12 @@ class OnPolicyBuffer:
 
         for n_idx, u_idx in zip(neg_idxs, union_idxs):
             h_neg_obs = torch.empty(
-                (self.horizon, batch_size, bag_size, *self._neg_obs.shape[1:]),
+                (self.horizon, batch_size, *self._neg_obs.shape[1:]),
                 dtype=torch.float32,
                 device=self.device,
             )
             h_neg_act = torch.empty(
-                (self.horizon, batch_size, bag_size, *self._neg_act.shape[1:]),
+                (self.horizon, batch_size, *self._neg_act.shape[1:]),
                 dtype=torch.float32,
                 device=self.device,
             )
@@ -234,10 +230,6 @@ class OnPolicyBuffer:
                 h_union_obs[t] = self._union_obs[_u_idx]
                 h_union_act[t] = self._union_act[_u_idx]
 
-            # Batch X Bag X Horizon X obs/act_dim
-            h_neg_obs = h_neg_obs.permute(1, 2, 0, 3)
-            h_neg_act = h_neg_act.permute(1, 2, 0, 3)
-            h_union_obs = h_union_obs.permute(1, 2, 0, 3)
-            h_union_act = h_union_act.permute(1, 2, 0, 3)
+            # Horizon X Batch X obs/act_dim
 
             yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act)
