@@ -89,11 +89,8 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
     horizon, batch_bag_size, _ = target_obs.shape
     with torch.no_grad():
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
-        weight = (
-            cost_model(target, use_sigmoid=True).sum(dim=0)
-            ** config["cost_weight_temp"]
-        )
-        inv_weight = 1 / (weight + EP2)
+        weight = cost_model(target, use_sigmoid=True).sum(dim=0)
+        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
         pred_act, bc_mean, bc_std = bc_policy(to, ta)

@@ -111,11 +111,8 @@ def bc_policy_loss_fn(
         target += pos_encoding
         target, _ = attention_model(target, target, target)
         # Batch_Bag X Horizon
-        weight = (
-            cost_model(target, use_sigmoid=True).sum(dim=1)
-            ** config["cost_weight_temp"]
-        )
-        inv_weight = 1 / (weight + EP2)
+        weight = cost_model(target, use_sigmoid=True).sum(dim=1)
+        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
 
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
