@@ -84,16 +84,29 @@ def get_neg_and_union_data(d4rl_data, config):
     union_pos_data = {k: d4rl_data[k][pos_idx[:num_upos_traj]] for k in keys}
 
     print(f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}")
+    neg_cost, neg_reward = (
+        neg_data["costs"].sum(1).mean(),
+        neg_data["rewards"].sum(1).mean(),
+    )
+    print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
     print(
         f"Number of union negative trajectory dataset: {union_neg_data['observations'].shape[0]}"
     )
     print(
         f"Number of union positive trajectory dataset: {union_pos_data['observations'].shape[0]}"
     )
-
+    
     union_data = {
         k: np.concatenate([union_neg_data[k], union_pos_data[k]], axis=0) for k in keys
     }
+    union_cost, union_reward = (
+        union_data["costs"].sum(1).mean(),
+        union_data["rewards"].sum(1).mean(),
+    )
+    print(
+        f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}"
+    )
+
 
     return neg_data, union_data
 
