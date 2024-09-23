@@ -5,6 +5,7 @@ import time
 from copy import deepcopy
 from collections import deque
 
+import re
 import random
 import numpy as np
 
@@ -15,6 +16,7 @@ from torch.optim.lr_scheduler import LinearLR
 
 import gymnasium as gym
 import dsrl.offline_safety_gymnasium  # type: ignore
+import dsrl.infos as dsrl_infos
 
 from dsrl_model.utils.models import (
     Encoder,
@@ -40,7 +42,7 @@ EP2 = 1e-2
 
 
 default_cfg = {
-    "save_freq": 10,
+    "save_freq": 20,
     "warmup_bc": -1,  # set -1 if no warmup is needed in bc learning
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
@@ -295,7 +297,9 @@ def main(args, cfg_env=None):
         union_data["actions"], dtype=torch.float32, device=device
     )
 
-    ep_len = 1000 // config["action_repeat"] + (1000 % config["action_repeat"] > 0)
+    agent_task = re.search(r"Offline(.*?)Gymnasium-v0", args.task).group(1)
+    ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
+    ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
         neg_observations.shape[1] == ep_len
     ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
