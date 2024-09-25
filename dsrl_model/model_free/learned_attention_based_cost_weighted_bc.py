@@ -298,7 +298,7 @@ def main(args, cfg_env=None):
         union_data["actions"], dtype=torch.float32, device=device
     )
 
-    agent_task = re.search(r"Offline(.*?)Gymnasium-v0", args.task).group(1)
+    agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
     ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
