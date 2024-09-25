@@ -49,6 +49,12 @@ def single_agent_args():
             "help": "Use evaluation environment for testing",
         },
         {
+            "name": "--save-video",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "Use evaluation environment for testing",
+        },
+        {
             "name": "--task",
             "type": str,
             "default": "OfflinePointGoal1Gymnasium-v0",

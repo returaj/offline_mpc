@@ -175,8 +175,9 @@ def main(args, cfg_env=None):
 
     # evaluation environment
     eval_env = gym.make(args.task)
-    eval_env.render_parameters.mode = "rgb_array"
-    eval_env.render_parameters.camera_name = "track"
+    if args.save_video:
+        eval_env.render_parameters.mode = "rgb_array"
+        eval_env.render_parameters.camera_name = "track"
     eval_env.set_target_cost(config["target_cost"])
     eval_env = ActionRepeater(eval_env, num_repeats=config["action_repeat"])
     eval_env.reset(seed=args.seed)
@@ -389,7 +390,7 @@ def main(args, cfg_env=None):
                     eval_pred_cost += pred_cost
                     eval_len += 1
                     eval_done = terminated or truncated
-                    if is_save or is_last_epoch:
+                    if args.save_video and (is_save or is_last_epoch):
                         ep_frames.append(eval_env.render())
                         ep_pred_cost.append(
                             {
@@ -398,7 +399,7 @@ def main(args, cfg_env=None):
                                 "tC(s,a)": eval_cost,
                             }
                         )
-                if is_save or is_last_epoch:
+                if args.save_video and (is_save or is_last_epoch):
                     save_video(
                         ep_frames,
                         ep_pred_cost,
