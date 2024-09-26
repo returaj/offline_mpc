@@ -154,9 +154,11 @@ class OnPolicyBuffer:
         self._neg_idx = 0
         self._union_idx = 0
 
-    def add(self, obs: np.array, act: np.array, is_negative=False):
+    def add(self, obs, act, done=None, is_negative=False):
         max_priority = 1.0
-        mask = torch.arange(self.ep_len) >= self.ep_len - self.horizon
+        done_sum = np.sum(done) or 1.0
+        true_ep_len = self.ep_len - done_sum + 1
+        mask = torch.arange(self.ep_len) >= true_ep_len - self.horizon
         new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
         new_priorities[mask] = 0.0
 

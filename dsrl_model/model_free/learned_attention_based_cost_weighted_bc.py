@@ -280,8 +280,10 @@ def main(args, cfg_env=None):
     ).to(device)
 
     # data
+    agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
+    ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
     data = get_dataset_in_d4rl_format(
-        eval_env, trajectory_cfg, args.task, config["action_repeat"]
+        eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
     neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
     # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
@@ -291,12 +293,14 @@ def main(args, cfg_env=None):
     neg_actions = torch.as_tensor(
         neg_data["actions"], dtype=torch.float32, device=device
     )
+    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
     union_observations = torch.as_tensor(
         union_data["observations"], dtype=torch.float32, device=device
     )
     union_actions = torch.as_tensor(
         union_data["actions"], dtype=torch.float32, device=device
     )
+    union_dones = union_data["timeouts"] | union_data["terminals"]
 
     agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
     ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
@@ -315,10 +319,10 @@ def main(args, cfg_env=None):
         device=device,
         ep_len=ep_len,
     )
-    for obs, act in zip(neg_observations, neg_actions):
-        buffer.add(obs, act, is_negative=True)
-    for obs, act in zip(union_observations, union_actions):
-        buffer.add(obs, act, is_negative=False)
+    for obs, act, done in zip(neg_observations, neg_actions, neg_dones):
+        buffer.add(obs, act, done, is_negative=True)
+    for obs, act, done in zip(union_observations, union_actions, union_dones):
+        buffer.add(obs, act, done, is_negative=False)
 
     # set logger
     eval_rew_deque = deque(maxlen=5)

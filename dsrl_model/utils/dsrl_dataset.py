@@ -26,14 +26,20 @@ def get_post_processed_dataset(env, data, config, task):
     return data
 
 
-def to_d4rl_format(data):
+def to_d4rl_format(data, ep_len):
     dones_idx = np.where((data["terminals"] == 1) | (data["timeouts"] == 1))[0]
     d4rl_data = {k: [] for k in data.keys()}
     for i in range(dones_idx.shape[0]):
         start = 0 if i == 0 else dones_idx[i - 1] + 1
         end = dones_idx[i] + 1
         for k, v in data.items():
-            d4rl_data[k].append(v[start:end])
+            val = v[start:end]
+            if ep_len != (end - start):
+                repeat_len = ep_len - (end - start)
+                other_dim = (1,) * (len(val.shape) - 1)
+                repeat_val = np.tile(val[-1], (repeat_len, *other_dim))
+                val = np.concatenate([val, repeat_val])
+            d4rl_data[k].append(val)
     return {k: np.array(v) for k, v in d4rl_data.items()}
 
 
@@ -56,12 +62,12 @@ def fold_sa_pair(data: np.array, num_folds):
     return np.array(folded_data)
 
 
-def get_dataset_in_d4rl_format(env, config, task, num_folds=1):
+def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
     data = env.get_dataset()
     data = get_post_processed_dataset(env, data, config, task)
 
-    d4rl_data = to_d4rl_format(data)
-    keys = ["observations", "actions", "rewards", "costs"]
+    d4rl_data = to_d4rl_format(data, ep_len)
+    keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
     return {k: fold_sa_pair(d4rl_data[k], num_folds) for k in keys}
 
 
@@ -75,7 +81,7 @@ def get_neg_and_union_data(d4rl_data, config):
     neg_idx = np.where(traj_cost > 75.0)[0]
     pos_idx = np.where(traj_cost < 25.0)[0]
 
-    keys = ["observations", "actions", "rewards", "costs"]
+    keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
     neg_data = {k: d4rl_data[k][neg_idx[:num_neg_traj]] for k in keys}
     union_neg_data = {
         k: d4rl_data[k][neg_idx[num_neg_traj : num_neg_traj + num_uneg_traj]]
@@ -95,7 +101,7 @@ def get_neg_and_union_data(d4rl_data, config):
     print(
         f"Number of union positive trajectory dataset: {union_pos_data['observations'].shape[0]}"
     )
-    
+
     union_data = {
         k: np.concatenate([union_neg_data[k], union_pos_data[k]], axis=0) for k in keys
     }
@@ -103,10 +109,7 @@ def get_neg_and_union_data(d4rl_data, config):
         union_data["costs"].sum(1).mean(),
         union_data["rewards"].sum(1).mean(),
     )
-    print(
-        f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}"
-    )
-
+    print(f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}")
 
     return neg_data, union_data
 
