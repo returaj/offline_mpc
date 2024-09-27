@@ -124,12 +124,14 @@ class OnPolicyBuffer:
         batch_size,
         device,
         ep_len=1000,
+        has_cost=False,
     ):
         self.horizon = horizon
         self.batch_size = batch_size
         self.neg_capacity = neg_data_size
         self.union_capacity = union_data_size
         self.ep_len = ep_len
+        self.has_cost = has_cost
         self.device = torch.device(device)
         dtype = torch.float32
         self._neg_obs = torch.empty(
@@ -150,11 +152,22 @@ class OnPolicyBuffer:
         self._union_priorities = torch.ones(
             (self.union_capacity,), dtype=torch.float32, device=self.device
         )
+        if self.has_cost:
+            self._neg_cost = torch.empty(
+                (self.neg_capacity,), dtype=torch.float32, device=self.device
+            )
+            self._union_cost = torch.empty(
+                (self.union_capacity,), dtype=torch.float32, device=device
+            )
         self._eps = 1e-6
         self._neg_idx = 0
         self._union_idx = 0
 
-    def add(self, obs, act, done=None, is_negative=False):
+    def add(self, obs, act, cost=None, done=None, is_negative=False):
+        if self.has_cost:
+            assert (
+                cost is not None
+            ), "cost field cannot be none if has_cost is set to True"
         max_priority = 1.0
         done_sum = np.sum(done) or 1.0
         true_ep_len = self.ep_len - done_sum + 1
@@ -168,6 +181,8 @@ class OnPolicyBuffer:
             self._neg_priorities[self._neg_idx : self._neg_idx + self.ep_len] = (
                 new_priorities
             )
+            if self.has_cost:
+                self._neg_cost[self._neg_idx : self._neg_idx + self.ep_len] = cost
             self._neg_idx = (self._neg_idx + self.ep_len) % self.neg_capacity
         else:
             self._union_obs[self._union_idx : self._union_idx + self.ep_len] = obs
@@ -175,6 +190,8 @@ class OnPolicyBuffer:
             self._union_priorities[self._union_idx : self._union_idx + self.ep_len] = (
                 new_priorities
             )
+            if self.has_cost:
+                self._union_cost[self._union_idx : self._union_idx + self.ep_len] = cost
             self._union_idx = (self._union_idx + self.ep_len) % self.union_capacity
 
     def sample(self):
@@ -205,8 +222,6 @@ class OnPolicyBuffer:
             )
         ).to(self.device)
 
-        # tensor([12566703, 12468216, 12362093]) tensor([26191119, 25599700, 26147546])
-
         for n_idx, u_idx in zip(neg_idxs, union_idxs):
             h_neg_obs = torch.empty(
                 (self.horizon, batch_size, *self._neg_obs.shape[1:]),
@@ -224,6 +239,13 @@ class OnPolicyBuffer:
             h_union_act = torch.empty_like(
                 h_neg_act, dtype=torch.float32, device=self.device
             )
+            if self.has_cost:
+                h_neg_cost = torch.empty(
+                    (self.horizon, batch_size), dtype=torch.float32, device=self.device
+                )
+                h_union_cost = torch.empty_like(
+                    h_neg_cost, dtype=torch.float32, device=self.device
+                )
 
             for t in range(self.horizon):
                 _n_idx, _u_idx = n_idx + t, u_idx + t
@@ -231,7 +253,20 @@ class OnPolicyBuffer:
                 h_neg_act[t] = self._neg_act[_n_idx]
                 h_union_obs[t] = self._union_obs[_u_idx]
                 h_union_act[t] = self._union_act[_u_idx]
+                if self.has_cost:
+                    h_neg_cost[t] = self._neg_cost[_n_idx]
+                    h_union_cost[t] = self._union_cost[_u_idx]
 
-            # Horizon X Batch X obs/act_dim
+            # Horizon X Batch X obs/act_dim/
 
-            yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act)
+            if self.has_cost:
+                yield (
+                    h_neg_obs,
+                    h_neg_act,
+                    h_neg_cost,
+                    h_union_obs,
+                    h_union_act,
+                    h_union_cost,
+                )
+            else:
+                yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act)
