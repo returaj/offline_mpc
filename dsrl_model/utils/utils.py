@@ -126,6 +126,12 @@ def single_agent_args():
             "default": 3e-4,  # 1e-3 performs better
             "help": "Default common learning rate for the models",
         },
+        {
+            "name": "--cost-weight-temp",
+            "type": float,
+            "default": None,
+            "help": "Use default value for cost_weight_temp",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

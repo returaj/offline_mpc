@@ -172,6 +172,7 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["warmup_bc"] = args.warmup_bc or config["warmup_bc"]
     config["bag_size"] = args.bag_size or config["bag_size"]
+    config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
 
     # evaluation environment
     eval_env = gym.make(args.task)
