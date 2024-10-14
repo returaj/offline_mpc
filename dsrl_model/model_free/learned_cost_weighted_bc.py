@@ -93,6 +93,7 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
         weight = cost_model(target, use_sigmoid=True).sum(dim=0)
         inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+        inv_weight = torch.clip(inv_weight, max=10.0)
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
         pred_act, bc_mean, bc_std = bc_policy(to, ta)
