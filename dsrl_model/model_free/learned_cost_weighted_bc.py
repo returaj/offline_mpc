@@ -89,11 +89,6 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
     discount, loss = 1.0, 0.0
     # Horizon X Batch_Bag X obs/act_dim
     horizon, batch_bag_size, _ = target_obs.shape
-    with torch.no_grad():
-        target = encoder(torch.cat([target_obs, target_act], dim=-1))
-        weight = cost_model(target, use_sigmoid=True).sum(dim=0)
-        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-        inv_weight = torch.clip(inv_weight, max=10.0)
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
         pred_act, bc_mean, bc_std = bc_policy(to, ta)
@@ -102,8 +97,15 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
             1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
         ).sum(dim=1)
         # 0.5 weight is from BCQ implementation See @aviralkumar implementation
-        loss += discount * inv_weight * (recon_loss + 0.5 * kl_loss)
+        loss += discount * (recon_loss + 0.5 * kl_loss)
         discount *= gamma
+    with torch.no_grad():
+        target = encoder(torch.cat([target_obs, target_act], dim=-1))
+        weight = cost_model(target, use_sigmoid=True).sum(dim=0)
+        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+        l2_loss = torch.linalg.norm(loss).detach()
+        final_weight = inv_weight / (l2_loss + EP)
+    loss = final_weight * loss
     policy_loss = 0.0
     if config.get("use_policy_norm", False):
         for params in bc_policy.parameters():
