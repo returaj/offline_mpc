@@ -152,16 +152,35 @@ class OnPolicyBuffer:
         self._union_priorities = torch.ones(
             (self.union_capacity,), dtype=torch.float32, device=self.device
         )
-        if self.has_cost:
-            self._neg_cost = torch.empty(
-                (self.neg_capacity,), dtype=torch.float32, device=self.device
-            )
-            self._union_cost = torch.empty(
-                (self.union_capacity,), dtype=torch.float32, device=device
-            )
+        self._neg_cost = torch.empty(
+            (self.neg_capacity,), dtype=torch.float32, device=self.device
+        )
+        self._union_cost = torch.empty(
+            (self.union_capacity,), dtype=torch.float32, device=device
+        )
         self._eps = 1e-6
         self._neg_idx = 0
         self._union_idx = 0
+
+    def _update(
+        self,
+        obs_store,
+        act_store,
+        priority_store,
+        cost_store,
+        idx,
+        obs,
+        act,
+        priority,
+        cost,
+        capacity,
+    ):
+        obs_store[idx : idx + self.ep_len] = obs
+        act_store[idx : idx + self.ep_len] = act
+        priority_store[idx : idx + self.ep_len] = priority
+        if self.has_cost:
+            cost_store[idx : idx + self.ep_len] = cost
+        return (idx + self.ep_len) % capacity
 
     def add(self, obs, act, cost=None, done=None, is_negative=False):
         if self.has_cost:
@@ -176,23 +195,31 @@ class OnPolicyBuffer:
         new_priorities[mask] = 0.0
 
         if is_negative:
-            self._neg_obs[self._neg_idx : self._neg_idx + self.ep_len] = obs
-            self._neg_act[self._neg_idx : self._neg_idx + self.ep_len] = act
-            self._neg_priorities[self._neg_idx : self._neg_idx + self.ep_len] = (
-                new_priorities
+            self._neg_idx = self._update(
+                obs_store=self._neg_obs,
+                act_store=self._neg_act,
+                priority_store=self._neg_priorities,
+                cost_store=self._neg_cost,
+                idx=self._neg_idx,
+                obs=obs,
+                act=act,
+                priority=new_priorities,
+                cost=cost,
+                capacity=self.neg_capacity,
             )
-            if self.has_cost:
-                self._neg_cost[self._neg_idx : self._neg_idx + self.ep_len] = cost
-            self._neg_idx = (self._neg_idx + self.ep_len) % self.neg_capacity
         else:
-            self._union_obs[self._union_idx : self._union_idx + self.ep_len] = obs
-            self._union_act[self._union_idx : self._union_idx + self.ep_len] = act
-            self._union_priorities[self._union_idx : self._union_idx + self.ep_len] = (
-                new_priorities
+            self._union_idx = self._update(
+                obs_store=self._union_obs,
+                act_store=self._union_act,
+                priority_store=self._union_priorities,
+                cost_store=self._union_cost,
+                idx=self._union_idx,
+                obs=obs,
+                act=act,
+                priority=new_priorities,
+                cost=cost,
+                capacity=self.union_capacity,
             )
-            if self.has_cost:
-                self._union_cost[self._union_idx : self._union_idx + self.ep_len] = cost
-            self._union_idx = (self._union_idx + self.ep_len) % self.union_capacity
 
     def sample(self):
         batch_size = self.batch_size

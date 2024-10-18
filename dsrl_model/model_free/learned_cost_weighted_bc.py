@@ -67,10 +67,11 @@ trajectory_cfg = {
         (0.25, 0.75, 0.0, 1.0),
     ),
     "target_cost": 25.0,
-    "alpha": 0.0,  # dU = alpha * dN + (1-alpha) * dP
+    "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 0,
-    "num_union_positive_trajectories": 50,
+    "num_union_negative_trajectories": 100,
+    "num_union_positive_trajectories": 100,
+    "percentage_validation_trajectories": 0.1,
 }
 
 
@@ -144,15 +145,15 @@ def cost_loss_fn(
     total_union_cost = total_union_cost.view(batch_size, bag_size)
     expected_neg_cost = torch.mean(total_neg_cost, dim=1)
     expected_union_cost = torch.mean(total_union_cost, dim=1)
-    # expected_pos_cost = (1 / (1 - alpha)) * (
-    #     expected_union_cost - alpha * expected_neg_cost
-    # ).clamp(min=EP)
+    expected_pos_cost = (1 / (1 - alpha)) * (
+        expected_union_cost - alpha * expected_neg_cost
+    ).clamp(min=EP)
     # z = torch.log(expected_neg_cost + expected_pos_cost + EP)
     # # print(
     # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
     # # )
-    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP) + z
-    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
+    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
     cost_loss = 0.0
     if config.get("use_cost_norm", False):
         for params in cost_model.parameters():
@@ -212,6 +213,8 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         latent_dim=config["latent_obs_dim"],
     ).to(device)
+    encoder_target = deepcopy(encoder)
+    best_encoder = deepcopy(encoder)
     encoder_optimizer = torch.optim.Adam(
         encoder.parameters(),
         lr=args.lr,
@@ -221,6 +224,8 @@ def main(args, cfg_env=None):
         obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
+    cost_model_target = deepcopy(cost_model)
+    best_cost_model = deepcopy(cost_model)
     cost_model_optimizer = torch.optim.Adam(
         cost_model.parameters(),
         lr=args.lr,
@@ -319,8 +324,8 @@ def main(args, cfg_env=None):
             if (epoch + 1) > config["warmup_bc"]:
                 bc_policy_loss = bc_policy_loss_fn(
                     bc_policy=bc_policy,
-                    encoder=encoder,
-                    cost_model=cost_model,
+                    encoder=encoder_target,
+                    cost_model=cost_model_target,
                     target_obs=target_union_obs,
                     target_act=target_union_act,
                     config=config,
@@ -341,9 +346,9 @@ def main(args, cfg_env=None):
             encoder_optimizer.step()
             cost_model_optimizer.step()
 
-            # if (step % config["update_freq"]) == 0:
-            #     ema(encoder, encoder_target, config["update_tau"])
-            #     ema(value_cost, value_cost_target, config["update_tau"])
+            if (step % config["update_freq"]) == 0:
+                ema(encoder, encoder_target, config["update_tau"])
+                ema(cost_model, cost_model_target, config["update_tau"])
 
             logger.store(
                 **{
