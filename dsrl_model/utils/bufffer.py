@@ -162,6 +162,40 @@ class OnPolicyBuffer:
         self._neg_idx = 0
         self._union_idx = 0
 
+    def add_validation_dataset(self, obs, act, done=None, is_negative=True):
+        done_sum = np.sum(done, axis=1) or np.ones(obs.shape[0], dtype=np.float32)
+        true_ep_len = self.ep_len - done_sum + 1
+        horizon = self.horizon
+        valid_capacity = np.sum(true_ep_len - horizon + 1)
+        valid_obs = torch.empty(
+            (valid_capacity, horizon, obs.shape[-1]),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        valid_act = torch.empty(
+            (valid_capacity, horizon, act.shape[-1]),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        valid_traj_idx = 0
+        for o, a, ep_len in zip(obs, act, true_ep_len):
+            idx = 0
+            while idx <= ep_len - horizon:
+                pos = 0
+                while pos < horizon:
+                    valid_obs[valid_traj_idx, pos] = o[idx + pos]
+                    valid_act[valid_traj_idx, pos] = a[idx + pos]
+                    pos += 1
+                valid_traj_idx += 1
+                idx += 1
+        # Horizon X Batch X obs/act_dim
+        self._valid_obs = torch.permute(valid_obs, dims=(1, 0, 2))
+        self._valid_act = torch.permute(valid_act, dims=(1, 0, 2))
+
+    def get_validation_dataset(self):
+        # Horizon X Batch X obs/act_dim
+        return self._valid_obs, self._valid_act
+
     def _update(
         self,
         obs_store,

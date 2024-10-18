@@ -71,7 +71,7 @@ trajectory_cfg = {
     "num_negative_trajectories": 50,
     "num_union_negative_trajectories": 100,
     "num_union_positive_trajectories": 100,
-    "percentage_validation_trajectories": 0.1,
+    "percentage_validation_trajectories": 0.0,
 }
 
 
@@ -255,6 +255,18 @@ def main(args, cfg_env=None):
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
 
+    # create validation dataset
+    valid_size = int(
+        neg_data["observations"].shape[0]
+        * trajectory_cfg["percentage_validation_trajectories"]
+    )
+    valid_observations = neg_observations[:valid_size]
+    valid_actions = neg_actions[:valid_size]
+    valid_dones = neg_dones[:valid_size]
+    neg_observations = neg_observations[valid_size:]
+    neg_actions = neg_actions[valid_size:]
+    neg_dones = neg_dones[valid_size:]
+
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
         neg_observations.shape[1] == ep_len
@@ -274,6 +286,9 @@ def main(args, cfg_env=None):
         buffer.add(obs, act, done, is_negative=True)
     for obs, act, done in zip(union_observations, union_actions, union_dones):
         buffer.add(obs, act, done, is_negative=False)
+
+    if valid_size > 0:
+        buffer.add_validation_dataset(valid_observations, valid_actions, valid_dones)
 
     # set logger
     eval_rew_deque = deque(maxlen=5)
