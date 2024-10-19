@@ -48,7 +48,6 @@ default_cfg = {
     "gamma": 0.99,
     "cost_lambda": 0.0,
     "action_repeat": 2,  # set to 2, min value is 1
-    "validation_tau": 1.0,
     "update_freq": 1,
     "update_tau": 0.005,
     "bc_coef": 0.1,
@@ -90,7 +89,7 @@ def ema(m, m_target, tau):
 def get_validation_accuracy(dataset, encoder, cost_model, config, device):
     neg_obs, neg_act, union_obs, union_act = dataset
     horizon = neg_obs.shape[0]
-    bag_size, tau = config["bag_size"], config["validation_tau"]
+    bag_size = config["bag_size"]
     neg_cost, union_cost = 0.0, 0.0
     for t in range(horizon):
         neg_cost += cost_model(
@@ -103,15 +102,16 @@ def get_validation_accuracy(dataset, encoder, cost_model, config, device):
     neg_idx = torch.as_tensor(
         np.random.choice(neg_cost.shape[0], (neg_batch, bag_size), replace=False)
     ).to(device)
-    out_neg_batch = neg_cost[neg_idx].sum(1) >= bag_size * tau
+    neg_batch_cost = neg_cost[neg_idx].sum(1)
     union_batch = union_cost.shape[0] // bag_size
     union_idx = torch.as_tensor(
         np.random.choice(union_cost.shape[0], (union_batch, bag_size), replace=False)
     ).to(device)
-    out_union_batch = union_cost[union_idx].sum(1) < bag_size * tau
-    # print(out_neg_batch.sum())
-    # print(out_union_batch.sum())
-    return (out_neg_batch.sum() / neg_batch), (out_union_batch.sum() / union_batch)
+    union_batch_cost = union_cost[union_idx].sum(1)
+    comparative_acc = torch.vmap(lambda x: torch.sum(union_batch_cost < x))(
+        neg_batch_cost
+    ).sum() / (neg_batch * union_batch)
+    return comparative_acc
 
 
 def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, config):
@@ -133,7 +133,9 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
         weight = cost_model(target, use_sigmoid=True).sum(dim=0)
         inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-        l2_loss = torch.linalg.norm(loss).detach()
+        # need to verify if the algorithm starts training with negative trajectory
+        # and l2_loss normalization solves the stated problem
+        l2_loss = 1.0  # torch.linalg.norm(loss).detach()
         final_weight = inv_weight / (l2_loss + EP)
     loss = final_weight * loss
     policy_loss = 0.0
@@ -417,10 +419,10 @@ def main(args, cfg_env=None):
                 ema(encoder, encoder_target, config["update_tau"])
                 ema(cost_model, cost_model_target, config["update_tau"])
 
-            valid_neg_acc, valid_union_acc = torch.tensor(0), torch.tensor(0)
+            valid_acc = torch.tensor(0)
             if use_validation:
                 validation_dataset = buffer.get_validation_dataset()
-                valid_neg_acc, valid_union_acc = get_validation_accuracy(
+                valid_acc = get_validation_accuracy(
                     dataset=validation_dataset,
                     encoder=encoder_target,
                     cost_model=cost_model_target,
@@ -433,8 +435,7 @@ def main(args, cfg_env=None):
                     "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
                     "Loss/Loss_cost": cost_loss.mean().item(),
                     "Loss/Loss_total": total_loss.mean().item(),
-                    "Metrics/Acc_valid_neg": valid_neg_acc.item(),
-                    "Metrics/Acc_valid_union": valid_union_acc.item(),
+                    "Metrics/Acc_validation": valid_acc.item(),
                 }
             )
             logger.logged = False
@@ -527,8 +528,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             if use_validation:
-                logger.log_tabular("Metrics/Acc_valid_neg")
-                logger.log_tabular("Metrics/Acc_valid_union")
+                logger.log_tabular("Metrics/Acc_validation")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
