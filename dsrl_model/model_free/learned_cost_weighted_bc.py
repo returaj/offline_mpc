@@ -48,6 +48,7 @@ default_cfg = {
     "gamma": 0.99,
     "cost_lambda": 0.0,
     "action_repeat": 2,  # set to 2, min value is 1
+    "validation_tau": 1.0,
     "update_freq": 1,
     "update_tau": 0.005,
     "bc_coef": 0.1,
@@ -71,7 +72,7 @@ trajectory_cfg = {
     "num_negative_trajectories": 50,
     "num_union_negative_trajectories": 100,
     "num_union_positive_trajectories": 100,
-    "percentage_validation_trajectories": 0.0,
+    "percentage_validation_trajectories": 0.1,
 }
 
 
@@ -83,6 +84,34 @@ def ema(m, m_target, tau):
     with torch.no_grad():
         for p, p_target in zip(m.parameters(), m_target.parameters()):
             p_target.data.lerp_(p.data, tau)
+
+
+@torch.no_grad
+def get_validation_accuracy(dataset, encoder, cost_model, config, device):
+    neg_obs, neg_act, union_obs, union_act = dataset
+    horizon = neg_obs.shape[0]
+    bag_size, tau = config["bag_size"], config["validation_tau"]
+    neg_cost, union_cost = 0.0, 0.0
+    for t in range(horizon):
+        neg_cost += cost_model(
+            encoder(torch.cat([neg_obs[t], neg_act[t]], dim=1)), use_sigmoid=True
+        )
+        union_cost += cost_model(
+            encoder(torch.cat([union_obs[t], union_act[t]], dim=1)), use_sigmoid=True
+        )
+    neg_batch = neg_cost.shape[0] // bag_size
+    neg_idx = torch.as_tensor(
+        np.random.choice(neg_cost.shape[0], (neg_batch, bag_size), replace=False)
+    ).to(device)
+    out_neg_batch = neg_cost[neg_idx].sum(1) >= bag_size * tau
+    union_batch = union_cost.shape[0] // bag_size
+    union_idx = torch.as_tensor(
+        np.random.choice(union_cost.shape[0], (union_batch, bag_size), replace=False)
+    ).to(device)
+    out_union_batch = union_cost[union_idx].sum(1) < bag_size * tau
+    # print(out_neg_batch.sum())
+    # print(out_union_batch.sum())
+    return (out_neg_batch.sum() / neg_batch), (out_union_batch.sum() / union_batch)
 
 
 def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, config):
@@ -255,17 +284,28 @@ def main(args, cfg_env=None):
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
 
-    # create validation dataset
-    valid_size = int(
-        neg_data["observations"].shape[0]
+    # create negative validation dataset
+    valid_neg_size = int(
+        neg_observations.shape[0] * trajectory_cfg["percentage_validation_trajectories"]
+    )
+    valid_neg_observations = neg_observations[:valid_neg_size]
+    valid_neg_actions = neg_actions[:valid_neg_size]
+    valid_neg_dones = neg_dones[:valid_neg_size]
+    neg_observations = neg_observations[valid_neg_size:]
+    neg_actions = neg_actions[valid_neg_size:]
+    neg_dones = neg_dones[valid_neg_size:]
+
+    # create union validation dataset
+    valid_union_size = int(
+        union_observations.shape[0]
         * trajectory_cfg["percentage_validation_trajectories"]
     )
-    valid_observations = neg_observations[:valid_size]
-    valid_actions = neg_actions[:valid_size]
-    valid_dones = neg_dones[:valid_size]
-    neg_observations = neg_observations[valid_size:]
-    neg_actions = neg_actions[valid_size:]
-    neg_dones = neg_dones[valid_size:]
+    valid_union_observations = union_observations[:valid_union_size]
+    valid_union_actions = union_actions[:valid_union_size]
+    valid_union_dones = union_dones[:valid_union_size]
+    union_observations = union_observations[valid_union_size:]
+    union_actions = union_actions[valid_union_size:]
+    union_dones = union_dones[valid_union_size:]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
@@ -287,8 +327,20 @@ def main(args, cfg_env=None):
     for obs, act, done in zip(union_observations, union_actions, union_dones):
         buffer.add(obs, act, done, is_negative=False)
 
-    if valid_size > 0:
-        buffer.add_validation_dataset(valid_observations, valid_actions, valid_dones)
+    use_validation = trajectory_cfg["percentage_validation_trajectories"] > 0.0
+    if use_validation:
+        buffer.add_validation_dataset(
+            valid_neg_observations,
+            valid_neg_actions,
+            valid_neg_dones,
+            is_negative=True,
+        )
+        buffer.add_validation_dataset(
+            valid_union_observations,
+            valid_union_actions,
+            valid_union_dones,
+            is_negative=False,
+        )
 
     # set logger
     eval_rew_deque = deque(maxlen=5)
@@ -365,11 +417,24 @@ def main(args, cfg_env=None):
                 ema(encoder, encoder_target, config["update_tau"])
                 ema(cost_model, cost_model_target, config["update_tau"])
 
+            valid_neg_acc, valid_union_acc = torch.tensor(0), torch.tensor(0)
+            if use_validation:
+                validation_dataset = buffer.get_validation_dataset()
+                valid_neg_acc, valid_union_acc = get_validation_accuracy(
+                    dataset=validation_dataset,
+                    encoder=encoder_target,
+                    cost_model=cost_model_target,
+                    config=config,
+                    device=device,
+                )
+
             logger.store(
                 **{
                     "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
                     "Loss/Loss_cost": cost_loss.mean().item(),
                     "Loss/Loss_total": total_loss.mean().item(),
+                    "Metrics/Acc_valid_neg": valid_neg_acc.item(),
+                    "Metrics/Acc_valid_union": valid_union_acc.item(),
                 }
             )
             logger.logged = False
@@ -461,6 +526,9 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormRet")
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
+            if use_validation:
+                logger.log_tabular("Metrics/Acc_valid_neg")
+                logger.log_tabular("Metrics/Acc_valid_union")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
