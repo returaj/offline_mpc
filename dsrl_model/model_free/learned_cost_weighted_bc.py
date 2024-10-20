@@ -1,39 +1,32 @@
 import os
 import os.path as osp
+import random
+import re
 import sys
 import time
-from copy import deepcopy
 from collections import deque
+from copy import deepcopy
 
-import re
-import random
+import dsrl.infos as dsrl_infos
+import dsrl.offline_safety_gymnasium  # type: ignore
+import gymnasium as gym
 import numpy as np
-
 import torch
+import torch.distributions as td
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 
-import gymnasium as gym
-import dsrl.offline_safety_gymnasium  # type: ignore
-import dsrl.infos as dsrl_infos
-
-from dsrl_model.utils.models import (
-    BcqVAE,
-    Encoder,
-    ExpCostModel,
-)
 from dsrl_model.utils.bufffer import OnPolicyBuffer
-from dsrl_model.utils.logger import EpochLogger
-from dsrl_model.utils.save_video_with_value import save_video
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
     get_neg_and_union_data,
     get_normalized_data,
 )
-from dsrl_model.utils.utils import ActionRepeater
-from dsrl_model.utils.utils import single_agent_args, get_params_norm
-
+from dsrl_model.utils.logger import EpochLogger
+from dsrl_model.utils.models import BcqVAE, Encoder, ExpCostModel
+from dsrl_model.utils.save_video_with_value import save_video
+from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent_args
 
 EP = 1e-6
 EP2 = 1e-3
@@ -86,18 +79,7 @@ def ema(m, m_target, tau):
 
 
 @torch.no_grad
-def get_validation_accuracy(dataset, encoder, cost_model, config, device):
-    neg_obs, neg_act, union_obs, union_act = dataset
-    horizon = neg_obs.shape[0]
-    bag_size = config["bag_size"]
-    neg_cost, union_cost = 0.0, 0.0
-    for t in range(horizon):
-        neg_cost += cost_model(
-            encoder(torch.cat([neg_obs[t], neg_act[t]], dim=1)), use_sigmoid=True
-        )
-        union_cost += cost_model(
-            encoder(torch.cat([union_obs[t], union_act[t]], dim=1)), use_sigmoid=True
-        )
+def calculate_comparative_acc(neg_cost, union_cost, bag_size, device):
     neg_batch = neg_cost.shape[0] // bag_size
     neg_idx = torch.as_tensor(
         np.random.choice(neg_cost.shape[0], (neg_batch, bag_size), replace=False)
@@ -111,6 +93,47 @@ def get_validation_accuracy(dataset, encoder, cost_model, config, device):
     comparative_acc = torch.vmap(lambda x: torch.sum(union_batch_cost < x))(
         neg_batch_cost
     ).sum() / (neg_batch * union_batch)
+    return comparative_acc
+
+
+@torch.no_grad
+def get_validation_policy_accuracy(dataset, bc_policy, config, device):
+    neg_obs, neg_act, union_obs, union_act = dataset
+    horizon = neg_obs.shape[0]
+    bag_size = config["bag_size"]
+    neg_kl_dist, union_kl_dist = 0.0, 0.0
+    unit_gaussian = td.normal.Normal(
+        torch.tensor([0.0]).to(device), torch.tensor([1.0]).to(device)
+    )
+    for t in range(horizon):
+        _, neg_mean, neg_std = bc_policy(neg_obs[t], neg_act[t])
+        neg_kl_dist += td.kl.kl_divergence(
+            td.normal.Normal(neg_mean, neg_std), unit_gaussian
+        ).sum(1)
+        _, union_mean, union_std = bc_policy(union_obs[t], union_act[t])
+        union_kl_dist += td.kl.kl_divergence(
+            td.normal.Normal(union_mean, union_std), unit_gaussian
+        ).sum(1)
+    comparative_acc = calculate_comparative_acc(
+        neg_kl_dist, union_kl_dist, bag_size, device
+    )
+    return comparative_acc
+
+
+@torch.no_grad
+def get_validation_cost_accuracy(dataset, encoder, cost_model, config, device):
+    neg_obs, neg_act, union_obs, union_act = dataset
+    horizon = neg_obs.shape[0]
+    bag_size = config["bag_size"]
+    neg_cost, union_cost = 0.0, 0.0
+    for t in range(horizon):
+        neg_cost += cost_model(
+            encoder(torch.cat([neg_obs[t], neg_act[t]], dim=1)), use_sigmoid=True
+        )
+        union_cost += cost_model(
+            encoder(torch.cat([union_obs[t], union_act[t]], dim=1)), use_sigmoid=True
+        )
+    comparative_acc = calculate_comparative_acc(neg_cost, union_cost, bag_size, device)
     return comparative_acc
 
 
@@ -419,13 +442,19 @@ def main(args, cfg_env=None):
                 ema(encoder, encoder_target, config["update_tau"])
                 ema(cost_model, cost_model_target, config["update_tau"])
 
-            valid_acc = torch.tensor(0)
+            valid_cost_acc, valid_policy_acc = torch.tensor(0), torch.tensor(0)
             if use_validation:
                 validation_dataset = buffer.get_validation_dataset()
-                valid_acc = get_validation_accuracy(
+                valid_cost_acc = get_validation_cost_accuracy(
                     dataset=validation_dataset,
                     encoder=encoder_target,
                     cost_model=cost_model_target,
+                    config=config,
+                    device=device,
+                )
+                valid_policy_acc = get_validation_policy_accuracy(
+                    dataset=validation_dataset,
+                    bc_policy=bc_policy,
                     config=config,
                     device=device,
                 )
@@ -435,7 +464,8 @@ def main(args, cfg_env=None):
                     "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
                     "Loss/Loss_cost": cost_loss.mean().item(),
                     "Loss/Loss_total": total_loss.mean().item(),
-                    "Metrics/Acc_validation": valid_acc.item(),
+                    "Metrics/Acc_validation_cost": valid_cost_acc.item(),
+                    "Metrics/Acc_validation_policy": valid_policy_acc.item(),
                 }
             )
             logger.logged = False
@@ -528,7 +558,8 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
             if use_validation:
-                logger.log_tabular("Metrics/Acc_validation")
+                logger.log_tabular("Metrics/Acc_validation_cost")
+                logger.log_tabular("Metrics/Acc_validation_policy")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
