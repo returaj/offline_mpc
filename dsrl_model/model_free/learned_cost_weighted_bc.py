@@ -64,7 +64,7 @@ trajectory_cfg = {
     "num_negative_trajectories": 50,
     "num_union_negative_trajectories": 100,
     "num_union_positive_trajectories": 100,
-    "percentage_validation_trajectories": 0.1,
+    "percentage_validation_trajectories": 0.2,
 }
 
 
@@ -250,7 +250,7 @@ def main(args, cfg_env=None):
     # See BEAR implementation from @aviralkumar
     bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
     config["bc_latent_dim"] = bc_latent_dim
-    config["bc_lr"] = 1e-5
+    config["bc_lr"] = args.lr
     bc_policy = BcqVAE(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
