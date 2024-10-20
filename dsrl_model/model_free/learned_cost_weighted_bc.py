@@ -416,8 +416,8 @@ def main(args, cfg_env=None):
             if (epoch + 1) > config["warmup_bc"]:
                 bc_policy_loss = bc_policy_loss_fn(
                     bc_policy=bc_policy,
-                    encoder=encoder_target,
-                    cost_model=cost_model_target,
+                    encoder=encoder,
+                    cost_model=cost_model,
                     target_obs=target_union_obs,
                     target_act=target_union_act,
                     config=config,
@@ -438,17 +438,17 @@ def main(args, cfg_env=None):
             encoder_optimizer.step()
             cost_model_optimizer.step()
 
-            if (step % config["update_freq"]) == 0:
-                ema(encoder, encoder_target, config["update_tau"])
-                ema(cost_model, cost_model_target, config["update_tau"])
+            # if (step % config["update_freq"]) == 0:
+            #     ema(encoder, encoder_target, config["update_tau"])
+            #     ema(cost_model, cost_model_target, config["update_tau"])
 
             valid_cost_acc, valid_policy_acc = torch.tensor(0), torch.tensor(0)
             if use_validation:
                 validation_dataset = buffer.get_validation_dataset()
                 valid_cost_acc = get_validation_cost_accuracy(
                     dataset=validation_dataset,
-                    encoder=encoder_target,
-                    cost_model=cost_model_target,
+                    encoder=encoder,
+                    cost_model=cost_model,
                     config=config,
                     device=device,
                 )
