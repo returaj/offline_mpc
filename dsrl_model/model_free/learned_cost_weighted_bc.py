@@ -397,6 +397,11 @@ def main(args, cfg_env=None):
         # ), f"multiple learning rates found {bc_scheduler.get_last_lr()}"
         # lr = bc_scheduler.get_last_lr()[0]
 
+        # to make sure that the validation metric is added in the logger
+        # incase the if statement for the validation metric is not called.
+        logger.store(**{"Metrics/Acc_valid_recent_cost": 0.0})
+        logger.store(**{"Metrics/Acc_valid_recent_cost": 0.0})
+
         # shape: Horizon X Batch_Bag X obs/act_dim
         for (
             target_neg_obs,
