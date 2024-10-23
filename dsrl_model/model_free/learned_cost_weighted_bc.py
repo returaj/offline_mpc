@@ -33,8 +33,8 @@ EP2 = 1e-3
 
 default_cfg = {
     "save_freq": 20,
-    "cost_validation_freq": 10,
-    "bc_validation_freq": 10,
+    "cost_validation_freq": 50,
+    "bc_validation_freq": 50,
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
@@ -91,9 +91,9 @@ def calculate_comparative_acc(neg_cost, union_cost, bag_size, device):
         np.random.choice(union_cost.shape[0], (union_batch, bag_size), replace=False)
     ).to(device)
     union_batch_cost = union_cost[union_idx].sum(1)
-    comparative_acc = torch.vmap(lambda x: torch.sum(union_batch_cost < x))(
-        neg_batch_cost
-    ).sum() / (neg_batch * union_batch)
+    comparative_acc = torch.vmap(
+        lambda x: torch.sum((union_batch_cost < x) + 0.25 * (union_batch_cost == x))
+    )(neg_batch_cost).sum() / (neg_batch * union_batch)
     return comparative_acc
 
 
@@ -397,11 +397,6 @@ def main(args, cfg_env=None):
         # ), f"multiple learning rates found {bc_scheduler.get_last_lr()}"
         # lr = bc_scheduler.get_last_lr()[0]
 
-        # to make sure that the validation metric is added in the logger
-        # incase the if statement for the validation metric is not called.
-        logger.store(**{"Metrics/Acc_valid_recent_cost": 0.0})
-        logger.store(**{"Metrics/Acc_valid_recent_cost": 0.0})
-
         # shape: Horizon X Batch_Bag X obs/act_dim
         for (
             target_neg_obs,
@@ -409,8 +404,6 @@ def main(args, cfg_env=None):
             target_union_obs,
             target_union_act,
         ) in buffer.sample():
-
-            step += 1
 
             cost_loss = cost_loss_fn(
                 encoder=encoder,
@@ -493,6 +486,8 @@ def main(args, cfg_env=None):
                 }
             )
             logger.logged = False
+
+            step += 1
 
         # bc_scheduler.step()
         training_end_time = time.time()
@@ -581,8 +576,10 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormRet")
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
-            logger.log_tabular("Metrics/Acc_valid_recent_cost")
-            logger.log_tabular("Metrics/Acc_valid_recent_policy")
+            if not logger.check_empty("Metrics/Acc_valid_recent_cost"):
+                logger.log_tabular("Metrics/Acc_valid_recent_cost")
+            if not logger.check_empty("Metrics/Acc_valid_recent_policy"):
+                logger.log_tabular("Metrics/Acc_valid_recent_policy")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
