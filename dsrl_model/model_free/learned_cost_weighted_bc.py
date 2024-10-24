@@ -135,11 +135,21 @@ def get_validation_cost_accuracy(dataset, encoder, cost_model, config, device):
             encoder(torch.cat([union_obs[t], union_act[t]], dim=1)), use_sigmoid=True
         )
     comparative_acc = calculate_comparative_acc(neg_cost, union_cost, bag_size, device)
-    return comparative_acc
+    return comparative_acc, torch.mean(neg_cost), torch.std(neg_cost)
 
 
-def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, config):
+def bc_policy_loss_fn(
+    bc_policy,
+    encoder,
+    cost_model,
+    target_obs,
+    target_act,
+    config,
+    neg_mean_cost,
+    neg_std_cost,
+):
     gamma = config["gamma"]
+    device = target_obs.device
     discount, loss = 1.0, 0.0
     # Horizon X Batch_Bag X obs/act_dim
     horizon, batch_bag_size, _ = target_obs.shape
@@ -156,11 +166,15 @@ def bc_policy_loss_fn(bc_policy, encoder, cost_model, target_obs, target_act, co
     with torch.no_grad():
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
         weight = cost_model(target, use_sigmoid=True).sum(dim=0)
-        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-        # need to verify if the algorithm starts training with negative trajectory
-        # and l2_loss normalization solves the stated problem
-        l2_loss = 1.0  # torch.linalg.norm(loss).detach()
-        final_weight = inv_weight / (l2_loss + EP)
+        # inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+        # # need to verify if the algorithm starts training with negative trajectory
+        # # and l2_loss normalization solves the stated problem
+        # l2_loss = 1.0  # torch.linalg.norm(loss).detach()
+        # final_weight = inv_weight / (l2_loss + EP)
+        margin = neg_mean_cost - 0.1 * neg_std_cost
+        final_weight = torch.where(
+            weight <= margin, torch.tensor(1.0).to(device), torch.tensor(0.0).to(device)
+        )
     loss = final_weight * loss
     policy_loss = 0.0
     if config.get("use_policy_norm", False):
@@ -388,6 +402,8 @@ def main(args, cfg_env=None):
     step = 0
     prev_valid_cost_acc = torch.tensor(-1.0).to(device)
     prev_valid_bc_acc = torch.tensor(-1.0).to(device)
+    best_neg_mean_cost = torch.tensor(0.0).to(device)
+    best_neg_std_cost = torch.tensor(0.0).to(device)
     update_cost_model_count = 0
 
     for epoch in range(num_epochs):
@@ -425,17 +441,21 @@ def main(args, cfg_env=None):
 
             if step % config["cost_validation_freq"] == 0:
                 validation_dataset = buffer.get_validation_dataset()
-                valid_cost_acc = get_validation_cost_accuracy(
-                    dataset=validation_dataset,
-                    encoder=encoder,
-                    cost_model=cost_model,
-                    config=config,
-                    device=device,
+                valid_cost_acc, neg_mean_cost, neg_std_cost = (
+                    get_validation_cost_accuracy(
+                        dataset=validation_dataset,
+                        encoder=encoder,
+                        cost_model=cost_model,
+                        config=config,
+                        device=device,
+                    )
                 )
                 if prev_valid_cost_acc <= valid_cost_acc:
                     prev_valid_cost_acc = valid_cost_acc
                     best_encoder.load_state_dict(encoder.state_dict())
                     best_cost_model.load_state_dict(cost_model.state_dict())
+                    best_neg_mean_cost = neg_mean_cost
+                    best_neg_std_cost = neg_std_cost
                     update_cost_model_count = 0
                 else:
                     update_cost_model_count += 1
@@ -447,7 +467,16 @@ def main(args, cfg_env=None):
                     cost_model.load_state_dict(best_cost_model.state_dict())
                     update_cost_model_count = 0
 
-                logger.store(**{"Metrics/Acc_valid_recent_cost": valid_cost_acc.item()})
+                logger.store(
+                    **{
+                        "Metrics/Acc_valid_recent_cost": valid_cost_acc.item(),
+                        "Metrics/Valid_neg_trajectory_mean_cost": neg_mean_cost.item(),
+                        "Metrics/Valid_neg_trajectory_std_cost": neg_std_cost.item(),
+                        "Metrics/Acc_best_valid_cost": prev_valid_cost_acc.item(),
+                        "Metrics/Valid_best_neg_trajectory_mean_cost": best_neg_mean_cost.item(),
+                        "Metrics/Valid_best_neg_trajectory_std_cost": best_neg_std_cost.item(),
+                    }
+                )
 
             bc_policy_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
@@ -456,6 +485,8 @@ def main(args, cfg_env=None):
                 target_obs=target_union_obs,
                 target_act=target_union_act,
                 config=config,
+                neg_mean_cost=best_neg_mean_cost,
+                neg_std_cost=best_neg_std_cost,
             )
             bc_policy_loss.register_hook(
                 lambda grad: grad * (1 / config["train_horizon"])
@@ -477,7 +508,12 @@ def main(args, cfg_env=None):
                     prev_valid_bc_acc = valid_bc_acc
                     best_bc_policy.load_state_dict(bc_policy.state_dict())
 
-                logger.store(**{"Metrics/Acc_valid_recent_policy": valid_bc_acc.item()})
+                logger.store(
+                    **{
+                        "Metrics/Acc_valid_recent_policy": valid_bc_acc.item(),
+                        "Metrics/Acc_best_valid_policy": prev_valid_bc_acc.item(),
+                    }
+                )
 
             logger.store(
                 **{
@@ -578,8 +614,14 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpLen")
             if not logger.check_empty("Metrics/Acc_valid_recent_cost"):
                 logger.log_tabular("Metrics/Acc_valid_recent_cost")
+                logger.log_tabular("Metrics/Valid_neg_trajectory_mean_cost")
+                logger.log_tabular("Metrics/Valid_neg_trajectory_std_cost")
+                logger.log_tabular("Metrics/Acc_best_valid_cost")
+                logger.log_tabular("Metrics/Valid_best_neg_trajectory_mean_cost")
+                logger.log_tabular("Metrics/Valid_best_neg_trajectory_std_cost")
             if not logger.check_empty("Metrics/Acc_valid_recent_policy"):
                 logger.log_tabular("Metrics/Acc_valid_recent_policy")
+                logger.log_tabular("Metrics/Acc_best_valid_policy")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
