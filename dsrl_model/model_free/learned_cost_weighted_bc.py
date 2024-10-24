@@ -400,8 +400,10 @@ def main(args, cfg_env=None):
 
     # train model
     step = 0
-    prev_valid_cost_acc = torch.tensor(-1.0).to(device)
-    prev_valid_bc_acc = torch.tensor(-1.0).to(device)
+    valid_cost_acc_deque = deque([0.0, 0.0], maxlen=5)
+    valid_bc_acc_deque = deque([0.0, 0.0], maxlen=5)
+    prev_valid_cost_acc = -1.0
+    prev_valid_bc_acc = -1.0
     best_neg_mean_cost = torch.tensor(0.0).to(device)
     best_neg_std_cost = torch.tensor(0.0).to(device)
     update_cost_model_count = 0
@@ -450,8 +452,9 @@ def main(args, cfg_env=None):
                         device=device,
                     )
                 )
-                if prev_valid_cost_acc <= valid_cost_acc:
-                    prev_valid_cost_acc = valid_cost_acc
+                valid_cost_acc_deque.append(valid_cost_acc.item())
+                if prev_valid_cost_acc <= np.mean(valid_cost_acc_deque):
+                    prev_valid_cost_acc = np.mean(valid_cost_acc_deque)
                     best_encoder.load_state_dict(encoder.state_dict())
                     best_cost_model.load_state_dict(cost_model.state_dict())
                     best_neg_mean_cost = neg_mean_cost
@@ -469,7 +472,7 @@ def main(args, cfg_env=None):
 
                 logger.store(
                     **{
-                        "Metrics/Acc_valid_recent_cost": valid_cost_acc.item(),
+                        "Metrics/Acc_valid_recent_cost": np.mean(valid_cost_acc_deque),
                         "Metrics/Valid_neg_trajectory_mean_cost": neg_mean_cost.item(),
                         "Metrics/Valid_neg_trajectory_std_cost": neg_std_cost.item(),
                         "Metrics/Acc_best_valid_cost": prev_valid_cost_acc.item(),
@@ -504,13 +507,14 @@ def main(args, cfg_env=None):
                     config=config,
                     device=device,
                 )
-                if prev_valid_bc_acc <= valid_bc_acc:
-                    prev_valid_bc_acc = valid_bc_acc
+                valid_bc_acc_deque.append(valid_bc_acc.item())
+                if prev_valid_bc_acc <= np.mean(valid_bc_acc_deque):
+                    prev_valid_bc_acc = np.mean(valid_bc_acc_deque)
                     best_bc_policy.load_state_dict(bc_policy.state_dict())
 
                 logger.store(
                     **{
-                        "Metrics/Acc_valid_recent_policy": valid_bc_acc.item(),
+                        "Metrics/Acc_valid_recent_policy": np.mean(valid_bc_acc_deque),
                         "Metrics/Acc_best_valid_policy": prev_valid_bc_acc.item(),
                     }
                 )
