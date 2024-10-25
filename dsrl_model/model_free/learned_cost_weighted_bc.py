@@ -50,6 +50,8 @@ default_cfg = {
     "train_horizon": 20,  # 20
     "weight_decay_bc": 0.001,
     "weight_decay_cost": 0.001,
+    "bc_weight_binary": None,
+    "use_validation": None,
 }
 
 trajectory_cfg = {
@@ -67,6 +69,55 @@ trajectory_cfg = {
     "num_union_positive_trajectories": 100,
     "percentage_validation_trajectories": 0.2,
 }
+
+
+@torch.no_grad
+def evaluate_bc_policy(
+    eval_env, bc_policy, encoder, cost_model, device, save_video=False
+):
+    eval_done = False
+    eval_obs, _ = eval_env.reset()
+    # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
+    eval_obs = torch.as_tensor(eval_obs, dtype=torch.float32, device=device).unsqueeze(
+        0
+    )
+    eval_reward, eval_cost, eval_pred_cost, eval_len = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    ep_frames, ep_pred_cost = [], []
+    while not eval_done:
+        act = bc_policy.decode_bc(eval_obs)
+        next_obs, reward, terminated, truncated, info = eval_env.step(
+            act[0].detach().squeeze().cpu().numpy()
+        )
+        cost = info["cost"]
+        # next_obs = (next_obs - mu_obs) / (std_obs + EP)
+        next_obs = torch.as_tensor(
+            next_obs, dtype=torch.float32, device=device
+        ).unsqueeze(0)
+        with torch.no_grad():
+            pred_cost = cost_model(
+                encoder(torch.cat([eval_obs, act], dim=1)), use_sigmoid=True
+            ).item()
+        eval_obs = next_obs
+        eval_reward += reward
+        eval_cost += cost
+        eval_pred_cost += pred_cost
+        eval_len += 1
+        eval_done = terminated or truncated
+        if save_video:
+            ep_frames.append(eval_env.render())
+            ep_pred_cost.append(
+                {
+                    "C(s,a)": cost,
+                    "pC(s,a)": pred_cost,
+                    "tC(s,a)": eval_cost,
+                }
+            )
+    return eval_reward, eval_cost, eval_pred_cost, eval_len, ep_frames, ep_pred_cost
 
 
 def ema(m, m_target, tau):
@@ -166,15 +217,15 @@ def bc_policy_loss_fn(
     with torch.no_grad():
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
         weight = cost_model(target, use_sigmoid=True).sum(dim=0)
-        # inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-        # # need to verify if the algorithm starts training with negative trajectory
-        # # and l2_loss normalization solves the stated problem
-        # l2_loss = 1.0  # torch.linalg.norm(loss).detach()
-        # final_weight = inv_weight / (l2_loss + EP)
-        margin = neg_mean_cost - 0.1 * neg_std_cost
-        final_weight = torch.where(
-            weight <= margin, torch.tensor(1.0).to(device), torch.tensor(0.0).to(device)
-        )
+        if config["bc_weight_binary"]:
+            margin = neg_mean_cost - 0.1 * neg_std_cost
+            final_weight = torch.where(
+                weight <= margin,
+                torch.tensor(1.0).to(device),
+                torch.tensor(0.0).to(device),
+            )
+        else:
+            final_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
     loss = final_weight * loss
     policy_loss = 0.0
     if config.get("use_policy_norm", False):
@@ -245,6 +296,10 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["bag_size"] = args.bag_size or config["bag_size"]
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
+    config["bc_weight_binary"] = args.bc_weight_binary
+    config["use_validation"] = args.use_validation
+    if not config["use_validation"]:
+        config["cost_validation_freq"] = 1
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -453,7 +508,8 @@ def main(args, cfg_env=None):
                     )
                 )
                 valid_cost_acc_deque.append(valid_cost_acc.item())
-                if prev_valid_cost_acc <= np.mean(valid_cost_acc_deque):
+                skip_check = not config["use_validation"]
+                if skip_check or (prev_valid_cost_acc <= np.mean(valid_cost_acc_deque)):
                     prev_valid_cost_acc = np.mean(valid_cost_acc_deque)
                     best_encoder.load_state_dict(encoder.state_dict())
                     best_cost_model.load_state_dict(cost_model.state_dict())
@@ -538,49 +594,23 @@ def main(args, cfg_env=None):
         eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
-                eval_done = False
-                eval_obs, _ = eval_env.reset()
-                # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
-                eval_obs = torch.as_tensor(
-                    eval_obs, dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                eval_reward, eval_cost, eval_pred_cost, eval_len = (
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
+                to_save_video = args.save_video and (is_save or is_last_epoch)
+                (
+                    eval_reward,
+                    eval_cost,
+                    eval_pred_cost,
+                    eval_len,
+                    ep_frames,
+                    ep_pred_cost,
+                ) = evaluate_bc_policy(
+                    eval_env=eval_env,
+                    bc_policy=bc_policy,
+                    encoder=best_encoder,
+                    cost_model=best_cost_model,
+                    device=device,
+                    save_video=to_save_video,
                 )
-                ep_frames, ep_pred_cost = [], []
-                while not eval_done:
-                    act = bc_policy.decode_bc(eval_obs)
-                    next_obs, reward, terminated, truncated, info = eval_env.step(
-                        act[0].detach().squeeze().cpu().numpy()
-                    )
-                    cost = info["cost"]
-                    # next_obs = (next_obs - mu_obs) / (std_obs + EP)
-                    next_obs = torch.as_tensor(
-                        next_obs, dtype=torch.float32, device=device
-                    ).unsqueeze(0)
-                    with torch.no_grad():
-                        pred_cost = cost_model(
-                            encoder(torch.cat([eval_obs, act], dim=1)), use_sigmoid=True
-                        ).item()
-                    eval_obs = next_obs
-                    eval_reward += reward
-                    eval_cost += cost
-                    eval_pred_cost += pred_cost
-                    eval_len += 1
-                    eval_done = terminated or truncated
-                    if args.save_video and (is_save or is_last_epoch):
-                        ep_frames.append(eval_env.render())
-                        ep_pred_cost.append(
-                            {
-                                "C(s,a)": cost,
-                                "pC(s,a)": pred_cost,
-                                "tC(s,a)": eval_cost,
-                            }
-                        )
-                if args.save_video and (is_save or is_last_epoch):
+                if to_save_video:
                     save_video(
                         ep_frames,
                         ep_pred_cost,
@@ -647,20 +677,26 @@ def main(args, cfg_env=None):
                 logger.torch_save(
                     itr=epoch,
                     torch_saver_elements=best_bc_policy,
-                    prefix="bc_vae_policy",
+                    prefix="best_bc_vae_policy",
                 )
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=best_encoder, prefix="encoder"
+                    itr=epoch,
+                    torch_saver_elements=best_encoder,
+                    prefix="best_encoder",
                 )
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=best_cost_model, prefix="cost_model"
+                    itr=epoch,
+                    torch_saver_elements=best_cost_model,
+                    prefix="best_cost_model",
                 )
     logger.torch_save(
-        itr=epoch, torch_saver_elements=best_bc_policy, prefix="bc_vae_policy"
+        itr=epoch, torch_saver_elements=best_bc_policy, prefix="best_bc_vae_policy"
     )
-    logger.torch_save(itr=epoch, torch_saver_elements=best_encoder, prefix="encoder")
     logger.torch_save(
-        itr=epoch, torch_saver_elements=best_cost_model, prefix="cost_model"
+        itr=epoch, torch_saver_elements=best_encoder, prefix="best_encoder"
+    )
+    logger.torch_save(
+        itr=epoch, torch_saver_elements=best_cost_model, prefix="best_cost_model"
     )
     logger.close()
 

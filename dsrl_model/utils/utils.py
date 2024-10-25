@@ -132,6 +132,18 @@ def single_agent_args():
             "default": None,
             "help": "Use default value for cost_weight_temp",
         },
+        {
+            "name": "--bc-weight-binary",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To use binary weight for learning bc policy",
+        },
+        {
+            "name": "--use-validation",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To use validation set to select best cost model for bc training",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
