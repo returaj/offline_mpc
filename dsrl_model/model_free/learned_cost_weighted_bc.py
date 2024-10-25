@@ -33,8 +33,8 @@ EP2 = 1e-3
 
 default_cfg = {
     "save_freq": 20,
-    "cost_validation_freq": 50,
-    "bc_validation_freq": 50,
+    "cost_validation_freq": 200,
+    "bc_validation_freq": 200,
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
@@ -400,8 +400,8 @@ def main(args, cfg_env=None):
 
     # train model
     step = 0
-    valid_cost_acc_deque = deque([0.0, 0.0], maxlen=5)
-    valid_bc_acc_deque = deque([0.0, 0.0], maxlen=5)
+    valid_cost_acc_deque = deque([0.0], maxlen=1)
+    valid_bc_acc_deque = deque([0.0], maxlen=1)
     prev_valid_cost_acc = -1.0
     prev_valid_bc_acc = -1.0
     best_neg_mean_cost = torch.tensor(0.0).to(device)
@@ -465,7 +465,7 @@ def main(args, cfg_env=None):
 
                 # if validation acc keeps decreasing for some consecutive steps
                 # then, reset the cost/encoder model to best params
-                if update_cost_model_count == 4:
+                if update_cost_model_count == 5:
                     encoder.load_state_dict(best_encoder.state_dict())
                     cost_model.load_state_dict(best_cost_model.state_dict())
                     update_cost_model_count = 0
@@ -552,7 +552,7 @@ def main(args, cfg_env=None):
                 )
                 ep_frames, ep_pred_cost = [], []
                 while not eval_done:
-                    act = best_bc_policy.decode_bc(eval_obs)
+                    act = bc_policy.decode_bc(eval_obs)
                     next_obs, reward, terminated, truncated, info = eval_env.step(
                         act[0].detach().squeeze().cpu().numpy()
                     )
