@@ -1,41 +1,38 @@
 import os
 import os.path as osp
+import random
+import re
 import sys
 import time
-from copy import deepcopy
 from collections import deque
+from copy import deepcopy
 
-import re
-import random
+import dsrl.infos as dsrl_infos
+import dsrl.offline_safety_gymnasium  # type: ignore
+import gymnasium as gym
 import numpy as np
-
 import torch
+import torch.distributions as td
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 
-import gymnasium as gym
-import dsrl.offline_safety_gymnasium  # type: ignore
-import dsrl.infos as dsrl_infos
-
-from dsrl_model.utils.models import (
-    Encoder,
-    BcqVAE,
-    MultiHeadAttention,
-    ExpCostModel,
-)
-from dsrl_model.utils.models import positionalencoding1d
 from dsrl_model.utils.bufffer import OnPolicyBuffer
-from dsrl_model.utils.logger import EpochLogger
-from dsrl_model.utils.save_video_with_value import save_video
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
     get_neg_and_union_data,
     get_normalized_data,
 )
-from dsrl_model.utils.utils import ActionRepeater
-from dsrl_model.utils.utils import single_agent_args, get_params_norm
-
+from dsrl_model.utils.logger import EpochLogger
+from dsrl_model.utils.models import (
+    BcqVAE,
+    Encoder,
+    ExpCostModel,
+    MultiHeadAttention,
+    positionalencoding1d,
+)
+from dsrl_model.utils.save_video_with_value import save_video
+from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent_args
 
 EP = 1e-6
 EP2 = 1e-2
@@ -43,7 +40,8 @@ EP2 = 1e-2
 
 default_cfg = {
     "save_freq": 20,
-    "warmup_bc": -1,  # set -1 if no warmup is needed in bc learning
+    "cost_validation_freq": 200,
+    "bc_validation_freq": 200,
     "hidden_sizes": [512, 512],
     "latent_obs_dim": 50,
     "num_attention_heads": 2,
@@ -60,6 +58,8 @@ default_cfg = {
     "train_horizon": 20,  # 20
     "weight_decay_bc": 0.001,
     "weight_decay_cost": 0.001,
+    "bc_weight_binary": 0.0,
+    "use_validation": 0.0,
 }
 
 trajectory_cfg = {
@@ -71,11 +71,58 @@ trajectory_cfg = {
         (0.25, 0.75, 0.0, 1.0),
     ),
     "target_cost": 25.0,
-    "alpha": 0.0,  # dU = alpha * dN + (1-alpha) * dP
+    "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 0,
-    "num_union_positive_trajectories": 50,
+    "num_union_negative_trajectories": 100,
+    "num_union_positive_trajectories": 100,
+    "percentage_validation_trajectories": 0.2,
 }
+
+
+@torch.no_grad
+def evaluate_bc_policy(eval_env, bc_policy, device, save_video=False):
+    eval_done = False
+    eval_obs, _ = eval_env.reset()
+    # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
+    eval_obs = torch.as_tensor(eval_obs, dtype=torch.float32, device=device).unsqueeze(
+        0
+    )
+    eval_reward, eval_cost, eval_pred_cost, eval_len = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    ep_frames, ep_pred_cost = [], []
+    while not eval_done:
+        act = bc_policy.decode_bc(eval_obs)
+        next_obs, reward, terminated, truncated, info = eval_env.step(
+            act[0].detach().squeeze().cpu().numpy()
+        )
+        cost = info["cost"]
+        # next_obs = (next_obs - mu_obs) / (std_obs + EP)
+        next_obs = torch.as_tensor(
+            next_obs, dtype=torch.float32, device=device
+        ).unsqueeze(0)
+
+        # since it uses attention network we cannot estimate the predicted cost
+        pred_cost = 0.0
+        eval_obs = next_obs
+        eval_reward += reward
+        eval_cost += cost
+        eval_pred_cost += pred_cost
+        eval_len += 1
+        eval_done = terminated or truncated
+        if save_video:
+            ep_frames.append(eval_env.render())
+            ep_pred_cost.append(
+                {
+                    "C(s,a)": cost,
+                    "pC(s,a)": pred_cost,
+                    "tC(s,a)": eval_cost,
+                }
+            )
+    return eval_reward, eval_cost, eval_pred_cost, eval_len, ep_frames, ep_pred_cost
 
 
 def ema(m, m_target, tau):
@@ -88,6 +135,80 @@ def ema(m, m_target, tau):
             p_target.data.lerp_(p.data, tau)
 
 
+@torch.no_grad
+def calculate_comparative_acc(neg_cost, union_cost, bag_size, device):
+    neg_batch = neg_cost.shape[0] // bag_size
+    neg_idx = torch.as_tensor(
+        np.random.choice(neg_cost.shape[0], (neg_batch, bag_size), replace=False)
+    ).to(device)
+    neg_batch_cost = neg_cost[neg_idx].sum(1)
+    union_batch = union_cost.shape[0] // bag_size
+    union_idx = torch.as_tensor(
+        np.random.choice(union_cost.shape[0], (union_batch, bag_size), replace=False)
+    ).to(device)
+    union_batch_cost = union_cost[union_idx].sum(1)
+    comparative_acc = torch.vmap(
+        lambda x: torch.sum((union_batch_cost < x) + 0.25 * (union_batch_cost == x))
+    )(neg_batch_cost).sum() / (neg_batch * union_batch)
+    return comparative_acc
+
+
+@torch.no_grad
+def get_validation_policy_accuracy(dataset, bc_policy, config, device):
+    neg_obs, neg_act, union_obs, union_act = dataset
+    horizon = neg_obs.shape[0]
+    bag_size = config["bag_size"]
+    neg_kl_dist, union_kl_dist = 0.0, 0.0
+    unit_gaussian = td.normal.Normal(
+        torch.tensor([0.0]).to(device), torch.tensor([1.0]).to(device)
+    )
+    for t in range(horizon):
+        _, neg_mean, neg_std = bc_policy(neg_obs[t], neg_act[t])
+        neg_kl_dist += td.kl.kl_divergence(
+            td.normal.Normal(neg_mean, neg_std), unit_gaussian
+        ).sum(1)
+        _, union_mean, union_std = bc_policy(union_obs[t], union_act[t])
+        union_kl_dist += td.kl.kl_divergence(
+            td.normal.Normal(union_mean, union_std), unit_gaussian
+        ).sum(1)
+    comparative_acc = calculate_comparative_acc(
+        neg_kl_dist, union_kl_dist, bag_size, device
+    )
+    return comparative_acc
+
+
+@torch.no_grad
+def get_validation_cost_accuracy(
+    dataset, encoder, attention_model, cost_model, pos_encoding, config, device
+):
+    # Horizon X Batch_Bag X obs/act_dim
+    neg_obs, neg_act, union_obs, union_act = dataset
+    horizon = neg_obs.shape[0]
+    bag_size = config["bag_size"]
+
+    target_neg = encoder(torch.cat([neg_obs, neg_act], dim=-1))
+    target_union = encoder(torch.cat([union_obs, union_act], dim=-1))
+    # Batch_Bag X Horizon X latent_dim
+    target_neg = target_neg.permute(1, 0, 2)
+    target_union = target_union.permute(1, 0, 2)
+    # add pos encoding
+    target_neg += pos_encoding
+    target_union += pos_encoding
+    target_neg, _ = attention_model(target_neg, target_neg, target_neg)
+    target_union, _ = attention_model(target_union, target_union, target_union)
+
+    # Horizon X Batch_Bag X latent_dim
+    target_neg = target_neg.permute(1, 0, 2)
+    target_union = target_union.permute(1, 0, 2)
+
+    neg_cost, union_cost = 0.0, 0.0
+    for t in range(horizon):
+        neg_cost += cost_model(target_neg[t], use_sigmoid=True)
+        union_cost += cost_model(target_union[t], use_sigmoid=True)
+    comparative_acc = calculate_comparative_acc(neg_cost, union_cost, bag_size, device)
+    return comparative_acc, torch.mean(neg_cost), torch.std(neg_cost)
+
+
 def bc_policy_loss_fn(
     bc_policy,
     encoder,
@@ -97,13 +218,24 @@ def bc_policy_loss_fn(
     target_obs,
     target_act,
     config,
+    neg_mean_cost=None,
+    neg_std_cost=None,
 ):
     gamma = config["gamma"]
+    device = target_obs.device
     discount, loss = 1.0, 0.0
-
     # shape: Horizon X Batch_Bag X obs/act_dim
     horizon, batch_bag_size, _ = target_obs.shape
-
+    for t in range(horizon):
+        to, ta = target_obs[t], target_act[t]
+        pred_act, bc_mean, bc_std = bc_policy(to, ta)
+        recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+        kl_loss = -0.5 * (
+            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
+        ).sum(dim=1)
+        # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+        loss += discount * (recon_loss + 0.5 * kl_loss)
+        discount *= gamma
     with torch.no_grad():
         # shape: Horizon X Batch_Bag X obs/act_dim
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
@@ -114,19 +246,16 @@ def bc_policy_loss_fn(
         target, _ = attention_model(target, target, target)
         # Batch_Bag X Horizon
         weight = cost_model(target, use_sigmoid=True).sum(dim=1)
-        inv_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-
-    for t in range(horizon):
-        to, ta = target_obs[t], target_act[t]
-        pred_act, bc_mean, bc_std = bc_policy(to, ta)
-        recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
-        kl_loss = -0.5 * (
-            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
-        ).sum(dim=1)
-        # 0.5 weight is from BCQ implementation See @aviralkumar implementation
-        loss += discount * inv_weight * (recon_loss + 0.5 * kl_loss)
-        discount *= gamma
-
+        if config["bc_weight_binary"]:
+            margin = neg_mean_cost - 0.1 * neg_std_cost
+            final_weight = torch.where(
+                weight <= margin,
+                torch.tensor(1.0).to(device),
+                torch.tensor(0.0).to(device),
+            )
+        else:
+            final_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+    loss = final_weight * loss
     reg_loss = 0.0
     if config.get("use_policy_norm", False):
         for params in bc_policy.parameters():
@@ -183,14 +312,15 @@ def attention_based_cost_loss_fn(
     total_union_cost = total_union_cost.view(batch_size, bag_size)
     expected_neg_cost = torch.mean(total_neg_cost, dim=1)
     expected_union_cost = torch.mean(total_union_cost, dim=1)
-    # expected_pos_cost = (1 / (1 - alpha)) * (
-    #     expected_union_cost - alpha * expected_neg_cost
-    # ).clamp(min=EP)
+    expected_pos_cost = (1 / (1 - alpha)) * (
+        expected_union_cost - alpha * expected_neg_cost
+    ).clamp(min=EP)
     # z = torch.log(expected_neg_cost + expected_pos_cost + EP)
     # # print(
     # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
     # # )
-    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
+    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
     reg_loss = 0.0
     if config.get("use_cost_norm", False):
         for params in cost_model.parameters():
@@ -213,8 +343,12 @@ def main(args, cfg_env=None):
     device = torch.device(f"{args.device}:{args.device_id}")
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config["train_horizon"]
-    config["warmup_bc"] = args.warmup_bc or config["warmup_bc"]
     config["bag_size"] = args.bag_size or config["bag_size"]
+    config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
+    config["bc_weight_binary"] = args.bc_weight_binary
+    config["use_validation"] = args.use_validation
+    if not config["use_validation"]:
+        config["cost_validation_freq"] = 1
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -234,13 +368,14 @@ def main(args, cfg_env=None):
     # See BEAR implementation from @aviralkumar
     bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
     config["bc_latent_dim"] = bc_latent_dim
-    config["bc_lr"] = 1e-5
+    config["bc_lr"] = args.lr
     bc_policy = BcqVAE(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         latent_dim=bc_latent_dim,
         device=device,
     ).to(device)
+    best_bc_policy = deepcopy(bc_policy)
     bc_policy_optimizer = torch.optim.Adam(
         bc_policy.parameters(),
         lr=config["bc_lr"],
@@ -250,6 +385,7 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         latent_dim=config["latent_obs_dim"],
     ).to(device)
+    best_encoder = deepcopy(encoder)
     encoder_optimizer = torch.optim.Adam(
         encoder.parameters(),
         lr=args.lr,
@@ -259,6 +395,7 @@ def main(args, cfg_env=None):
         d_model=config["latent_obs_dim"],
         num_heads=config["num_attention_heads"],
     ).to(device)
+    best_attention_model = deepcopy(attention_model)
     attention_model_optimizer = torch.optim.Adam(
         attention_model.parameters(),
         lr=args.lr,
@@ -268,6 +405,7 @@ def main(args, cfg_env=None):
         obs_dim=config["latent_obs_dim"],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
+    best_cost_model = deepcopy(cost_model)
     cost_model_optimizer = torch.optim.Adam(
         cost_model.parameters(),
         lr=args.lr,
@@ -302,8 +440,29 @@ def main(args, cfg_env=None):
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
 
-    agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
-    ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
+    # create negative validation dataset
+    valid_neg_size = int(
+        neg_observations.shape[0] * trajectory_cfg["percentage_validation_trajectories"]
+    )
+    valid_neg_observations = neg_observations[:valid_neg_size]
+    valid_neg_actions = neg_actions[:valid_neg_size]
+    valid_neg_dones = neg_dones[:valid_neg_size]
+    neg_observations = neg_observations[valid_neg_size:]
+    neg_actions = neg_actions[valid_neg_size:]
+    neg_dones = neg_dones[valid_neg_size:]
+
+    # create union validation dataset
+    valid_union_size = int(
+        union_observations.shape[0]
+        * trajectory_cfg["percentage_validation_trajectories"]
+    )
+    valid_union_observations = union_observations[:valid_union_size]
+    valid_union_actions = union_actions[:valid_union_size]
+    valid_union_dones = union_dones[:valid_union_size]
+    union_observations = union_observations[valid_union_size:]
+    union_actions = union_actions[valid_union_size:]
+    union_dones = union_dones[valid_union_size:]
+
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
         neg_observations.shape[1] == ep_len
@@ -324,6 +483,23 @@ def main(args, cfg_env=None):
     for obs, act, done in zip(union_observations, union_actions, union_dones):
         buffer.add(obs, act, done, is_negative=False)
 
+    use_validation = trajectory_cfg["percentage_validation_trajectories"] > 0.0
+    assert (
+        use_validation
+    ), "We need to set percentage_validation_trajectories to non-zero value."
+    buffer.add_validation_dataset(
+        valid_neg_observations,
+        valid_neg_actions,
+        valid_neg_dones,
+        is_negative=True,
+    )
+    buffer.add_validation_dataset(
+        valid_union_observations,
+        valid_union_actions,
+        valid_union_dones,
+        is_negative=False,
+    )
+
     # set logger
     eval_rew_deque = deque(maxlen=5)
     eval_cost_deque = deque(maxlen=5)
@@ -342,6 +518,14 @@ def main(args, cfg_env=None):
 
     # train model
     step = 0
+    valid_cost_acc_deque = deque([0.0], maxlen=1)
+    valid_bc_acc_deque = deque([0.0], maxlen=1)
+    prev_valid_cost_acc = -1.0
+    prev_valid_bc_acc = -1.0
+    best_neg_mean_cost = torch.tensor(0.0).to(device)
+    best_neg_std_cost = torch.tensor(0.0).to(device)
+    update_cost_model_count = 0
+
     for epoch in range(num_epochs):
         training_start_time = time.time()
         # assert (
@@ -356,7 +540,6 @@ def main(args, cfg_env=None):
             target_union_obs,
             target_union_act,
         ) in buffer.sample():
-            step += 1
 
             cost_loss = attention_based_cost_loss_fn(
                 encoder=encoder,
@@ -370,49 +553,112 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
-            bc_policy_loss = torch.as_tensor(0.0)
-            if (epoch + 1) > config["warmup_bc"]:
-                bc_policy_loss = bc_policy_loss_fn(
-                    bc_policy=bc_policy,
-                    encoder=encoder,
-                    attention_model=attention_model,
-                    cost_model=cost_model,
-                    pos_encoding=pos_encoding,
-                    target_obs=target_union_obs,
-                    target_act=target_union_act,
-                    config=config,
-                )
-
-            total_loss = (
-                config["bc_coef"] * bc_policy_loss + config["cost_coef"] * cost_loss
-            )
-            total_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            bc_policy_optimizer.zero_grad()
+            cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
             encoder_optimizer.zero_grad()
             attention_model_optimizer.zero_grad()
             cost_model_optimizer.zero_grad()
-            total_loss.backward()
-            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            cost_loss.backward()
             clip_grad_norm_(encoder.parameters(), config["max_grad_norm"])
             clip_grad_norm_(attention_model.parameters(), config["max_grad_norm"])
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
-            bc_policy_optimizer.step()
             encoder_optimizer.step()
             attention_model_optimizer.step()
             cost_model_optimizer.step()
 
-            # if (step % config["update_freq"]) == 0:
-            #     ema(encoder, encoder_target, config["update_tau"])
-            #     ema(value_cost, value_cost_target, config["update_tau"])
+            if step % config["cost_validation_freq"] == 0:
+                validation_dataset = buffer.get_validation_dataset()
+                valid_cost_acc, neg_mean_cost, neg_std_cost = (
+                    get_validation_cost_accuracy(
+                        dataset=validation_dataset,
+                        encoder=encoder,
+                        attention_model=attention_model,
+                        cost_model=cost_model,
+                        pos_encoding=pos_encoding,
+                        config=config,
+                        device=device,
+                    )
+                )
+                valid_cost_acc_deque.append(valid_cost_acc.item())
+                skip_check = not config["use_validation"]
+                if skip_check or (prev_valid_cost_acc <= np.mean(valid_cost_acc_deque)):
+                    prev_valid_cost_acc = np.mean(valid_cost_acc_deque)
+                    best_encoder.load_state_dict(encoder.state_dict())
+                    best_attention_model.load_state_dict(attention_model.state_dict())
+                    best_cost_model.load_state_dict(cost_model.state_dict())
+                    best_neg_mean_cost = neg_mean_cost
+                    best_neg_std_cost = neg_std_cost
+                    update_cost_model_count = 0
+                else:
+                    update_cost_model_count += 1
+
+                # if validation acc keeps decreasing for some consecutive steps
+                # then, reset the cost/encoder model to best params
+                if update_cost_model_count == 5:
+                    encoder.load_state_dict(best_encoder.state_dict())
+                    attention_model.load_state_dict(best_attention_model.state_dict())
+                    cost_model.load_state_dict(best_cost_model.state_dict())
+                    update_cost_model_count = 0
+
+                logger.store(
+                    **{
+                        "Metrics/Acc_valid_recent_cost": np.mean(valid_cost_acc_deque),
+                        "Metrics/Valid_neg_trajectory_mean_cost": neg_mean_cost.item(),
+                        "Metrics/Valid_neg_trajectory_std_cost": neg_std_cost.item(),
+                        "Metrics/Acc_best_valid_cost": prev_valid_cost_acc.item(),
+                        "Metrics/Valid_best_neg_trajectory_mean_cost": best_neg_mean_cost.item(),
+                        "Metrics/Valid_best_neg_trajectory_std_cost": best_neg_std_cost.item(),
+                    }
+                )
+
+            bc_policy_loss = bc_policy_loss_fn(
+                bc_policy=bc_policy,
+                encoder=best_encoder,
+                attention_model=best_attention_model,
+                cost_model=best_cost_model,
+                pos_encoding=pos_encoding,
+                target_obs=target_union_obs,
+                target_act=target_union_act,
+                config=config,
+                neg_mean_cost=best_neg_mean_cost,
+                neg_std_cost=best_neg_std_cost,
+            )
+            bc_policy_loss.register_hook(
+                lambda grad: grad * (1 / config["train_horizon"])
+            )
+            bc_policy_optimizer.zero_grad()
+            bc_policy_loss.backward()
+            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            bc_policy_optimizer.step()
+
+            if step % config["bc_validation_freq"] == 0:
+                validation_dataset = buffer.get_validation_dataset()
+                valid_bc_acc = get_validation_policy_accuracy(
+                    dataset=validation_dataset,
+                    bc_policy=bc_policy,
+                    config=config,
+                    device=device,
+                )
+                valid_bc_acc_deque.append(valid_bc_acc.item())
+                if prev_valid_bc_acc <= np.mean(valid_bc_acc_deque):
+                    prev_valid_bc_acc = np.mean(valid_bc_acc_deque)
+                    best_bc_policy.load_state_dict(bc_policy.state_dict())
+
+                logger.store(
+                    **{
+                        "Metrics/Acc_valid_recent_policy": np.mean(valid_bc_acc_deque),
+                        "Metrics/Acc_best_valid_policy": prev_valid_bc_acc.item(),
+                    }
+                )
 
             logger.store(
                 **{
                     "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
                     "Loss/Loss_cost": cost_loss.mean().item(),
-                    "Loss/Loss_total": total_loss.mean().item(),
                 }
             )
             logger.logged = False
+
+            step += 1
 
         # bc_scheduler.step()
         training_end_time = time.time()
@@ -423,50 +669,21 @@ def main(args, cfg_env=None):
         eval_episodes = 1 if is_last_epoch else 1
         if args.use_eval:
             for id in range(eval_episodes):
-                eval_done = False
-                eval_obs, _ = eval_env.reset()
-                # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
-                eval_obs = torch.as_tensor(
-                    eval_obs, dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                eval_reward, eval_cost, eval_pred_cost, eval_len = (
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
+                to_save_video = args.save_video and (is_save or is_last_epoch)
+                (
+                    eval_reward,
+                    eval_cost,
+                    eval_pred_cost,
+                    eval_len,
+                    ep_frames,
+                    ep_pred_cost,
+                ) = evaluate_bc_policy(
+                    eval_env=eval_env,
+                    bc_policy=bc_policy,
+                    device=device,
+                    save_video=to_save_video,
                 )
-                ep_frames, ep_pred_cost = [], []
-                while not eval_done:
-                    act = bc_policy.decode_bc(eval_obs)
-                    next_obs, reward, terminated, truncated, info = eval_env.step(
-                        act[0].detach().squeeze().cpu().numpy()
-                    )
-                    cost = info["cost"]
-                    # next_obs = (next_obs - mu_obs) / (std_obs + EP)
-                    next_obs = torch.as_tensor(
-                        next_obs, dtype=torch.float32, device=device
-                    ).unsqueeze(0)
-                    with torch.no_grad():
-                        pred_cost = 0.0
-                        # pred_cost = cost_model(
-                        #     encoder(torch.cat([eval_obs, act], dim=1)) + pos_encoding[0]
-                        # ).item()
-                    eval_obs = next_obs
-                    eval_reward += reward
-                    eval_cost += cost
-                    eval_pred_cost += pred_cost
-                    eval_len += 1
-                    eval_done = terminated or truncated
-                    if args.save_video and (is_save or is_last_epoch):
-                        ep_frames.append(eval_env.render())
-                        ep_pred_cost.append(
-                            {
-                                "C(s,a)": cost,
-                                "pC(s,a)": pred_cost,
-                                "tC(s,a)": eval_cost,
-                            }
-                        )
-                if args.save_video and (is_save or is_last_epoch):
+                if to_save_video:
                     save_video(
                         ep_frames,
                         ep_pred_cost,
@@ -502,11 +719,20 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormRet")
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
+            if not logger.check_empty("Metrics/Acc_valid_recent_cost"):
+                logger.log_tabular("Metrics/Acc_valid_recent_cost")
+                logger.log_tabular("Metrics/Valid_neg_trajectory_mean_cost")
+                logger.log_tabular("Metrics/Valid_neg_trajectory_std_cost")
+                logger.log_tabular("Metrics/Acc_best_valid_cost")
+                logger.log_tabular("Metrics/Valid_best_neg_trajectory_mean_cost")
+                logger.log_tabular("Metrics/Valid_best_neg_trajectory_std_cost")
+            if not logger.check_empty("Metrics/Acc_valid_recent_policy"):
+                logger.log_tabular("Metrics/Acc_valid_recent_policy")
+                logger.log_tabular("Metrics/Acc_best_valid_policy")
             logger.log_tabular("Train/Epoch", epoch + 1)
             # logger.log_tabular("Train/learning_rate", lr)
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_cost")
-            logger.log_tabular("Loss/Loss_total")
             logger.log_tabular(
                 "Norm/bc_policy", get_params_norm(bc_policy.parameters(), grads=False)
             )
@@ -522,24 +748,38 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
             if is_save:
                 logger.torch_save(
-                    itr=epoch, torch_saver_elements=bc_policy, prefix="bc_vae_policy"
-                )
-                logger.torch_save(
-                    itr=epoch, torch_saver_elements=cost_model, prefix="cost_model"
-                )
-                logger.torch_save(
-                    itr=epoch, torch_saver_elements=encoder, prefix="encoder"
+                    itr=epoch,
+                    torch_saver_elements=best_bc_policy,
+                    prefix="best_bc_vae_policy",
                 )
                 logger.torch_save(
                     itr=epoch,
-                    torch_saver_elements=attention_model,
-                    prefix="attention_model",
+                    torch_saver_elements=best_encoder,
+                    prefix="best_encoder",
                 )
-    logger.torch_save(itr=epoch, torch_saver_elements=bc_policy, prefix="bc_vae_policy")
-    logger.torch_save(itr=epoch, torch_saver_elements=cost_model, prefix="cost_model")
-    logger.torch_save(itr=epoch, torch_saver_elements=encoder, prefix="encoder")
+                logger.torch_save(
+                    itr=epoch,
+                    torch_saver_elements=best_cost_model,
+                    prefix="best_cost_model",
+                )
+                logger.torch_save(
+                    itr=epoch,
+                    torch_saver_elements=best_attention_model,
+                    prefix="best_attention_model",
+                )
     logger.torch_save(
-        itr=epoch, torch_saver_elements=attention_model, prefix="attention_model"
+        itr=epoch, torch_saver_elements=best_bc_policy, prefix="best_bc_vae_policy"
+    )
+    logger.torch_save(
+        itr=epoch, torch_saver_elements=best_encoder, prefix="best_encoder"
+    )
+    logger.torch_save(
+        itr=epoch, torch_saver_elements=best_cost_model, prefix="best_cost_model"
+    )
+    logger.torch_save(
+        itr=epoch,
+        torch_saver_elements=best_attention_model,
+        prefix="best_attention_model",
     )
     logger.close()
 
