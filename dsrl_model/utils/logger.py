@@ -370,6 +370,9 @@ class EpochLogger(Logger):
                 super().log_tabular(key + "/Std", np.std(self.epoch_dict[key]))
         self.epoch_dict[key] = []
 
+    def check_empty(self, key):
+        return len(self.epoch_dict[key]) == 0
+
     def get_stats(self, key):
         """Get the values of a diagnostic."""
         if key not in self.log_headers:
