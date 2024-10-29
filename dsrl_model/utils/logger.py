@@ -371,6 +371,8 @@ class EpochLogger(Logger):
         self.epoch_dict[key] = []
 
     def check_empty(self, key):
+        if key not in self.epoch_dict:
+            return True
         return len(self.epoch_dict[key]) == 0
 
     def get_stats(self, key):
