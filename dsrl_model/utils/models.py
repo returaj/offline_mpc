@@ -16,15 +16,17 @@
 
 from __future__ import annotations
 
-import numpy as np
 import math
+from typing import Optional, Tuple
+
+import numpy as np
 import torch
+import torch.distributions as td
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim
 from torch import Tensor
 from torch.distributions import Normal
-from typing import Optional, Tuple
 
 EPS = 1e-7
 
@@ -670,3 +672,210 @@ def positionalencoding1d(d_model, length):
     pe[:, 0::2] = torch.sin(position.float() * div_term)
     pe[:, 1::2] = torch.cos(position.float() * div_term)
     return pe
+
+
+class SafeDiceCritic(nn.Module):
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        hidden_size,
+        out_activation_fn=None,
+        use_last_layer_bias=False,
+        out_dim=None,
+    ):
+        super().__init__()
+        sizes = [obs_dim + act_dim] + [hidden_size, hidden_size]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            nn.init.kaiming_normal_(affine_layer.weight, nonlinearity="relu")
+            layers += [affine_layer, nn.ReLU()]
+
+        out_dim = out_dim or 1
+        out_activation_fn = out_activation_fn or nn.Identity()
+        if use_last_layer_bias:
+            affine_layer = nn.Linear(hidden_size, out_dim)
+            nn.init.uniform_(affine_layer.weight, -3e-3, 3e-3)
+            nn.init.uniform_(affine_layer.bias, -3e-3, 3e-3)
+            layers += [affine_layer, out_activation_fn]
+        else:
+            affine_layer = nn.Linear(hidden_size, out_dim, bias=False)
+            nn.init.kaiming_normal_(affine_layer.weight, nonlinearity="relu")
+            layers += [affine_layer, out_activation_fn]
+
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return torch.squeeze(self.model(x), -1)
+
+
+def xavier_init(m):
+    """Xavier layer initialization."""
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+
+def minmax_discriminator_loss(dx, dgz, label_smoothing=0.0):
+    """code from torchgan"""
+    target_ones = torch.ones_like(dgz) * (1.0 - label_smoothing)
+    target_zeros = torch.zeros_like(dx)
+    loss = F.binary_cross_entropy_with_logits(dx, target_ones)
+    loss += F.binary_cross_entropy_with_logits(dgz, target_zeros)
+    return loss
+
+
+def gradient_panelty(interpolate, d_interpolate):
+    "code from torchgan"
+    grad_output = torch.ones_like(d_interpolate)
+    gradients = torch.autograd.grad(
+        outputs=d_interpolate,
+        inputs=interpolate,
+        grad_outputs=grad_output,
+        retain_graph=True,
+        create_graph=True,
+    )[0]
+    penalty = (gradients.norm(2) - 1) ** 2
+    return torch.mean(penalty)
+
+
+class SafeDiceTanhMixtureActor(nn.Module):
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        hidden_size=256,
+        num_components=2,
+        mean_range=(-7.0, 7.0),
+        logstd_range=(-5.0, 2.0),
+        eps=EPS,
+        mdn_temperature=1.0,
+    ):
+        super().__init__()
+
+        self.act_dim = act_dim
+        self.num_components = num_components
+        self.mdn_temp = mdn_temperature
+
+        self.pre_encoder = nn.Sequential(
+            nn.Linear(obs_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+        )
+        self.pre_encoder.apply(xavier_init)
+        self.means = nn.Linear(hidden_size, num_components * act_dim)
+        nn.init.xavier_uniform_(self.means.weight)
+        nn.init.uniform_(self.means.bias, -1e-3, 1e-3)
+
+        self.logstds = nn.Linear(hidden_size, num_components * act_dim)
+        nn.init.uniform_(self.logstds.weight, -1e-3, 1e-3)
+        nn.init.uniform_(self.logstds.bias, -1e-3, 1e-3)
+
+        self.logits = nn.Linear(hidden_size, num_components)
+        nn.init.xavier_uniform_(self.logits.weight)
+        nn.init.uniform_(self.logits.bias, -1e-3, 1e-3)
+
+        self.mean_min, self.mean_max = mean_range
+        self.logstd_min, self.logstd_max = logstd_range
+        self.eps = eps
+
+    def forward(self, obs):
+        x = self.pre_encoder(obs)
+
+        means = self.means(x).clamp(self.mean_min, self.mean_max)
+        means = means.view(-1, self.num_components, self.act_dim)
+        logstds = self.logstds(x).clamp(self.logstd_min, self.logstd_max)
+        logstds = logstds.view(-1, self.num_components, self.act_dim)
+        stds = torch.exp(logstds)
+        mixture_logits = self.logits(x) / self.mdn_temp
+
+        mixture_dist = td.Categorical(logits=mixture_logits)
+        component_dist = td.Normal(means, stds)
+        component_dist = td.Independent(component_dist, 1)
+        pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
+
+        pretanh_actions = pretanh_actions_dist.rsample()
+        actions = torch.tanh(pretanh_actions)
+
+        logprob, pretanh_logprob = self.logprob(
+            pretanh_actions_dist,
+            pretanh_actions,
+            is_pretanh_actions=True,
+        )
+
+        return (
+            actions,
+            pretanh_actions,
+            logprob,
+            pretanh_logprob,
+            pretanh_actions_dist,
+        )
+
+    def logprob(self, pretanh_actions_dist, actions, is_pretanh_actions=True):
+        if is_pretanh_actions:
+            pretanh_actions = actions
+            actions = torch.tanh(pretanh_actions)
+        else:
+            pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
+
+        pretanh_logprob = pretanh_actions_dist.log_prob(pretanh_actions).sum(-1)
+        logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
+            min=self.eps
+        ).log().sum(-1)
+        return logprob, pretanh_logprob
+
+    def get_logprob(self, obs, actions):
+        """
+        Args:
+            obs: A batch of observations.
+            actions: A batch of actions to evaluate log probs on.
+        Returns:
+            Log probabilities of actions.
+        """
+        x = self.pre_encoder(obs)
+
+        means = self.means(x).clamp(self.mean_min, self.mean_max)
+        means = means.view(-1, self.num_components, self.act_dim)
+        logstds = self.logstds(x).clamp(self.logstd_min, self.logstd_max)
+        logstds = logstds.view(-1, self.num_components, self.act_dim)
+        stds = torch.exp(logstds)
+        mixture_logits = self.logits(x) / self.mdn_temp
+
+        mixture_dist = td.Categorical(logits=mixture_logits)
+        component_dist = td.Normal(means, stds)
+        component_dist = td.Independent(component_dist, 1)
+        pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
+
+        pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
+        pretanh_logprob = pretanh_actions_dist.log_prob(pretanh_actions).sum(-1)
+        logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
+            min=self.eps
+        ).log().sum(-1)
+        return logprob
+
+    def action(self, obs, deterministic=True):
+        x = self.pre_encoder(obs)
+
+        means = self.means(x).clamp(self.mean_min, self.mean_max)
+        means = means.view(-1, self.num_components, self.act_dim)
+        logstds = self.logstds(x).clamp(self.logstd_min, self.logstd_max)
+        logstds = logstds.view(-1, self.num_components, self.act_dim)
+        stds = torch.exp(logstds)
+        mixture_logits = self.logits(x) / self.mdn_temp
+
+        mixture_dist = td.Categorical(logits=mixture_logits)
+
+        if deterministic:
+            mixture_id = mixture_dist.sample()
+            idx = torch.vstack([torch.arange(0, obs.shape[0]), mixture_id]).T
+            pretanh_actions = means[idx.tolist()]
+        else:
+            component_dist = td.Normal(means, stds)
+            component_dist = td.Independent(component_dist, 1)
+            pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
+            pretanh_actions = pretanh_actions_dist.sample()
+
+        return torch.tanh(pretanh_actions)
