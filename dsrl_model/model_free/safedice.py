@@ -361,7 +361,9 @@ def main(args, cfg_env=None):
 
     # train cost model
     step = 0
-    while step < config["pretrain_iteration"]:
+    # while step < config["pretrain_iteration"]:
+    for ep in range(num_epochs):
+        training_start_time = time.time()
         for (
             _,
             target_neg_obs,
@@ -386,10 +388,12 @@ def main(args, cfg_env=None):
 
             step += 1
 
-            if step % int(1e4) == 0:
-                logger.log(
-                    f"Steps: {step}, pretraining cost model loss: {cost_loss.item():.3f}"
-                )
+        training_end_time = time.time()
+        if (ep + 1) % 1 == 0:
+            logger.log(f"Train cost time: {training_end_time - training_start_time}")
+            logger.log(
+                f"Episode: {ep+1}, Steps: {step}, pretraining cost model loss: {cost_loss.item():.3f}"
+            )
 
     alpha = find_alpha(
         cost_model=cost_model,
@@ -408,7 +412,8 @@ def main(args, cfg_env=None):
 
     logger.log("Start with critic and actor model training.")
     step = 0
-    while step < config["total_iteration"]:
+    # while step < config["total_iteration"]:
+    for epoch in range(num_epochs):
         training_start_time = time.time()
 
         for (
@@ -491,7 +496,8 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Metrics/EvalEpNormRet")
                 logger.log_tabular("Metrics/EvalEpNormCost")
                 logger.log_tabular("Metrics/EvalEpLen")
-            logger.log_tabular("Train/Step", step + 1)
+            logger.log_tabular("Train/Step", step)
+            logger.log_tabular("Train/Epoch", epoch + 1)
             logger.log_tabular("Loss/Loss_bc_policy")
             logger.log_tabular("Loss/Loss_cost")
             logger.log_tabular(
@@ -511,7 +517,7 @@ def main(args, cfg_env=None):
             )
             logger.log_tabular("Time/Total", eval_end_time - training_start_time)
             logger.dump_tabular()
-            if step % int(1e2):
+            if (epoch + 1) % config["save_freq"] == 0:
                 logger.torch_save(
                     itr=step,
                     torch_saver_elements=actor,

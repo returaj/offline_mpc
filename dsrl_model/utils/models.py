@@ -868,9 +868,13 @@ class SafeDiceTanhMixtureActor(nn.Module):
 
         mixture_dist = td.Categorical(logits=mixture_logits)
 
+        device = means.device
+
         if deterministic:
             mixture_id = mixture_dist.sample()
-            idx = torch.vstack([torch.arange(0, obs.shape[0]), mixture_id]).T
+            idx = torch.vstack(
+                [torch.arange(0, obs.shape[0], device=device), mixture_id]
+            )
             pretanh_actions = means[idx.tolist()]
         else:
             component_dist = td.Normal(means, stds)
