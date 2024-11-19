@@ -35,7 +35,8 @@ EP = 1e-6
 EP2 = 1e-3
 
 default_cfg = {
-    "save_freq": 20,
+    "log_freq": int(1e4),
+    "save_freq": int(1e4),
     "hidden_size": 256,
     "latent_obs_dim": 50,
     "gamma": 0.99,
@@ -46,8 +47,8 @@ default_cfg = {
     "grad_reg_coeffs_nu": 1e-6,
     "use_last_layer_bias_cost": False,
     "use_last_layer_bias_critic": False,
-    "pretrain_iteration": int(1e4),
-    "total_iteration": int(1e5),
+    "pretrain_iteration": int(1e6),
+    "total_iteration": int(1e6),
 }
 
 trajectory_cfg = {
@@ -188,8 +189,8 @@ def train_critic_and_actor(
     target_union_next_obs,
     alpha,
     config,
-    # reward_mean,
-    # reward_std,
+    reward_mean=0.0,
+    reward_std=1.0,
 ):
     with torch.no_grad():
         target_union = torch.concat([target_union_obs, target_union_act], dim=1)
@@ -198,7 +199,7 @@ def train_critic_and_actor(
             (1 - (1 + alpha) * sigmoid_cost_union)
             / ((1 - alpha) * (1 - sigmoid_cost_union))
         )
-        # reward_union = (reward_union - reward_mean) / reward_std
+        reward_union = (reward_union - reward_mean) / reward_std
 
     init_nu = critic_model(target_init_obs)
     union_nu = critic_model(target_union_obs)
@@ -360,10 +361,9 @@ def main(args, cfg_env=None):
     logger.log("Start with cost model training.")
 
     # train cost model
-    step = 0
-    # while step < config["pretrain_iteration"]:
-    for ep in range(num_epochs):
-        training_start_time = time.time()
+    steps = 0
+    while steps < config["pretrain_iteration"]:
+        # for ep in range(num_epochs):
         for (
             _,
             target_neg_obs,
@@ -386,14 +386,16 @@ def main(args, cfg_env=None):
             cost_loss.backward()
             cost_model_optimizer.step()
 
-            step += 1
+            steps += 1
 
-        training_end_time = time.time()
-        if (ep + 1) % 1 == 0:
-            logger.log(f"Train cost time: {training_end_time - training_start_time}")
-            logger.log(
-                f"Episode: {ep+1}, Steps: {step}, pretraining cost model loss: {cost_loss.item():.3f}"
-            )
+            if steps % config["log_freq"] == 0:
+                # logger.log(f"Train cost time: {training_end_time - training_start_time}")
+                logger.log(
+                    f"Steps: {steps}, pretraining cost model loss: {cost_loss.item():.3f}"
+                )
+
+            if steps >= config["pretrain_iteration"]:
+                break
 
     alpha = find_alpha(
         cost_model=cost_model,
@@ -411,10 +413,9 @@ def main(args, cfg_env=None):
     eval_len_deque = deque(maxlen=5)
 
     logger.log("Start with critic and actor model training.")
-    step = 0
-    # while step < config["total_iteration"]:
-    for epoch in range(num_epochs):
-        training_start_time = time.time()
+    steps = 0
+    while steps < config["total_iteration"]:
+        # for epoch in range(num_epochs):
 
         for (
             target_init_obs,
@@ -449,94 +450,87 @@ def main(args, cfg_env=None):
             pi_loss.backward()
             actor_optimizer.step()
 
-            logger.store(
-                **{
-                    "Loss/Loss_bc_policy": pi_loss.mean().item(),
-                    "Loss/Loss_cost": cost_loss.mean().item(),
-                }
-            )
             logger.logged = False
 
-            step += 1
+            steps += 1
 
-        training_end_time = time.time()
+            if (steps % config["log_freq"] == 0) and (not logger.logged):
+                # evaluate episodes
+                eval_episodes = 1
+                if args.use_eval:
+                    eval_start_time = time.time()
+                    for id in range(eval_episodes):
+                        eval_reward, eval_cost, eval_len, *_ = evaluate_bc_policy(
+                            eval_env=eval_env,
+                            bc_policy=actor,
+                            device=device,
+                        )
+                        norm_reward, norm_cost = eval_env.get_normalized_score(
+                            eval_reward, eval_cost
+                        )
+                        eval_norm_rew_deque.append(norm_reward)
+                        eval_norm_cost_deque.append(norm_cost)
+                        eval_rew_deque.append(eval_reward)
+                        eval_cost_deque.append(eval_cost)
+                        eval_len_deque.append(eval_len)
+                    logger.store(
+                        **{
+                            "Metrics/EvalEpRet": np.mean(eval_rew_deque),
+                            "Metrics/EvalEpCost": np.mean(eval_cost_deque),
+                            "Metrics/EvalEpNormRet": np.mean(eval_norm_rew_deque),
+                            "Metrics/EvalEpNormCost": np.mean(eval_norm_cost_deque),
+                            "Metrics/EvalEpLen": np.mean(eval_len_deque),
+                        }
+                    )
+                    eval_end_time = time.time()
 
-        eval_start_time = time.time()
-        eval_episodes = 1
-        if args.use_eval:
-            for id in range(eval_episodes):
-                eval_reward, eval_cost, eval_len, *_ = evaluate_bc_policy(
-                    eval_env=eval_env,
-                    bc_policy=actor,
-                    device=device,
+                    logger.log_tabular("Metrics/EvalEpRet")
+                    logger.log_tabular("Metrics/EvalEpCost")
+                    logger.log_tabular("Metrics/EvalEpNormRet")
+                    logger.log_tabular("Metrics/EvalEpNormCost")
+                    logger.log_tabular("Metrics/EvalEpLen")
+                    logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
+
+                logger.log_tabular("Train/Steps", steps)
+                logger.log_tabular("Loss/Loss_bc_policy", pi_loss.mean().item())
+                logger.log_tabular("Loss/Loss_critic", nu_loss.mean().item())
+                logger.log_tabular(
+                    "Norm/bc_policy", get_params_norm(actor.parameters(), grads=False)
                 )
-                norm_reward, norm_cost = eval_env.get_normalized_score(
-                    eval_reward, eval_cost
+                logger.log_tabular(
+                    "Norm/cost_model",
+                    get_params_norm(cost_model.parameters(), grads=False),
                 )
-                eval_norm_rew_deque.append(norm_reward)
-                eval_norm_cost_deque.append(norm_cost)
-                eval_rew_deque.append(eval_reward)
-                eval_cost_deque.append(eval_cost)
-                eval_len_deque.append(eval_len)
-            logger.store(
-                **{
-                    "Metrics/EvalEpRet": np.mean(eval_rew_deque),
-                    "Metrics/EvalEpCost": np.mean(eval_cost_deque),
-                    "Metrics/EvalEpNormRet": np.mean(eval_norm_rew_deque),
-                    "Metrics/EvalEpNormCost": np.mean(eval_norm_cost_deque),
-                    "Metrics/EvalEpLen": np.mean(eval_len_deque),
-                }
-            )
-        eval_end_time = time.time()
+                logger.log_tabular(
+                    "Norm/critic_model",
+                    get_params_norm(critic_model.parameters(), grads=False),
+                )
+                logger.dump_tabular()
 
-        if not logger.logged:
-            if args.use_eval:
-                logger.log_tabular("Metrics/EvalEpRet")
-                logger.log_tabular("Metrics/EvalEpCost")
-                logger.log_tabular("Metrics/EvalEpNormRet")
-                logger.log_tabular("Metrics/EvalEpNormCost")
-                logger.log_tabular("Metrics/EvalEpLen")
-            logger.log_tabular("Train/Step", step)
-            logger.log_tabular("Train/Epoch", epoch + 1)
-            logger.log_tabular("Loss/Loss_bc_policy")
-            logger.log_tabular("Loss/Loss_cost")
-            logger.log_tabular(
-                "Norm/bc_policy", get_params_norm(actor.parameters(), grads=False)
-            )
-            logger.log_tabular(
-                "Norm/cost_model", get_params_norm(cost_model.parameters(), grads=False)
-            )
-            logger.log_tabular(
-                "Norm/critic_model",
-                get_params_norm(critic_model.parameters(), grads=False),
-            )
-            if args.use_eval:
-                logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
-            logger.log_tabular(
-                "Time/TrainingUpdate", training_end_time - training_start_time
-            )
-            logger.log_tabular("Time/Total", eval_end_time - training_start_time)
-            logger.dump_tabular()
-            if (epoch + 1) % config["save_freq"] == 0:
+            if steps % config["save_freq"] == 0:
                 logger.torch_save(
-                    itr=step,
+                    itr=steps,
                     torch_saver_elements=actor,
                     prefix="mix_tanh_actor_",
                 )
                 logger.torch_save(
-                    itr=step,
+                    itr=steps,
                     torch_saver_elements=cost_model,
                     prefix="cost_model_",
                 )
                 logger.torch_save(
-                    itr=step,
+                    itr=steps,
                     torch_saver_elements=critic_model,
                     prefix="critic_model_",
                 )
-    logger.torch_save(itr=step, torch_saver_elements=actor, prefix="mix_tanh_actor_")
-    logger.torch_save(itr=step, torch_saver_elements=cost_model, prefix="cost_model_")
+
+            if steps >= config["total_iteration"]:
+                break
+
+    logger.torch_save(itr=steps, torch_saver_elements=actor, prefix="mix_tanh_actor_")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model_")
     logger.torch_save(
-        itr=step, torch_saver_elements=critic_model, prefix="critic_model_"
+        itr=steps, torch_saver_elements=critic_model, prefix="critic_model_"
     )
     logger.close()
 
