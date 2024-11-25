@@ -849,12 +849,17 @@ class SafeDiceTanhMixtureActor(nn.Module):
         logstds = logstds.view(-1, self.num_components, self.act_dim)
         stds = torch.exp(logstds)
 
+        if torch.sum(torch.isnan(means)) > 0 or torch.sum(torch.isnan(stds)) > 0:
+            print("obs: ", torch.sum(torch.isnan(obs)))
+            print("encoder: ", torch.sum(torch.isnan(x)))
+            print("means: ", torch.sum(torch.isnan(means)))
+            print("stds: ", torch.sum(torch.isnan(stds)))
+
         pretanh_actions_dist = td.Independent(td.Normal(means, stds), 1)
         pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
         pretanh_actions = torch.stack([pretanh_actions, pretanh_actions], dim=1)
         pretanh_log_prob = pretanh_actions_dist.log_prob(pretanh_actions)
-
-        log_probs = torch.mean(pretanh_log_prob) - torch.sum(
+        log_probs = torch.mean(pretanh_log_prob, dim=-1) - torch.sum(
             torch.log(1 - actions**2 + self.eps), dim=-1
         )
         return log_probs
