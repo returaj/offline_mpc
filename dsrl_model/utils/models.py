@@ -848,6 +848,32 @@ class SafeDiceTanhMixtureActor(nn.Module):
         logstds = self.logstds(x).clamp(self.logstd_min, self.logstd_max)
         logstds = logstds.view(-1, self.num_components, self.act_dim)
         stds = torch.exp(logstds)
+
+        pretanh_actions_dist = td.Independent(td.Normal(means, stds), 1)
+        pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
+        pretanh_actions = torch.stack([pretanh_actions, pretanh_actions], dim=1)
+        pretanh_log_prob = pretanh_actions_dist.log_prob(pretanh_actions)
+
+        log_probs = torch.mean(pretanh_log_prob) - torch.sum(
+            torch.log(1 - actions**2 + self.eps), dim=-1
+        )
+        return log_probs
+
+    def depricated_get_logprob(self, obs, actions):
+        """
+        Args:
+            obs: A batch of observations.
+            actions: A batch of actions to evaluate log probs on.
+        Returns:
+            Log probabilities of actions.
+        """
+        x = self.pre_encoder(obs)
+
+        means = self.means(x).clamp(self.mean_min, self.mean_max)
+        means = means.view(-1, self.num_components, self.act_dim)
+        logstds = self.logstds(x).clamp(self.logstd_min, self.logstd_max)
+        logstds = logstds.view(-1, self.num_components, self.act_dim)
+        stds = torch.exp(logstds)
         mixture_logits = self.logits(x) / self.mdn_temp
 
         mixture_dist = td.Categorical(logits=mixture_logits)

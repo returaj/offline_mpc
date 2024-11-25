@@ -36,8 +36,8 @@ EP = 1e-6
 EP2 = 1e-3
 
 default_cfg = {
-    "log_freq": int(1e4),
-    "save_freq": int(1e4),
+    "log_freq": int(1),
+    "save_freq": int(1),
     "hidden_size": 256,
     "latent_obs_dim": 50,
     "gamma": 0.99,
@@ -48,8 +48,8 @@ default_cfg = {
     "grad_reg_coeffs_nu": 1e-6,
     "use_last_layer_bias_cost": False,
     "use_last_layer_bias_critic": False,
-    "pretrain_iteration": int(1e6),
-    "total_iteration": int(1e6),
+    "pretrain_iteration": int(1e1),
+    "total_iteration": int(1e1),
 }
 
 trajectory_cfg = {
