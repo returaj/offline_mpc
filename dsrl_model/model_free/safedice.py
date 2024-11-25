@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.distributions as td
 import torch.nn.functional as F
+from torch.autograd import Variable
 from torch.nn.utils.clip_grad import clip_grad_norm_
 
 from dsrl_model.utils.bufffer import SafeDiceBuffer
@@ -170,7 +171,7 @@ def pretrain_discriminator(
     cost_union = cost_model(target_union)
     loss = minmax_discriminator_loss(cost_neg, cost_union)
 
-    target_mixed.requires_grad = True
+    target_mixed = Variable(target_mixed, requires_grad=True).to(device=device)
     cost_mixed = cost_model(target_mixed)
     loss += config["grad_reg_coeffs"] * gradient_panelty(target_mixed, cost_mixed)
     return loss
@@ -219,7 +220,7 @@ def train_critic_and_actor(
         unif_rand * target_neg_next_obs + (1 - unif_rand) * target_union_next_obs
     )
     nu_inter = torch.concat([target_union_obs, nu_inter, nu_next_inter], dim=0)
-    nu_inter.requires_grad = True
+    nu_inter = Variable(nu_inter, requires_grad=True).to(device)
     nu_output = critic_model(nu_inter)
     nu_loss += config["grad_reg_coeffs_nu"] * gradient_panelty(nu_inter, nu_output)
 

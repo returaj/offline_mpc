@@ -729,7 +729,8 @@ def minmax_discriminator_loss(dx, dgz, label_smoothing=0.0):
 
 def gradient_panelty(interpolate, d_interpolate):
     "code from torchgan"
-    grad_output = torch.ones_like(d_interpolate)
+    device = interpolate.device
+    grad_output = torch.ones_like(d_interpolate, device=device)
     gradients = torch.autograd.grad(
         outputs=d_interpolate,
         inputs=interpolate,
