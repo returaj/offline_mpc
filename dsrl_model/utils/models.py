@@ -729,6 +729,7 @@ def minmax_discriminator_loss(dx, dgz, label_smoothing=0.0):
 
 def gradient_panelty(interpolate, d_interpolate):
     "code from torchgan"
+    batch_size = interpolate.shape[0]
     device = interpolate.device
     grad_output = torch.ones_like(d_interpolate, device=device)
     gradients = torch.autograd.grad(
@@ -738,7 +739,11 @@ def gradient_panelty(interpolate, d_interpolate):
         retain_graph=True,
         create_graph=True,
     )[0]
-    penalty = (gradients.norm(2) - 1) ** 2
+    gradients = gradients.view(batch_size, -1)
+    # Derivatives of the gradient close to 0 can cause problems because of
+    # the square root, so manually calculate norm and add epsilon
+    gradients_norm = torch.sqrt(torch.sum(gradients**2, dim=1) + 1e-12)
+    penalty = (gradients_norm - 1) ** 2
     return torch.mean(penalty)
 
 

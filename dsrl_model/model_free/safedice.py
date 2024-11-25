@@ -226,7 +226,7 @@ def train_critic_and_actor(
 
     # weighted BC
     weight = torch.exp(union_adv_nu.detach() - 1)
-    weight /= torch.mean(weight)
+    weight /= torch.mean(weight) + EP
     pi_loss = torch.mean(weight * actor.get_logprob(target_union_obs, target_union_act))
 
     return nu_loss, pi_loss
