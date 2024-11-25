@@ -864,7 +864,7 @@ class SafeDiceTanhMixtureActor(nn.Module):
         )
         return log_probs
 
-    def depricated_get_logprob(self, obs, actions):
+    def true_get_logprob(self, obs, actions):
         """
         Args:
             obs: A batch of observations.
