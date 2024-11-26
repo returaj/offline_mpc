@@ -279,7 +279,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
         use_last_layer_bias=config["use_last_layer_bias_cost"],
     ).to(device)
-    cost_model_optimizer = torch.optim.Adam(
+    cost_model_optimizer = torch.optim.AdamW(
         cost_model.parameters(),
         lr=config["critic_lr"],
         weight_decay=config["weight_decay_cost"],
@@ -291,7 +291,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
         use_last_layer_bias=config["use_last_layer_bias_critic"],
     ).to(device)
-    critic_model_optimizer = torch.optim.Adam(
+    critic_model_optimizer = torch.optim.AdamW(
         critic_model.parameters(),
         lr=config["critic_lr"],
         weight_decay=config["weight_decay_cost"],
@@ -302,7 +302,7 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_size=config["hidden_size"],
     ).to(device)
-    actor_optimizer = torch.optim.Adam(
+    actor_optimizer = torch.optim.AdamW(
         actor.parameters(),
         lr=config["actor_lr"],
         weight_decay=config["weight_decay_cost"],
