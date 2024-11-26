@@ -50,6 +50,7 @@ default_cfg = {
     "use_last_layer_bias_critic": False,
     "pretrain_iteration": int(1e6),
     "total_iteration": int(1e6),
+    "weight_decay_cost": 0.001,
     "cost_weight_temp": 1.0,
     "act_train_use_logprob": True,
 }
@@ -279,7 +280,9 @@ def main(args, cfg_env=None):
         use_last_layer_bias=config["use_last_layer_bias_cost"],
     ).to(device)
     cost_model_optimizer = torch.optim.Adam(
-        cost_model.parameters(), lr=config["critic_lr"]
+        cost_model.parameters(),
+        lr=config["critic_lr"],
+        weight_decay=config["weight_decay_cost"],
     )
     # critic model
     critic_model = SafeDiceCritic(
@@ -289,7 +292,9 @@ def main(args, cfg_env=None):
         use_last_layer_bias=config["use_last_layer_bias_critic"],
     ).to(device)
     critic_model_optimizer = torch.optim.Adam(
-        critic_model.parameters(), lr=config["critic_lr"]
+        critic_model.parameters(),
+        lr=config["critic_lr"],
+        weight_decay=config["weight_decay_cost"],
     )
     # actor / policy model
     actor = SafeDiceTanhMixtureActor(
@@ -297,7 +302,11 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         hidden_size=config["hidden_size"],
     ).to(device)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config["actor_lr"])
+    actor_optimizer = torch.optim.Adam(
+        actor.parameters(),
+        lr=config["actor_lr"],
+        weight_decay=config["weight_decay_cost"],
+    )
 
     # data
     agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
