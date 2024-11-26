@@ -144,6 +144,12 @@ def single_agent_args():
             "default": False,
             "help": "To use validation set to select best cost model for bc training",
         },
+        {
+            "name": "--act-train-use-logprob",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "To use log_prob from training weighted BC algorithm",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

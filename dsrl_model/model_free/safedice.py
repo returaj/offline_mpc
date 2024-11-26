@@ -37,7 +37,7 @@ EP2 = 1e-3
 
 default_cfg = {
     "log_freq": int(1e4),
-    "save_freq": int(1e4),
+    "save_freq": int(2e4),
     "hidden_size": 256,
     "latent_obs_dim": 50,
     "gamma": 0.99,
@@ -50,6 +50,8 @@ default_cfg = {
     "use_last_layer_bias_critic": False,
     "pretrain_iteration": int(1e6),
     "total_iteration": int(1e6),
+    "cost_weight_temp": 1.0,
+    "act_train_use_logprob": True,
 }
 
 trajectory_cfg = {
@@ -225,10 +227,17 @@ def train_critic_and_actor(
     nu_loss += config["grad_reg_coeffs_nu"] * gradient_panelty(nu_inter, nu_output)
 
     # weighted BC
-    weight = torch.exp(union_adv_nu.detach() - 1)
+    weight = torch.exp(union_adv_nu.detach() - 1) ** config["cost_weight_temp"]
     weight /= torch.mean(weight) + EP
-    pi_loss = torch.mean(weight * actor.get_logprob(target_union_obs, target_union_act))
-
+    if config["act_train_use_logprob"]:
+        pi_loss = torch.mean(
+            weight * actor.true_get_logprob(target_union_obs, target_union_act)
+        )
+    else:
+        pred_act, *_ = actor(target_union_obs)
+        pi_loss = torch.mean(
+            weight * torch.sum((pred_act - target_union_act) ** 2, dim=1)
+        )
     return nu_loss, pi_loss
 
 
@@ -242,6 +251,10 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
     config = {**default_cfg, **trajectory_cfg}
+    config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
+    config["act_train_use_logprob"] = (
+        args.act_train_use_logprob or config["act_train_use_logprob"]
+    )
 
     # evaluation environment
     eval_env = gym.make(args.task)

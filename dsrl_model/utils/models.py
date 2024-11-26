@@ -803,7 +803,9 @@ class SafeDiceTanhMixtureActor(nn.Module):
         component_dist = td.Independent(component_dist, 1)
         pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
 
-        pretanh_actions = pretanh_actions_dist.rsample()
+        mixture_sample = F.gumbel_softmax(logits=mixture_logits, tau=1.0, hard=True)
+        component_sample = component_dist.rsample()
+        pretanh_actions = torch.einsum("ij,ijk->ik", mixture_sample, component_sample)
         actions = torch.tanh(pretanh_actions)
 
         logprob, pretanh_logprob = self.logprob(
