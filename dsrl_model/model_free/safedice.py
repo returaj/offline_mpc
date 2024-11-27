@@ -16,6 +16,7 @@ import torch.distributions as td
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.nn.utils.clip_grad import clip_grad_norm_
+from torch.optim.lr_scheduler import LinearLR
 
 from dsrl_model.utils.bufffer import SafeDiceBuffer
 from dsrl_model.utils.dsrl_dataset import (
@@ -307,6 +308,13 @@ def main(args, cfg_env=None):
         lr=config["actor_lr"],
         weight_decay=config["weight_decay_cost"],
     )
+    actor_scheduler = LinearLR(
+        actor_optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=config["total_iteration"],
+        verbose=False,
+    )
 
     # data
     agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
@@ -472,6 +480,7 @@ def main(args, cfg_env=None):
             actor_optimizer.zero_grad()
             pi_loss.backward()
             actor_optimizer.step()
+            actor_scheduler.step()
 
             logger.logged = False
 
@@ -514,6 +523,7 @@ def main(args, cfg_env=None):
                     logger.log_tabular("Metrics/EvalEpLen")
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
 
+                logger.log_tabular("Metrics/Alpha", alpha)
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_bc_policy", pi_loss.mean().item())
                 logger.log_tabular("Loss/Loss_critic", nu_loss.mean().item())
