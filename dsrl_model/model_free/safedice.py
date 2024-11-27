@@ -41,6 +41,7 @@ default_cfg = {
     "save_freq": int(2e4),
     "hidden_size": 256,
     "latent_obs_dim": 50,
+    "max_grad_norm": 10.0,
     "gamma": 0.99,
     "action_repeat": 1,
     "actor_lr": 3e-4,
@@ -474,10 +475,12 @@ def main(args, cfg_env=None):
 
             critic_model_optimizer.zero_grad()
             nu_loss.backward()
+            clip_grad_norm_(critic_model.parameters(), config["max_grad_norm"])
             critic_model_optimizer.step()
 
             actor_optimizer.zero_grad()
             pi_loss.backward()
+            clip_grad_norm_(actor.parameters(), config["max_grad_norm"])
             actor_optimizer.step()
             actor_scheduler.step()
 
