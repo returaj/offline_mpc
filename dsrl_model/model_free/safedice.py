@@ -51,7 +51,7 @@ default_cfg = {
     "use_last_layer_bias_critic": False,
     "pretrain_iteration": int(1e6),
     "total_iteration": int(1e6),
-    "weight_decay_cost": 0.001,
+    "weight_decay_cost": 0.01,
     "cost_weight_temp": 1.0,
     "act_train_use_logprob": True,
 }
