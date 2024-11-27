@@ -771,18 +771,19 @@ class SafeDiceTanhMixtureActor(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
         )
-        self.pre_encoder.apply(xavier_init)
+        # self.pre_encoder.apply(xavier_init)
+
         self.means = nn.Linear(hidden_size, num_components * act_dim)
-        nn.init.xavier_uniform_(self.means.weight)
-        nn.init.uniform_(self.means.bias, -1e-3, 1e-3)
+        # nn.init.xavier_uniform_(self.means.weight)
+        # nn.init.uniform_(self.means.bias, -1e-3, 1e-3)
 
         self.logstds = nn.Linear(hidden_size, num_components * act_dim)
-        nn.init.uniform_(self.logstds.weight, -1e-3, 1e-3)
-        nn.init.uniform_(self.logstds.bias, -1e-3, 1e-3)
+        # nn.init.uniform_(self.logstds.weight, -1e-3, 1e-3)
+        # nn.init.uniform_(self.logstds.bias, -1e-3, 1e-3)
 
         self.logits = nn.Linear(hidden_size, num_components)
-        nn.init.xavier_uniform_(self.logits.weight)
-        nn.init.uniform_(self.logits.bias, -1e-3, 1e-3)
+        # nn.init.xavier_uniform_(self.logits.weight)
+        # nn.init.uniform_(self.logits.bias, -1e-3, 1e-3)
 
         self.mean_min, self.mean_max = mean_range
         self.logstd_min, self.logstd_max = logstd_range
