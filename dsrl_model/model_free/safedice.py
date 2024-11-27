@@ -527,15 +527,28 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Loss/Loss_bc_policy", pi_loss.mean().item())
                 logger.log_tabular("Loss/Loss_critic", nu_loss.mean().item())
                 logger.log_tabular(
-                    "Norm/bc_policy", get_params_norm(actor.parameters(), grads=False)
+                    "Norm/Params/bc_policy",
+                    get_params_norm(actor.parameters(), grads=False),
                 )
                 logger.log_tabular(
-                    "Norm/cost_model",
+                    "Norm/Params/cost_model",
                     get_params_norm(cost_model.parameters(), grads=False),
                 )
                 logger.log_tabular(
-                    "Norm/critic_model",
+                    "Norm/Params/critic_model",
                     get_params_norm(critic_model.parameters(), grads=False),
+                )
+                logger.log_tabular(
+                    "Norm/Grad/bc_policy",
+                    get_params_norm(actor.parameters(), grads=True),
+                )
+                logger.log_tabular(
+                    "Norm/Grad/cost_model",
+                    get_params_norm(cost_model.parameters(), grads=True),
+                )
+                logger.log_tabular(
+                    "Norm/Grad/critic_model",
+                    get_params_norm(critic_model.parameters(), grads=True),
                 )
                 logger.dump_tabular()
 
