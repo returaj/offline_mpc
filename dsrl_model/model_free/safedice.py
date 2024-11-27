@@ -313,7 +313,6 @@ def main(args, cfg_env=None):
         start_factor=1.0,
         end_factor=0.0,
         total_iters=config["total_iteration"],
-        verbose=False,
     )
 
     # data
