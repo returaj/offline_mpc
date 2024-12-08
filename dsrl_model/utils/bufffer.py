@@ -350,3 +350,170 @@ class OnPolicyBuffer:
                 )
             else:
                 yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act)
+
+
+class SafeDiceBuffer:
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        neg_data_size,
+        union_data_size,
+        batch_size,
+        device,
+        ep_len=1000,
+    ):
+        self.batch_size = batch_size
+        self.neg_capacity = neg_data_size
+        self.union_capacity = union_data_size
+        self.ep_len = ep_len
+        self.device = torch.device(device)
+        dtype = torch.float32
+        self._neg_obs = torch.empty(
+            (self.neg_capacity + 1, obs_dim), dtype=dtype, device=self.device
+        )
+        self._neg_act = torch.empty(
+            (self.neg_capacity, act_dim), dtype=dtype, device=self.device
+        )
+        self._neg_init_obs = torch.empty(
+            (self.neg_capacity // ep_len, obs_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._union_obs = torch.empty(
+            (self.union_capacity + 1, obs_dim), dtype=dtype, device=self.device
+        )
+        self._union_act = torch.empty(
+            (self.union_capacity, act_dim), dtype=dtype, device=self.device
+        )
+        self._union_init_obs = torch.empty(
+            (self.union_capacity // ep_len, obs_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._neg_priorities = torch.ones(
+            (self.neg_capacity,), dtype=torch.float32, device=self.device
+        )
+        self._union_priorities = torch.ones(
+            (self.union_capacity,), dtype=torch.float32, device=self.device
+        )
+
+        self._init_obs = None
+
+        self._eps = 1e-6
+        self._neg_idx = 0
+        self._union_idx = 0
+
+    def _update(
+        self,
+        obs_store,
+        act_store,
+        init_obs_store,
+        priority_store,
+        idx,
+        obs,
+        act,
+        priority,
+        capacity,
+    ):
+        obs_store[idx : idx + self.ep_len] = obs
+        act_store[idx : idx + self.ep_len] = act
+        init_obs_store[idx // self.ep_len] = obs[0]
+        priority_store[idx : idx + self.ep_len] = priority
+        return (idx + self.ep_len) % capacity
+
+    def add(self, obs, act, done=None, is_negative=False):
+        max_priority = 1.0
+        done_sum = np.sum(done) or 1.0
+        true_ep_len = self.ep_len - done_sum + 1
+        mask = torch.arange(self.ep_len) >= true_ep_len - 1
+        new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
+        new_priorities[mask] = 0.0
+
+        if is_negative:
+            self._neg_idx = self._update(
+                obs_store=self._neg_obs,
+                act_store=self._neg_act,
+                init_obs_store=self._neg_init_obs,
+                priority_store=self._neg_priorities,
+                idx=self._neg_idx,
+                obs=obs,
+                act=act,
+                priority=new_priorities,
+                capacity=self.neg_capacity,
+            )
+        else:
+            self._union_idx = self._update(
+                obs_store=self._union_obs,
+                act_store=self._union_act,
+                init_obs_store=self._union_init_obs,
+                priority_store=self._union_priorities,
+                idx=self._union_idx,
+                obs=obs,
+                act=act,
+                priority=new_priorities,
+                capacity=self.union_capacity,
+            )
+
+    def _get_init_obs(self):
+        if self._init_obs is None:
+            self._init_obs = torch.concat(
+                [self._neg_init_obs, self._union_init_obs], dim=0
+            )
+        return self._init_obs
+
+    def sample(self):
+        batch_size = self.batch_size
+        steps_per_epoch = self.union_capacity // batch_size
+
+        union_probs = self._union_priorities
+        union_probs /= union_probs.sum()
+        union_total = len(union_probs)
+        union_idxs = torch.from_numpy(
+            np.random.choice(
+                union_total,
+                (steps_per_epoch, batch_size),
+                p=union_probs.cpu().numpy(),
+                replace=True,
+            )
+        ).to(self.device)
+
+        neg_probs = self._neg_priorities
+        neg_probs /= neg_probs.sum()
+        neg_total = len(neg_probs)
+        neg_idxs = torch.from_numpy(
+            np.random.choice(
+                neg_total,
+                (steps_per_epoch, batch_size),
+                p=neg_probs.cpu().numpy(),
+                replace=True,
+            )
+        ).to(self.device)
+
+        init_obs = self._get_init_obs()
+        init_idxs = torch.from_numpy(
+            np.random.choice(
+                init_obs.shape[0],
+                (steps_per_epoch, batch_size),
+                replace=True,
+            )
+        ).to(self.device)
+
+        for init_idx, n_idx, u_idx in zip(init_idxs, neg_idxs, union_idxs):
+            b_init_obs = init_obs[init_idx]
+            b_neg_obs = self._neg_obs[n_idx]
+            b_neg_act = self._neg_act[n_idx]
+            b_neg_next_obs = self._neg_obs[n_idx + 1]
+            b_union_obs = self._union_obs[u_idx]
+            b_union_act = self._union_act[u_idx]
+            b_union_next_obs = self._union_obs[u_idx + 1]
+
+            yield (
+                b_init_obs,
+                b_neg_obs,
+                b_neg_act,
+                b_neg_next_obs,
+                b_union_obs,
+                b_union_act,
+                b_union_next_obs,
+            )
