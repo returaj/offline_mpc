@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.distributions as td
 import torch.nn.functional as F
+from torch.autograd import Variable
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 
@@ -24,7 +25,13 @@ from dsrl_model.utils.dsrl_dataset import (
     get_normalized_data,
 )
 from dsrl_model.utils.logger import EpochLogger
-from dsrl_model.utils.models import BcqVAE, Encoder, ExpCostModel
+from dsrl_model.utils.models import (
+    BcqVAE,
+    Encoder,
+    ExpCostModel,
+    SafeDiceTanhMixtureActor,
+    gradient_panelty,
+)
 from dsrl_model.utils.save_video_with_value import save_video
 from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent_args
 
@@ -32,10 +39,12 @@ EP = 1e-6
 EP2 = 1e-3
 
 default_cfg = {
-    "save_freq": 20,
-    "cost_validation_freq": 200,
-    "bc_validation_freq": 200,
-    "hidden_sizes": [512, 512],
+    "log_freq": int(1e4),
+    "save_freq": int(2e4),
+    "cost_validation_freq": 2000,
+    "bc_validation_freq": 2000,
+    "eval_episode_freq": 25,
+    "hidden_sizes": [256, 256],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
     "bag_size": 1,
@@ -48,8 +57,10 @@ default_cfg = {
     "cost_coef": 0.9,
     "cost_weight_temp": 0.6,
     "train_horizon": 20,  # 20
-    "weight_decay_bc": 0.001,
-    "weight_decay_cost": 0.001,
+    "weight_decay_bc": 0.01,
+    "weight_decay_cost": 0.01,
+    "grad_reg_coeffs": 10.0,
+    "total_iteration": int(1e6),
     "bc_weight_binary": None,
     "use_validation": None,
 }
@@ -89,7 +100,7 @@ def evaluate_bc_policy(
     )
     ep_frames, ep_pred_cost = [], []
     while not eval_done:
-        act = bc_policy.decode_bc(eval_obs)
+        act = bc_policy(eval_obs)
         next_obs, reward, terminated, truncated, info = eval_env.step(
             act[0].detach().squeeze().cpu().numpy()
         )
@@ -189,6 +200,14 @@ def get_validation_cost_accuracy(dataset, encoder, cost_model, config, device):
     return comparative_acc, torch.mean(neg_cost), torch.std(neg_cost)
 
 
+def discounted_sum(vector_x, gamma):
+    horizon = vector_x.shape[0]
+    cumsum = vector_x[-1]
+    for t in reversed(range(horizon - 1)):
+        cumsum = vector_x[t] + gamma * cumsum
+    return cumsum
+
+
 def bc_policy_loss_fn(
     bc_policy,
     encoder,
@@ -206,17 +225,24 @@ def bc_policy_loss_fn(
     horizon, batch_bag_size, _ = target_obs.shape
     for t in range(horizon):
         to, ta = target_obs[t], target_act[t]
-        pred_act, bc_mean, bc_std = bc_policy(to, ta)
-        recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
-        kl_loss = -0.5 * (
-            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
-        ).sum(dim=1)
-        # 0.5 weight is from BCQ implementation See @aviralkumar implementation
-        loss += discount * (recon_loss + 0.5 * kl_loss)
+        if config["policy_type"] == "vae":
+            pred_act, bc_mean, bc_std = bc_policy(to, ta)
+            recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+            kl_loss = -0.5 * (
+                1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
+            ).sum(dim=1)
+            # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+            loss += discount * (recon_loss + 0.5 * kl_loss)
+        else:
+            pred_act, *_ = bc_policy(to)
+            recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+            loss += discount * recon_loss
         discount *= gamma
     with torch.no_grad():
         target = encoder(torch.cat([target_obs, target_act], dim=-1))
-        weight = cost_model(target, use_sigmoid=True).sum(dim=0)
+        # Horizon X Batch_Bag
+        cost_weight = cost_model(target, use_sigmoid=True)
+        weight = discounted_sum(cost_weight, gamma)
         if config["bc_weight_binary"]:
             margin = neg_mean_cost - 0.1 * neg_std_cost
             final_weight = torch.where(
@@ -225,13 +251,11 @@ def bc_policy_loss_fn(
                 torch.tensor(0.0).to(device),
             )
         else:
-            final_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+            # final_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
+            weight = torch.exp(-weight / config["cost_weight_temp"])
+            final_weight = weight / (torch.mean(weight) + EP2)
     loss = final_weight * loss
-    policy_loss = 0.0
-    if config.get("use_policy_norm", False):
-        for params in bc_policy.parameters():
-            policy_loss += params.pow(2).sum() * 0.001
-    return torch.mean(loss) + policy_loss
+    return torch.mean(loss)
 
 
 def cost_loss_fn(
@@ -245,42 +269,47 @@ def cost_loss_fn(
 ):
     gamma, bag_size = config["gamma"], config["bag_size"]
     alpha, cost_lambda = config["alpha"], config["cost_lambda"]
-    discount, total_neg_cost, total_union_cost = 1.0, 0.0, 0.0
+    discount, total_neg_cost, total_union_cost, total_mix_cost = 1.0, 0.0, 0.0, 0.0
+    device = target_neg_obs.device
 
     # Horizon X Batch_Bag X obs/act_dim
     horizon, batch_bag_size, _ = target_neg_obs.shape
     batch_size = batch_bag_size // bag_size
 
+    target_neg = torch.cat([target_neg_obs, target_neg_act], dim=-1)
+    target_union = torch.cat([target_union_obs, target_union_act], dim=-1)
+
+    unif_rand = torch.rand(size=(horizon, batch_bag_size, 1)).to(device)
+    target_mixed = unif_rand * target_neg + (1 - unif_rand) * target_union
+    target_mixed_input = Variable(target_mixed, requires_grad=True).to(device=device)
+
     # encoded s,a pair
-    target_neg = encoder(torch.cat([target_neg_obs, target_neg_act], dim=-1))
-    target_union = encoder(torch.cat([target_union_obs, target_union_act], dim=-1))
+    target_neg = encoder(target_neg)
+    target_union = encoder(target_union)
+    target_mixed = encoder(target_mixed_input)
 
     for t in range(horizon):
-        tn, tu = target_neg[t], target_union[t]
+        tn, tu, tm = target_neg[t], target_union[t], target_mixed[t]
         total_neg_cost += discount * cost_model(tn, use_sigmoid=True)
         total_union_cost += discount * cost_model(tu, use_sigmoid=True)
+        total_mix_cost += discount * cost_model(tm, use_sigmoid=True)
         discount *= gamma
 
     total_neg_cost = total_neg_cost.view(batch_size, bag_size)
     total_union_cost = total_union_cost.view(batch_size, bag_size)
     expected_neg_cost = torch.mean(total_neg_cost, dim=1)
     expected_union_cost = torch.mean(total_union_cost, dim=1)
-    expected_pos_cost = (1 / (1 - alpha)) * (
-        expected_union_cost - alpha * expected_neg_cost
-    ).clamp(min=EP)
+    # expected_pos_cost = (1 / (1 - alpha)) * (
+    #     expected_union_cost - alpha * expected_neg_cost
+    # ).clamp(min=EP)
     # z = torch.log(expected_neg_cost + expected_pos_cost + EP)
     # # print(
     # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
     # # )
-    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
-    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
-    cost_loss = 0.0
-    if config.get("use_cost_norm", False):
-        for params in cost_model.parameters():
-            cost_loss += params.pow(2).sum() * 0.001
-        for params in encoder.parameters():
-            cost_loss += params.pow(2).sum() * 0.001
-    return torch.mean(loss) + cost_loss
+    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
+    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    grad_loss = gradient_panelty(target_mixed, total_mix_cost)
+    return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
 
 
 def main(args, cfg_env=None):
@@ -298,6 +327,7 @@ def main(args, cfg_env=None):
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
     config["bc_weight_binary"] = args.bc_weight_binary
     config["use_validation"] = args.use_validation
+    config["policy_type"] = args.policy_type
     if not config["use_validation"]:
         config["cost_validation_freq"] = 1
 
@@ -316,21 +346,34 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    # See BEAR implementation from @aviralkumar
-    bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
-    config["bc_latent_dim"] = bc_latent_dim
     config["bc_lr"] = args.lr
-    bc_policy = BcqVAE(
-        obs_dim=obs_space.shape[0],
-        act_dim=act_space.shape[0],
-        latent_dim=bc_latent_dim,
-        device=device,
-    ).to(device)
+    if config["policy_type"] == "vae":
+        # See BEAR implementation from @aviralkumar
+        bc_latent_dim = config.get("latent_dim", act_space.shape[0] * 2)
+        config["bc_latent_dim"] = bc_latent_dim
+        bc_policy = BcqVAE(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            latent_dim=bc_latent_dim,
+            device=device,
+        ).to(device)
+    else:
+        bc_policy = SafeDiceTanhMixtureActor(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_size=config["hidden_sizes"][0],
+        ).to(device)
     best_bc_policy = deepcopy(bc_policy)
-    bc_policy_optimizer = torch.optim.Adam(
+    bc_policy_optimizer = torch.optim.AdamW(
         bc_policy.parameters(),
         lr=config["bc_lr"],
         weight_decay=config["weight_decay_bc"],
+    )
+    bc_scheduler = LinearLR(
+        bc_policy_optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=config["total_iteration"],
     )
     encoder = Encoder(
         # (s,a)
@@ -338,7 +381,7 @@ def main(args, cfg_env=None):
         latent_dim=config["latent_obs_dim"],
     ).to(device)
     best_encoder = deepcopy(encoder)
-    encoder_optimizer = torch.optim.Adam(
+    encoder_optimizer = torch.optim.AdamW(
         encoder.parameters(),
         lr=args.lr,
         weight_decay=config["weight_decay_cost"],
@@ -348,7 +391,7 @@ def main(args, cfg_env=None):
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
     best_cost_model = deepcopy(cost_model)
-    cost_model_optimizer = torch.optim.Adam(
+    cost_model_optimizer = torch.optim.AdamW(
         cost_model.parameters(),
         lr=args.lr,
         weight_decay=config["weight_decay_cost"],
@@ -438,12 +481,12 @@ def main(args, cfg_env=None):
     )
 
     # set logger
-    eval_rew_deque = deque(maxlen=5)
-    eval_cost_deque = deque(maxlen=5)
-    eval_norm_rew_deque = deque(maxlen=5)
-    eval_norm_cost_deque = deque(maxlen=5)
-    eval_pred_cost_deque = deque(maxlen=5)
-    eval_len_deque = deque(maxlen=5)
+    eval_rew_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_cost_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_norm_rew_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_norm_cost_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_pred_cost_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_len_deque = deque(maxlen=config["eval_episode_freq"])
     dict_args = config
     dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
     logger = EpochLogger(
@@ -454,7 +497,6 @@ def main(args, cfg_env=None):
     logger.log("Start with bc_policy, cost model training.")
 
     # train model
-    step = 0
     valid_cost_acc_deque = deque([0.0], maxlen=1)
     valid_bc_acc_deque = deque([0.0], maxlen=1)
     prev_valid_cost_acc = -1.0
@@ -463,8 +505,10 @@ def main(args, cfg_env=None):
     best_neg_std_cost = torch.tensor(0.0).to(device)
     update_cost_model_count = 0
 
-    for epoch in range(num_epochs):
-        training_start_time = time.time()
+    steps = 0
+    while steps < config["total_iteration"]:
+        # for epoch in range(num_epochs):
+        # training_start_time = time.time()
         # assert (
         #     len(bc_scheduler.get_last_lr()) == 1
         # ), f"multiple learning rates found {bc_scheduler.get_last_lr()}"
@@ -496,7 +540,7 @@ def main(args, cfg_env=None):
             encoder_optimizer.step()
             cost_model_optimizer.step()
 
-            if step % config["cost_validation_freq"] == 0:
+            if steps % config["cost_validation_freq"] == 0:
                 validation_dataset = buffer.get_validation_dataset()
                 valid_cost_acc, neg_mean_cost, neg_std_cost = (
                     get_validation_cost_accuracy(
@@ -554,149 +598,146 @@ def main(args, cfg_env=None):
             bc_policy_loss.backward()
             clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
             bc_policy_optimizer.step()
+            bc_scheduler.step()
 
-            if step % config["bc_validation_freq"] == 0:
-                validation_dataset = buffer.get_validation_dataset()
-                valid_bc_acc = get_validation_policy_accuracy(
-                    dataset=validation_dataset,
-                    bc_policy=bc_policy,
-                    config=config,
-                    device=device,
-                )
-                valid_bc_acc_deque.append(valid_bc_acc.item())
-                if prev_valid_bc_acc <= np.mean(valid_bc_acc_deque):
-                    prev_valid_bc_acc = np.mean(valid_bc_acc_deque)
-                    best_bc_policy.load_state_dict(bc_policy.state_dict())
+            # BC validation is not required
+            # if steps % config["bc_validation_freq"] == 0:
+            #     validation_dataset = buffer.get_validation_dataset()
+            #     valid_bc_acc = get_validation_policy_accuracy(
+            #         dataset=validation_dataset,
+            #         bc_policy=bc_policy,
+            #         config=config,
+            #         device=device,
+            #     )
+            #     valid_bc_acc_deque.append(valid_bc_acc.item())
+            #     if prev_valid_bc_acc <= np.mean(valid_bc_acc_deque):
+            #         prev_valid_bc_acc = np.mean(valid_bc_acc_deque)
+            #         best_bc_policy.load_state_dict(bc_policy.state_dict())
 
-                logger.store(
-                    **{
-                        "Metrics/Acc_valid_recent_policy": np.mean(valid_bc_acc_deque),
-                        "Metrics/Acc_best_valid_policy": prev_valid_bc_acc.item(),
-                    }
-                )
+            #     logger.store(
+            #         **{
+            #             "Metrics/Acc_valid_recent_policy": np.mean(valid_bc_acc_deque),
+            #             "Metrics/Acc_best_valid_policy": prev_valid_bc_acc.item(),
+            #         }
+            #     )
 
-            logger.store(
-                **{
-                    "Loss/Loss_bc_policy": bc_policy_loss.mean().item(),
-                    "Loss/Loss_cost": cost_loss.mean().item(),
-                }
-            )
             logger.logged = False
 
-            step += 1
+            steps += 1
 
-        # bc_scheduler.step()
-        training_end_time = time.time()
-
-        eval_start_time = time.time()
-        is_save = (epoch + 1) % config["save_freq"] == 0 or epoch == 0
-        is_last_epoch = epoch >= num_epochs - 1
-        eval_episodes = 1 if is_last_epoch else 1
-        if args.use_eval:
-            for id in range(eval_episodes):
-                to_save_video = args.save_video and (is_save or is_last_epoch)
-                (
-                    eval_reward,
-                    eval_cost,
-                    eval_pred_cost,
-                    eval_len,
-                    ep_frames,
-                    ep_pred_cost,
-                ) = evaluate_bc_policy(
-                    eval_env=eval_env,
-                    bc_policy=bc_policy,
-                    encoder=best_encoder,
-                    cost_model=best_cost_model,
-                    device=device,
-                    save_video=to_save_video,
-                )
-                if to_save_video:
-                    save_video(
-                        ep_frames,
-                        ep_pred_cost,
-                        prefix_name=f"video_{epoch}_{id}",
-                        video_dir=osp.join(args.log_dir, "video"),
+            # training_end_time = time.time()
+            if (steps % config["log_freq"] == 0) and (not logger.logged):
+                # is_save = (epoch + 1) % config["save_freq"] == 0 or epoch == 0
+                # is_last_epoch = epoch >= num_epochs - 1
+                eval_episodes = config["eval_episode_freq"]
+                if args.use_eval:
+                    eval_start_time = time.time()
+                    for id in range(eval_episodes):
+                        to_save_video = args.save_video
+                        (
+                            eval_reward,
+                            eval_cost,
+                            eval_pred_cost,
+                            eval_len,
+                            ep_frames,
+                            ep_pred_cost,
+                        ) = evaluate_bc_policy(
+                            eval_env=eval_env,
+                            bc_policy=(
+                                bc_policy.decode_bc
+                                if config["policy_type"] == "vae"
+                                else bc_policy.action
+                            ),
+                            encoder=best_encoder,
+                            cost_model=best_cost_model,
+                            device=device,
+                            save_video=to_save_video,
+                        )
+                        if to_save_video:
+                            save_video(
+                                ep_frames,
+                                ep_pred_cost,
+                                prefix_name=f"video_{steps}_{id}",
+                                video_dir=osp.join(args.log_dir, "video"),
+                            )
+                        norm_reward, norm_cost = eval_env.get_normalized_score(
+                            eval_reward, eval_cost
+                        )
+                        eval_norm_rew_deque.append(norm_reward)
+                        eval_norm_cost_deque.append(norm_cost)
+                        eval_rew_deque.append(eval_reward)
+                        eval_cost_deque.append(eval_cost)
+                        eval_pred_cost_deque.append(eval_pred_cost)
+                        eval_len_deque.append(eval_len)
+                    logger.store(
+                        **{
+                            "Metrics/EvalEpRet": np.mean(eval_rew_deque),
+                            "Metrics/EvalEpCost": np.mean(eval_cost_deque),
+                            "Metrics/EvalEpPredCost": np.mean(eval_pred_cost_deque),
+                            "Metrics/EvalEpNormRet": np.mean(eval_norm_rew_deque),
+                            "Metrics/EvalEpNormCost": np.mean(eval_norm_cost_deque),
+                            "Metrics/EvalEpLen": np.mean(eval_len_deque),
+                        }
                     )
-                norm_reward, norm_cost = eval_env.get_normalized_score(
-                    eval_reward, eval_cost
-                )
-                eval_norm_rew_deque.append(norm_reward)
-                eval_norm_cost_deque.append(norm_cost)
-                eval_rew_deque.append(eval_reward)
-                eval_cost_deque.append(eval_cost)
-                eval_pred_cost_deque.append(eval_pred_cost)
-                eval_len_deque.append(eval_len)
-            logger.store(
-                **{
-                    "Metrics/EvalEpRet": np.mean(eval_rew_deque),
-                    "Metrics/EvalEpCost": np.mean(eval_cost_deque),
-                    "Metrics/EvalEpPredCost": np.mean(eval_pred_cost_deque),
-                    "Metrics/EvalEpNormRet": np.mean(eval_norm_rew_deque),
-                    "Metrics/EvalEpNormCost": np.mean(eval_norm_cost_deque),
-                    "Metrics/EvalEpLen": np.mean(eval_len_deque),
-                }
-            )
-        eval_end_time = time.time()
+                    eval_end_time = time.time()
 
-        if not logger.logged:
-            if args.use_eval:
-                logger.log_tabular("Metrics/EvalEpRet")
-                logger.log_tabular("Metrics/EvalEpCost")
-                logger.log_tabular("Metrics/EvalEpPredCost")
-                logger.log_tabular("Metrics/EvalEpNormRet")
-                logger.log_tabular("Metrics/EvalEpNormCost")
-                logger.log_tabular("Metrics/EvalEpLen")
-            if not logger.check_empty("Metrics/Acc_valid_recent_cost"):
-                logger.log_tabular("Metrics/Acc_valid_recent_cost")
-                logger.log_tabular("Metrics/Valid_neg_trajectory_mean_cost")
-                logger.log_tabular("Metrics/Valid_neg_trajectory_std_cost")
-                logger.log_tabular("Metrics/Acc_best_valid_cost")
-                logger.log_tabular("Metrics/Valid_best_neg_trajectory_mean_cost")
-                logger.log_tabular("Metrics/Valid_best_neg_trajectory_std_cost")
-            if not logger.check_empty("Metrics/Acc_valid_recent_policy"):
-                logger.log_tabular("Metrics/Acc_valid_recent_policy")
-                logger.log_tabular("Metrics/Acc_best_valid_policy")
-            logger.log_tabular("Train/Epoch", epoch + 1)
-            # logger.log_tabular("Train/learning_rate", lr)
-            logger.log_tabular("Loss/Loss_bc_policy")
-            logger.log_tabular("Loss/Loss_cost")
-            logger.log_tabular(
-                "Norm/bc_policy", get_params_norm(bc_policy.parameters(), grads=False)
-            )
-            logger.log_tabular(
-                "Norm/cost_model", get_params_norm(cost_model.parameters(), grads=False)
-            )
-            if args.use_eval:
-                logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
-            logger.log_tabular(
-                "Time/TrainingUpdate", training_end_time - training_start_time
-            )
-            logger.log_tabular("Time/Total", eval_end_time - training_start_time)
-            logger.dump_tabular()
-            if is_save:
-                logger.torch_save(
-                    itr=epoch,
-                    torch_saver_elements=best_bc_policy,
-                    prefix="best_bc_vae_policy",
+                    logger.log_tabular("Metrics/EvalEpRet")
+                    logger.log_tabular("Metrics/EvalEpCost")
+                    logger.log_tabular("Metrics/EvalEpPredCost")
+                    logger.log_tabular("Metrics/EvalEpNormRet")
+                    logger.log_tabular("Metrics/EvalEpNormCost")
+                    logger.log_tabular("Metrics/EvalEpLen")
+
+                if not logger.check_empty("Metrics/Acc_valid_recent_cost"):
+                    logger.log_tabular("Metrics/Acc_valid_recent_cost")
+                    logger.log_tabular("Metrics/Valid_neg_trajectory_mean_cost")
+                    logger.log_tabular("Metrics/Valid_neg_trajectory_std_cost")
+                    logger.log_tabular("Metrics/Acc_best_valid_cost")
+                    logger.log_tabular("Metrics/Valid_best_neg_trajectory_mean_cost")
+                    logger.log_tabular("Metrics/Valid_best_neg_trajectory_std_cost")
+                if not logger.check_empty("Metrics/Acc_valid_recent_policy"):
+                    logger.log_tabular("Metrics/Acc_valid_recent_policy")
+                    logger.log_tabular("Metrics/Acc_best_valid_policy")
+                logger.log_tabular("Train/Steps", steps)
+                logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.mean().item())
+                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
+                logger.log_tabular(
+                    "Norm/bc_policy",
+                    get_params_norm(bc_policy.parameters(), grads=False),
                 )
-                logger.torch_save(
-                    itr=epoch,
-                    torch_saver_elements=best_encoder,
-                    prefix="best_encoder",
+                logger.log_tabular(
+                    "Norm/cost_model",
+                    get_params_norm(cost_model.parameters(), grads=False),
                 )
-                logger.torch_save(
-                    itr=epoch,
-                    torch_saver_elements=best_cost_model,
-                    prefix="best_cost_model",
-                )
+                if args.use_eval:
+                    logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
+                logger.dump_tabular()
+                if steps % config["save_freq"] == 0:
+                    logger.torch_save(
+                        itr=steps,
+                        torch_saver_elements=bc_policy,
+                        prefix="bc_policy",
+                    )
+                    logger.torch_save(
+                        itr=steps,
+                        torch_saver_elements=best_encoder,
+                        prefix="best_encoder",
+                    )
+                    logger.torch_save(
+                        itr=steps,
+                        torch_saver_elements=best_cost_model,
+                        prefix="best_cost_model",
+                    )
+
+            if steps >= config["total_iteration"]:
+                break
+
+    logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
     logger.torch_save(
-        itr=epoch, torch_saver_elements=best_bc_policy, prefix="best_bc_vae_policy"
+        itr=steps, torch_saver_elements=best_encoder, prefix="best_encoder"
     )
     logger.torch_save(
-        itr=epoch, torch_saver_elements=best_encoder, prefix="best_encoder"
-    )
-    logger.torch_save(
-        itr=epoch, torch_saver_elements=best_cost_model, prefix="best_cost_model"
+        itr=steps, torch_saver_elements=best_cost_model, prefix="best_cost_model"
     )
     logger.close()
 

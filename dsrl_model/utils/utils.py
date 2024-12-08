@@ -150,6 +150,12 @@ def single_agent_args():
             "default": True,
             "help": "To use log_prob from training weighted BC algorithm",
         },
+        {
+            "name": "--policy-type",
+            "type": str,
+            "default": "gaussian_mixture",  # vae
+            "help": "Type of policy to use for training safe BC algorithm",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
