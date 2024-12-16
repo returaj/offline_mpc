@@ -308,7 +308,7 @@ def cost_loss_fn(
     # # )
     # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
     loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
-    grad_loss = gradient_panelty(target_mixed, total_mix_cost)
+    grad_loss = 0.0  # gradient_panelty(target_mixed_input, total_mix_cost)
     return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
 
 
