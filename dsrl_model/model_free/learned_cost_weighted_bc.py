@@ -50,7 +50,7 @@ default_cfg = {
     "bag_size": 1,
     "gamma": 0.99,
     "cost_lambda": 0.0,
-    "action_repeat": 2,  # set to 2, min value is 1
+    "action_repeat": 1,  # set to 2, min value is 1
     "update_freq": 1,
     "update_tau": 0.005,
     "bc_coef": 0.1,
