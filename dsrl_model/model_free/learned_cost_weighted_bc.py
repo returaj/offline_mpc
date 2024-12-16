@@ -540,51 +540,51 @@ def main(args, cfg_env=None):
             encoder_optimizer.step()
             cost_model_optimizer.step()
 
-            if steps % config["cost_validation_freq"] == 0:
-                validation_dataset = buffer.get_validation_dataset()
-                valid_cost_acc, neg_mean_cost, neg_std_cost = (
-                    get_validation_cost_accuracy(
-                        dataset=validation_dataset,
-                        encoder=encoder,
-                        cost_model=cost_model,
-                        config=config,
-                        device=device,
-                    )
-                )
-                valid_cost_acc_deque.append(valid_cost_acc.item())
-                skip_check = not config["use_validation"]
-                if skip_check or (prev_valid_cost_acc <= np.mean(valid_cost_acc_deque)):
-                    prev_valid_cost_acc = np.mean(valid_cost_acc_deque)
-                    best_encoder.load_state_dict(encoder.state_dict())
-                    best_cost_model.load_state_dict(cost_model.state_dict())
-                    best_neg_mean_cost = neg_mean_cost
-                    best_neg_std_cost = neg_std_cost
-                    update_cost_model_count = 0
-                else:
-                    update_cost_model_count += 1
+            # if steps % config["cost_validation_freq"] == 0:
+            #     validation_dataset = buffer.get_validation_dataset()
+            #     valid_cost_acc, neg_mean_cost, neg_std_cost = (
+            #         get_validation_cost_accuracy(
+            #             dataset=validation_dataset,
+            #             encoder=encoder,
+            #             cost_model=cost_model,
+            #             config=config,
+            #             device=device,
+            #         )
+            #     )
+            #     valid_cost_acc_deque.append(valid_cost_acc.item())
+            #     skip_check = not config["use_validation"]
+            #     if skip_check or (prev_valid_cost_acc <= np.mean(valid_cost_acc_deque)):
+            #         prev_valid_cost_acc = np.mean(valid_cost_acc_deque)
+            #         best_encoder.load_state_dict(encoder.state_dict())
+            #         best_cost_model.load_state_dict(cost_model.state_dict())
+            #         best_neg_mean_cost = neg_mean_cost
+            #         best_neg_std_cost = neg_std_cost
+            #         update_cost_model_count = 0
+            #     else:
+            #         update_cost_model_count += 1
 
-                # if validation acc keeps decreasing for some consecutive steps
-                # then, reset the cost/encoder model to best params
-                if update_cost_model_count == 5:
-                    encoder.load_state_dict(best_encoder.state_dict())
-                    cost_model.load_state_dict(best_cost_model.state_dict())
-                    update_cost_model_count = 0
+            #     # if validation acc keeps decreasing for some consecutive steps
+            #     # then, reset the cost/encoder model to best params
+            #     if update_cost_model_count == 5:
+            #         encoder.load_state_dict(best_encoder.state_dict())
+            #         cost_model.load_state_dict(best_cost_model.state_dict())
+            #         update_cost_model_count = 0
 
-                logger.store(
-                    **{
-                        "Metrics/Acc_valid_recent_cost": np.mean(valid_cost_acc_deque),
-                        "Metrics/Valid_neg_trajectory_mean_cost": neg_mean_cost.item(),
-                        "Metrics/Valid_neg_trajectory_std_cost": neg_std_cost.item(),
-                        "Metrics/Acc_best_valid_cost": prev_valid_cost_acc.item(),
-                        "Metrics/Valid_best_neg_trajectory_mean_cost": best_neg_mean_cost.item(),
-                        "Metrics/Valid_best_neg_trajectory_std_cost": best_neg_std_cost.item(),
-                    }
-                )
+            #     logger.store(
+            #         **{
+            #             "Metrics/Acc_valid_recent_cost": np.mean(valid_cost_acc_deque),
+            #             "Metrics/Valid_neg_trajectory_mean_cost": neg_mean_cost.item(),
+            #             "Metrics/Valid_neg_trajectory_std_cost": neg_std_cost.item(),
+            #             "Metrics/Acc_best_valid_cost": prev_valid_cost_acc.item(),
+            #             "Metrics/Valid_best_neg_trajectory_mean_cost": best_neg_mean_cost.item(),
+            #             "Metrics/Valid_best_neg_trajectory_std_cost": best_neg_std_cost.item(),
+            #         }
+            #     )
 
             bc_policy_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
-                encoder=best_encoder,
-                cost_model=best_cost_model,
+                encoder=encoder,
+                cost_model=cost_model,
                 target_obs=target_union_obs,
                 target_act=target_union_act,
                 config=config,
@@ -720,25 +720,21 @@ def main(args, cfg_env=None):
                     )
                     logger.torch_save(
                         itr=steps,
-                        torch_saver_elements=best_encoder,
-                        prefix="best_encoder",
+                        torch_saver_elements=encoder,
+                        prefix="encoder",
                     )
                     logger.torch_save(
                         itr=steps,
-                        torch_saver_elements=best_cost_model,
-                        prefix="best_cost_model",
+                        torch_saver_elements=cost_model,
+                        prefix="cost_model",
                     )
 
             if steps >= config["total_iteration"]:
                 break
 
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
-    logger.torch_save(
-        itr=steps, torch_saver_elements=best_encoder, prefix="best_encoder"
-    )
-    logger.torch_save(
-        itr=steps, torch_saver_elements=best_cost_model, prefix="best_cost_model"
-    )
+    logger.torch_save(itr=steps, torch_saver_elements=encoder, prefix="encoder")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model")
     logger.close()
 
 

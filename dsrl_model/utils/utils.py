@@ -123,7 +123,7 @@ def single_agent_args():
         {
             "name": "--lr",
             "type": float,
-            "default": 3e-4,  # 1e-3 performs better
+            "default": 1e-5,  # 1e-3 performs better
             "help": "Default common learning rate for the models",
         },
         {
