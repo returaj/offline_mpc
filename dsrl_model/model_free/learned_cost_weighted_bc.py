@@ -40,10 +40,10 @@ EP2 = 1e-3
 
 default_cfg = {
     "log_freq": int(1e4),
-    "save_freq": int(2e4),
+    "save_freq": int(1e4),
     "cost_validation_freq": 2000,
     "bc_validation_freq": 2000,
-    "eval_episode_freq": 25,
+    "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
     "latent_obs_dim": 50,
     "max_grad_norm": 10.0,
