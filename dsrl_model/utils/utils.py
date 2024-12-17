@@ -156,6 +156,12 @@ def single_agent_args():
             "default": "gaussian_mixture",  # vae
             "help": "Type of policy to use for training safe BC algorithm",
         },
+        {
+            "name": "--dwbc-nu",
+            "type": float,
+            "default": 0.5,
+            "help": "nu value used for dwbc algorithm",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

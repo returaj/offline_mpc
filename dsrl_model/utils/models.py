@@ -884,7 +884,7 @@ class SafeDiceTanhMixtureActor(nn.Module):
         pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
 
         pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
-        pretanh_logprob = pretanh_actions_dist.log_prob(pretanh_actions).sum(-1)
+        pretanh_logprob = pretanh_actions_dist.log_prob(pretanh_actions)
         logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
             min=self.eps
         ).log().sum(-1)
@@ -917,3 +917,23 @@ class SafeDiceTanhMixtureActor(nn.Module):
             pretanh_actions = pretanh_actions_dist.sample()
 
         return torch.tanh(pretanh_actions)
+
+
+class DwbcDiscriminator(nn.Module):
+    def __init__(self, obs_dim, act_dim):
+        super().__init__()
+
+        self.fc1_1 = nn.Linear(obs_dim + act_dim, 128)
+        self.fc1_2 = nn.Linear(1, 128)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
+
+    def forward(self, obs, act, log_pi):
+        sa = torch.cat([obs, act], 1)
+        d1 = F.relu(self.fc1_1(sa))
+        d2 = F.relu(self.fc1_2(log_pi))
+        d = torch.cat([d1, d2], 1)
+        d = F.relu(self.fc2(d))
+        d = F.sigmoid(self.fc3(d))
+        d = torch.clip(d, 0.1, 0.9)
+        return d
