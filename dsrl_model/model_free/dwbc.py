@@ -161,10 +161,11 @@ def bc_loss_fn(
         cost_union = critic_model(target_union_obs, target_union_act, log_pi_union_norm)
 
     weight = 1 - cost_union
-    weight = weight / (torch.mean(weight) + EP2)
     pred_act, *_ = actor(target_union_obs)
     recon_loss = F.mse_loss(pred_act, target_union_act, reduction="none").sum(dim=1)
     loss = weight * recon_loss
+    # log_prob = actor.true_get_logprob(target_union_obs, target_union_act)
+    # loss = weight * log_prob
     return torch.mean(loss)
 
 
