@@ -40,7 +40,7 @@ EP2 = 1e-3
 
 default_cfg = {
     "log_freq": int(1e4),
-    "save_freq": int(1e4),
+    "save_freq": int(2e4),
     "cost_validation_freq": 2000,
     "bc_validation_freq": 2000,
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
@@ -712,22 +712,23 @@ def main(args, cfg_env=None):
                 if args.use_eval:
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
                 logger.dump_tabular()
-                if steps % config["save_freq"] == 0:
-                    logger.torch_save(
-                        itr=steps,
-                        torch_saver_elements=bc_policy,
-                        prefix="bc_policy",
-                    )
-                    logger.torch_save(
-                        itr=steps,
-                        torch_saver_elements=encoder,
-                        prefix="encoder",
-                    )
-                    logger.torch_save(
-                        itr=steps,
-                        torch_saver_elements=cost_model,
-                        prefix="cost_model",
-                    )
+            
+            if steps % config["save_freq"] == 0:
+                logger.torch_save(
+                    itr=steps,
+                    torch_saver_elements=bc_policy,
+                    prefix="bc_policy",
+                )
+                logger.torch_save(
+                    itr=steps,
+                    torch_saver_elements=encoder,
+                    prefix="encoder",
+                )
+                logger.torch_save(
+                    itr=steps,
+                    torch_saver_elements=cost_model,
+                    prefix="cost_model",
+                )
 
             if steps >= config["total_iteration"]:
                 break

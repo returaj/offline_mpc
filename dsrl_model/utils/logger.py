@@ -266,7 +266,7 @@ class Logger:
         ), "First have to setup saving with self.setup_torch_saver or pass torch_saver_elements"
         fpath = "torch_save"
         fpath = osp.join(self.log_dir, fpath)
-        fname = prefix + "model" + ("%d" % itr if itr is not None else "") + ".pt"
+        fname = prefix + "_model_" + ("%d" % itr if itr is not None else "") + ".pt"
         fname = osp.join(fpath, fname)
         os.makedirs(fpath, exist_ok=True)
         with warnings.catch_warnings():
