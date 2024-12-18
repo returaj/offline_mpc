@@ -41,7 +41,7 @@ LOG_PI_NORM_MIN = -20
 
 default_cfg = {
     "log_freq": int(1e4),
-    "save_freq": int(4e4),
+    "save_freq": int(2e4),
     "eval_episode_freq": 1,
     "cost_update_freq": 100,
     "hidden_size": 256,
