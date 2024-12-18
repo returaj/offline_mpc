@@ -437,11 +437,11 @@ def main(args, cfg_env=None):
     logger.log(f"Found alpha: {alpha}")
 
     # train critic and actor model
-    eval_rew_deque = deque(maxlen=5)
-    eval_cost_deque = deque(maxlen=5)
-    eval_norm_rew_deque = deque(maxlen=5)
-    eval_norm_cost_deque = deque(maxlen=5)
-    eval_len_deque = deque(maxlen=5)
+    eval_rew_deque = deque(maxlen=1)
+    eval_cost_deque = deque(maxlen=1)
+    eval_norm_rew_deque = deque(maxlen=1)
+    eval_norm_cost_deque = deque(maxlen=1)
+    eval_len_deque = deque(maxlen=1)
 
     logger.log("Start with critic and actor model training.")
     steps = 0
@@ -559,26 +559,26 @@ def main(args, cfg_env=None):
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=actor,
-                    prefix="mix_tanh_actor_",
+                    prefix="bc_policy",
                 )
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=cost_model,
-                    prefix="cost_model_",
+                    prefix="cost_model",
                 )
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=critic_model,
-                    prefix="critic_model_",
+                    prefix="critic_model",
                 )
 
             if steps >= config["total_iteration"]:
                 break
 
-    logger.torch_save(itr=steps, torch_saver_elements=actor, prefix="mix_tanh_actor_")
-    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model_")
+    logger.torch_save(itr=steps, torch_saver_elements=actor, prefix="bc_policy")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model")
     logger.torch_save(
-        itr=steps, torch_saver_elements=critic_model, prefix="critic_model_"
+        itr=steps, torch_saver_elements=critic_model, prefix="critic_model"
     )
     logger.close()
 
