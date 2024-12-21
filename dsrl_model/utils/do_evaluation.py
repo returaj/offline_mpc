@@ -166,7 +166,9 @@ def main(args):
             device=device,
             num_evals=args.num_evals,
         )
-        print(f"task: {args.task}, seed: {args.seed}, time: {total_time:.2f}sec")
+        print(
+            f"task: {args.task}, seed: {args.seed}, id: {id}, time: {total_time:.2f}sec"
+        )
         reward_values.append(reward)
         cost_values.append(cost)
         length_values.append(length)
