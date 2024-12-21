@@ -2,6 +2,7 @@ import argparse
 import os
 import os.path as osp
 import re
+import time
 
 import dsrl.offline_safety_gymnasium  # type: ignore
 import gymnasium as gym
@@ -80,11 +81,22 @@ def load_model(obs_dim, act_dim, hidden_size, path, device):
     bc = SafeDiceTanhMixtureActor(
         obs_dim=obs_dim, act_dim=act_dim, hidden_size=hidden_size
     ).to(device)
-    bc.load_state_dict(torch.load(path, weights_only=True))
+    bc.load_state_dict(torch.load(path, weights_only=True, map_location=device))
     bc.eval()
     return bc
 
 
+def timeit(func):
+    def wrapped_func(*args, **kwargs):
+        start_time = time.time()
+        ret = func(*args, **kwargs)
+        total_time = time.time() - start_time
+        return total_time, *ret
+
+    return wrapped_func
+
+
+@timeit
 def evaluate(eval_env, bc_policy, device, num_evals):
     ep_rewards, ep_costs, ep_lens = [], [], []
     for _ in range(num_evals):
@@ -126,7 +138,8 @@ def main(args):
     eval_env.reset(seed=args.seed)
 
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    device = torch.device(f"{args.device}:{args.device_id}")
+    device_name = "cpu" if args.device == "cpu" else f"{args.device}:{args.device_id}"
+    device = torch.device(device_name)
 
     path = args.model_path
     bc_model_files = [
@@ -147,12 +160,13 @@ def main(args):
             path=osp.join(path, f"bc_policy_model_{id}.pt"),
             device=device,
         )
-        reward, cost, length = evaluate(
+        total_time, reward, cost, length = evaluate(
             eval_env=eval_env,
             bc_policy=bc_policy,
             device=device,
             num_evals=args.num_evals,
         )
+        print(f"task: {args.task}, seed: {args.seed}, time: {total_time:.2f}sec")
         reward_values.append(reward)
         cost_values.append(cost)
         length_values.append(length)
@@ -160,9 +174,9 @@ def main(args):
     log_dir = args.log_dir
     if log_dir is None:
         log_dir = osp.join(args.model_path, "..")
-    save_csv(ids, reward_values, osp.join(log_dir, "ep_reward.csv"))
-    save_csv(ids, cost_values, osp.join(log_dir, "ep_cost.csv"))
-    save_csv(ids, length_values, osp.join(log_dir, "ep_length.csv"))
+    save_csv(ids, reward_values, osp.join(log_dir, f"ep_reward_{args.seed}.csv"))
+    save_csv(ids, cost_values, osp.join(log_dir, f"ep_cost_{args.seed}.csv"))
+    save_csv(ids, length_values, osp.join(log_dir, f"ep_length_{args.seed}.csv"))
 
 
 if __name__ == "__main__":
