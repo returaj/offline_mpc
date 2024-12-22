@@ -14,7 +14,6 @@ import numpy as np
 import torch
 import torch.distributions as td
 import torch.nn.functional as F
-from schedulefree import AdamWScheduleFree
 from torch.autograd import Variable
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
@@ -247,23 +246,23 @@ def main(args, cfg_env=None):
             act_dim=act_space.shape[0],
             hidden_size=config["hidden_sizes"][0],
         ).to(device)
-    # bc_policy_optimizer = torch.optim.AdamW(
-    #     bc_policy.parameters(),
-    #     lr=config["bc_lr"],
-    #     weight_decay=config["weight_decay"],
-    # )
-    # bc_scheduler = LinearLR(
-    #     bc_policy_optimizer,
-    #     start_factor=1.0,
-    #     end_factor=0.0,
-    #     total_iters=config["total_iteration"],
-    # )
-    bc_policy_optimizer = AdamWScheduleFree(
+    bc_policy_optimizer = torch.optim.AdamW(
         bc_policy.parameters(),
         lr=config["bc_lr"],
         weight_decay=config["weight_decay"],
-        warmup_steps=1000,
     )
+    bc_scheduler = LinearLR(
+        bc_policy_optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=config["total_iteration"],
+    )
+    # bc_policy_optimizer = AdamWScheduleFree(
+    #     bc_policy.parameters(),
+    #     lr=config["bc_lr"],
+    #     weight_decay=config["weight_decay"],
+    #     warmup_steps=1000,
+    # )
     reward_model = ExpCostModel(
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
@@ -397,8 +396,8 @@ def main(args, cfg_env=None):
             clip_grad_norm_(reward_model.parameters(), config["max_grad_norm"])
             reward_model_optimizer.step()
 
-            bc_policy.train()
-            bc_policy_optimizer.train()
+            # bc_policy.train()
+            # bc_policy_optimizer.train()
             bc_policy_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
                 reward_model=reward_model,
@@ -413,7 +412,7 @@ def main(args, cfg_env=None):
             bc_policy_loss.backward()
             clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
             bc_policy_optimizer.step()
-            # bc_scheduler.step()
+            bc_scheduler.step()
 
             logger.logged = False
 
@@ -423,8 +422,8 @@ def main(args, cfg_env=None):
                 eval_episodes = config["eval_episode_freq"]
                 if args.use_eval:
                     eval_start_time = time.time()
-                    bc_policy.eval()
-                    bc_policy_optimizer.eval()
+                    # bc_policy.eval()
+                    # bc_policy_optimizer.eval()
                     for id in range(eval_episodes):
                         (
                             eval_reward,
