@@ -307,7 +307,14 @@ def cost_loss_fn(
     # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
     # # )
     # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
-    loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
+    exp_neg, exp_union = torch.exp(expected_neg_cost), torch.exp(expected_union_cost)
+    sum_exp = exp_neg + exp_union
+    p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
+    target_ones = torch.ones_like(p_neg, device=device)
+    target_zeros = torch.zeros_like(p_union, device=device)
+    loss = F.binary_cross_entropy(p_union, target_zeros)
+    loss += F.binary_cross_entropy(p_neg, target_ones)
     grad_loss = 0.0  # gradient_panelty(target_mixed_input, total_mix_cost)
     return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
 
@@ -712,7 +719,7 @@ def main(args, cfg_env=None):
                 if args.use_eval:
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
                 logger.dump_tabular()
-            
+
             if steps % config["save_freq"] == 0:
                 logger.torch_save(
                     itr=steps,
