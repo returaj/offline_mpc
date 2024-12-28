@@ -176,9 +176,21 @@ def main(args):
     log_dir = args.log_dir
     if log_dir is None:
         log_dir = osp.join(args.model_path, "..")
-    save_csv(ids, reward_values, osp.join(log_dir, f"ep_reward_{args.seed}.csv"))
-    save_csv(ids, cost_values, osp.join(log_dir, f"ep_cost_{args.seed}.csv"))
-    save_csv(ids, length_values, osp.join(log_dir, f"ep_length_{args.seed}.csv"))
+    save_csv(
+        ids,
+        reward_values,
+        osp.join(log_dir, f"ep_reward_{args.num_evals}_{args.seed}.csv"),
+    )
+    save_csv(
+        ids,
+        cost_values,
+        osp.join(log_dir, f"ep_cost_{args.num_evals}_{args.seed}.csv"),
+    )
+    save_csv(
+        ids,
+        length_values,
+        osp.join(log_dir, f"ep_length_{args.num_evals}_{args.seed}.csv"),
+    )
 
 
 if __name__ == "__main__":
