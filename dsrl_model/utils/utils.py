@@ -162,6 +162,12 @@ def single_agent_args():
             "default": 0.5,
             "help": "nu value used for dwbc algorithm",
         },
+        {
+            "name": "--cost-loss-type",
+            "type": str,
+            "default": "loss_1_bce",  # loss_1, loss_2
+            "help": "safemil loss function type",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

@@ -297,24 +297,29 @@ def cost_loss_fn(
 
     total_neg_cost = total_neg_cost.view(batch_size, bag_size)
     total_union_cost = total_union_cost.view(batch_size, bag_size)
-    expected_neg_cost = torch.mean(total_neg_cost, dim=1)
-    expected_union_cost = torch.mean(total_union_cost, dim=1)
-    # expected_pos_cost = (1 / (1 - alpha)) * (
-    #     expected_union_cost - alpha * expected_neg_cost
-    # ).clamp(min=EP)
-    # z = torch.log(expected_neg_cost + expected_pos_cost + EP)
-    # # print(
-    # #     expected_neg_cost.item(), expected_union_cost.item(), expected_pos_cost.item()
-    # # )
-    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_pos_cost)
-    # loss = -torch.log(expected_neg_cost + EP) + torch.log(expected_union_cost + EP)
-    exp_neg, exp_union = torch.exp(expected_neg_cost), torch.exp(expected_union_cost)
-    sum_exp = exp_neg + exp_union
-    p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
-    target_ones = torch.ones_like(p_neg, device=device)
-    target_zeros = torch.zeros_like(p_union, device=device)
-    loss = F.binary_cross_entropy(p_union, target_zeros)
-    loss += F.binary_cross_entropy(p_neg, target_ones)
+    neg_bag_cost = torch.mean(total_neg_cost, dim=1)
+    union_bag_cost = torch.mean(total_union_cost, dim=1)
+
+    if config["cost_loss_type"] == "loss_1":
+        loss = -torch.log(neg_bag_cost + EP) + torch.log(union_bag_cost + EP)
+    elif config["cost_loss_type"] == "loss_1_bce":
+        exp_neg, exp_union = torch.exp(neg_bag_cost), torch.exp(union_bag_cost)
+        sum_exp = exp_neg + exp_union
+        p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
+        target_ones = torch.ones_like(p_neg, device=device)
+        target_zeros = torch.zeros_like(p_union, device=device)
+        loss = F.binary_cross_entropy(p_union, target_zeros)
+        loss += F.binary_cross_entropy(p_neg, target_ones)
+    elif config["cost_loss_type"] == "loss_2":
+        expected_neg_bag_cost = neg_bag_cost.mean()
+        expected_union_bag_cost = union_bag_cost.mean()
+        loss = -torch.log(expected_neg_bag_cost) + torch.log(expected_union_bag_cost)
+    else:
+        raise Exception(
+            f"{config['cost_loss_type']} is not a valid cost loss type."
+            + "Please select 'loss_1' 'loss_1_bce' or 'loss_2'"
+        )
+
     grad_loss = 0.0  # gradient_panelty(target_mixed_input, total_mix_cost)
     return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
 
@@ -335,6 +340,7 @@ def main(args, cfg_env=None):
     config["bc_weight_binary"] = args.bc_weight_binary
     config["use_validation"] = args.use_validation
     config["policy_type"] = args.policy_type
+    config["cost_loss_type"] = args.cost_loss_type
     if not config["use_validation"]:
         config["cost_validation_freq"] = 1
 
