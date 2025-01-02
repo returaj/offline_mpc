@@ -313,7 +313,7 @@ def cost_loss_fn(
     elif config["cost_loss_type"] == "loss_2":
         expected_neg_bag_cost = neg_bag_cost.mean()
         expected_union_bag_cost = union_bag_cost.mean()
-        loss = -torch.log(expected_neg_bag_cost) + torch.log(expected_union_bag_cost)
+        loss = -torch.log(expected_neg_bag_cost + EP) + torch.log(expected_union_bag_cost + EP)
     else:
         raise Exception(
             f"{config['cost_loss_type']} is not a valid cost loss type."
