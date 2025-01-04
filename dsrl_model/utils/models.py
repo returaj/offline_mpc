@@ -904,12 +904,14 @@ class SafeDiceTanhMixtureActor(nn.Module):
         component_dist = td.Independent(component_dist, 1)
         pretanh_actions_dist = td.MixtureSameFamily(mixture_dist, component_dist)
 
-        pretanh_actions = torch.atanh(actions.clamp(-1 + self.eps, 1 - self.eps))
+        actions = actions.clamp(-1 + self.eps, 1 - self.eps)
+        pretanh_actions = torch.atanh(actions)
         pretanh_logprob = pretanh_actions_dist.log_prob(pretanh_actions)
-        logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
-            min=self.eps
-        ).log().sum(-1)
-        return logprob
+        jacobian_det = torch.sum(torch.log(1 - actions**2 + self.eps), dim=1)
+        # logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
+        #     min=self.eps
+        # ).log().sum(-1)
+        return pretanh_logprob + jacobian_det
 
     def action(self, obs, deterministic=True):
         x = self.pre_encoder(obs)

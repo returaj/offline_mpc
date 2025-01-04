@@ -36,8 +36,8 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 EP2 = 1e-3
 
-LOG_PI_NORM_MAX = 10
-LOG_PI_NORM_MIN = -20
+LOG_PI_NORM_MAX = 50
+LOG_PI_NORM_MIN = -150
 
 default_cfg = {
     "log_freq": int(1e4),
@@ -164,7 +164,7 @@ def bc_loss_fn(
     pred_act, *_ = actor(target_union_obs)
     recon_loss = F.mse_loss(pred_act, target_union_act, reduction="none").sum(dim=1)
     loss = weight * recon_loss
-    # log_prob = actor.true_get_logprob(target_union_obs, target_union_act)
+    # log_prob = -actor.true_get_logprob(target_union_obs, target_union_act)
     # loss = weight * log_prob
     return torch.mean(loss)
 
