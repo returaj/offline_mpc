@@ -279,6 +279,7 @@ class BcqVAE(nn.Module):
         device: torch.device = torch.device("cpu"),
     ):
         super().__init__()
+        self.act_dim = act_dim
         self.pre_encoder_layer = nn.Sequential(
             nn.Linear(obs_dim + act_dim, 750), nn.ReLU(), nn.Linear(750, 750), nn.ReLU()
         )
