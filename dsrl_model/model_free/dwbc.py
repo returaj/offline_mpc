@@ -51,7 +51,7 @@ default_cfg = {
     "actor_lr": 1e-5,
     "critic_lr": 1e-5,
     "dwbc_nu": 0.5,
-    "total_iteration": int(5e4),
+    "total_iteration": int(1e6),
     "weight_decay_cost": 0.01,
 }
 
