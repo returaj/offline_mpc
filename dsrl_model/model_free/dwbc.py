@@ -36,8 +36,8 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 EP2 = 1e-3
 
-LOG_PI_NORM_MAX = 50
-LOG_PI_NORM_MIN = -150
+LOG_PI_NORM_MAX = 10
+LOG_PI_NORM_MIN = -60
 
 default_cfg = {
     "log_freq": int(1e4),
@@ -51,7 +51,7 @@ default_cfg = {
     "actor_lr": 1e-5,
     "critic_lr": 1e-5,
     "dwbc_nu": 0.5,
-    "total_iteration": int(1e6),
+    "total_iteration": int(5e4),
     "weight_decay_cost": 0.01,
 }
 
