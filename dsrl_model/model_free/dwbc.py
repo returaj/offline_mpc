@@ -338,7 +338,7 @@ def main(args, cfg_env=None):
                 critic_model=critic_model,
                 actor=actor,
                 target_union_obs=target_union_obs,
-                target_union_act=target_neg_act,
+                target_union_act=target_union_act,
             )
             actor_optimizer.zero_grad()
             pi_loss.backward()
