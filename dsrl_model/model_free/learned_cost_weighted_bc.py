@@ -208,6 +208,31 @@ def discounted_sum(vector_x, gamma):
     return cumsum
 
 
+def bc_policy_transition_weight_loss_fn(
+    bc_policy,
+    encoder,
+    cost_model,
+    target_obs,
+    target_act,
+    config,
+    neg_mean_cost,
+    neg_std_cost,
+):
+    # Horizon X Batch_Bag X obs/act_dim
+    horizon, batch_bag_size, _ = target_obs.shape
+    # Horizon_Batch_Bag X obs/act_dim
+    target_obs = target_obs.view(horizon * batch_bag_size, -1)
+    target_act = target_act.view(horizon * batch_bag_size, -1)
+    with torch.no_grad():
+        target = encoder(torch.cat([target_obs, target_act], dim=-1))
+        # Horizon_Batch_Bag
+        cost_weight = cost_model(target, use_sigmoid=True)
+    pred_act, *_ = bc_policy(target_obs)
+    recon_loss = F.mse_loss(pred_act, target_act, reduction="none").sum(dim=1)
+    loss = (1 - cost_weight) * recon_loss
+    return torch.mean(loss)
+
+
 def bc_policy_loss_fn(
     bc_policy,
     encoder,
