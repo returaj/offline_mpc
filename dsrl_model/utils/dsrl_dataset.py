@@ -1,6 +1,5 @@
-import numpy as np
 import dsrl.infos as dsrl_infos
-
+import numpy as np
 
 EP = 1e-7
 
@@ -95,6 +94,13 @@ def get_neg_and_union_data(d4rl_data, config):
         neg_data["rewards"].sum(1).mean(),
     )
     print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
+
+    pos_cost, pos_reward = (
+        union_pos_data["costs"].sum(1).mean(),
+        union_pos_data["rewards"].sum(1).mean(),
+    )
+    print(f"Avg positive trajectory cost/reward: {pos_cost:.3f}/{pos_reward:.3f}")
+
     print(
         f"Number of union negative trajectory dataset: {union_neg_data['observations'].shape[0]}"
     )
