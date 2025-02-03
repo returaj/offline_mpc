@@ -70,6 +70,36 @@ def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
     return {k: fold_sa_pair(d4rl_data[k], num_folds) for k in keys}
 
 
+def get_neg_and_union_data_2(d4rl_data, config):
+    traj_cost = np.sum(d4rl_data["costs"], axis=1)
+
+    num_neg_traj = config["num_negative_trajectories"]
+    num_union_traj = config["num_union_trajectories"]
+
+    neg_idx = np.where(traj_cost > 75.0)[0]
+    union_idx = np.delete(np.arange(traj_cost.shape[0]), neg_idx[:num_neg_traj])
+
+    keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
+    neg_data = {k: d4rl_data[k][neg_idx[:num_neg_traj]] for k in keys}
+    union_data = {k: d4rl_data[k][union_idx] for k in keys}
+
+    print(f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}")
+    neg_cost, neg_reward = (
+        neg_data["costs"].sum(1).mean(),
+        neg_data["rewards"].sum(1).mean(),
+    )
+    print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
+
+    print(f"Number of union trajectory dataset: {union_data['observations'].shape[0]}")
+    union_cost, union_reward = (
+        union_data["costs"].sum(1).mean(),
+        union_data["rewards"].sum(1).mean(),
+    )
+    print(f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}")
+
+    return neg_data, union_data
+
+
 def get_neg_and_union_data(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
 

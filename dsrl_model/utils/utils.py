@@ -133,6 +133,12 @@ def single_agent_args():
             "help": "Use default value for cost_weight_temp",
         },
         {
+            "name": "--value-weight-temp",
+            "type": float,
+            "default": None,
+            "help": "Use default value for value_weight_temp",
+        },
+        {
             "name": "--bc-weight-binary",
             "type": lambda x: bool(strtobool(x)),
             "default": False,

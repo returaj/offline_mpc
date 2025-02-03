@@ -339,6 +339,9 @@ class BcqVAE(nn.Module):
         batch_action = action.view(obs.size(0), num_decodes, -1)
         return batch_action
 
+    def sample_action(self, obs):
+        return self.decode_bc(obs)
+
 
 class MorelDynamics(nn.Module):
     def __init__(
@@ -940,6 +943,9 @@ class SafeDiceTanhMixtureActor(nn.Module):
             pretanh_actions = pretanh_actions_dist.sample()
 
         return torch.tanh(pretanh_actions)
+
+    def sample_action(self, obs):
+        return self.action(obs, deterministic=False)
 
 
 class DwbcDiscriminator(nn.Module):
