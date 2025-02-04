@@ -153,7 +153,7 @@ def single_agent_args():
         {
             "name": "--act-train-use-logprob",
             "type": lambda x: bool(strtobool(x)),
-            "default": True,
+            "default": False,
             "help": "To use log_prob from training weighted BC algorithm",
         },
         {
