@@ -21,7 +21,7 @@ from torch.optim.lr_scheduler import LinearLR
 from dsrl_model.utils.bufffer import OnPolicyBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data,
+    get_neg_and_union_data_2,
     get_normalized_data,
 )
 from dsrl_model.utils.logger import EpochLogger
@@ -45,7 +45,7 @@ default_cfg = {
     "hidden_sizes": [256, 256],
     "max_grad_norm": 10.0,
     "bag_size": 1,
-    "gamma": 1.0,
+    "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 5,  # 20
     "weight_decay": 0.01,
@@ -55,17 +55,11 @@ default_cfg = {
 
 trajectory_cfg = {
     "density": 1.0,
-    # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
-    "inpaint_ranges": (
-        (0.0, 0.5, 0.0, 0.5),
-        (0.5, 1.0, 0.0, 0.5),
-        (0.25, 0.75, 0.0, 1.0),
-    ),
     "target_cost": 25.0,
-    "alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
+    # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
+    "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 100,
-    "num_union_positive_trajectories": 100,
+    "num_union_trajectories": 200,
     "percentage_validation_trajectories": 0.2,
 }
 
@@ -140,7 +134,7 @@ def bc_policy_loss_fn(
     target_act = target_act.view(horizon * batch_size, -1)
 
     with torch.no_grad():
-        weight = reward_model(
+        weight = 1 - reward_model(
             torch.cat([target_obs, target_act], dim=1), use_sigmoid=True
         )
 
@@ -192,10 +186,10 @@ def reward_loss_fn(
     exp_neg, exp_union = torch.exp(total_neg_cost), torch.exp(total_union_cost)
     sum_exp = exp_neg + exp_union
     p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
-    target_ones = torch.ones_like(p_union, device=device)
-    target_zeros = torch.zeros_like(p_neg, device=device)
-    loss = F.binary_cross_entropy(p_union, target_ones)
-    loss += F.binary_cross_entropy(p_neg, target_zeros)
+    target_ones = torch.ones_like(p_neg, device=device)
+    target_zeros = torch.zeros_like(p_union, device=device)
+    loss = F.binary_cross_entropy(p_union, target_zeros)
+    loss += F.binary_cross_entropy(p_neg, target_ones)
 
     grad_loss = 0.0  # horizon_gradient_panelty(target_mixed_input, total_mix_cost)
     return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
@@ -279,7 +273,7 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
+    neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
     # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
@@ -295,29 +289,6 @@ def main(args, cfg_env=None):
         union_data["actions"], dtype=torch.float32, device=device
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
-
-    # create negative validation dataset
-    valid_neg_size = int(
-        neg_observations.shape[0] * trajectory_cfg["percentage_validation_trajectories"]
-    )
-    valid_neg_observations = neg_observations[:valid_neg_size]
-    valid_neg_actions = neg_actions[:valid_neg_size]
-    valid_neg_dones = neg_dones[:valid_neg_size]
-    neg_observations = neg_observations[valid_neg_size:]
-    neg_actions = neg_actions[valid_neg_size:]
-    neg_dones = neg_dones[valid_neg_size:]
-
-    # create union validation dataset
-    valid_union_size = int(
-        union_observations.shape[0]
-        * trajectory_cfg["percentage_validation_trajectories"]
-    )
-    valid_union_observations = union_observations[:valid_union_size]
-    valid_union_actions = union_actions[:valid_union_size]
-    valid_union_dones = union_dones[:valid_union_size]
-    union_observations = union_observations[valid_union_size:]
-    union_actions = union_actions[valid_union_size:]
-    union_dones = union_dones[valid_union_size:]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
@@ -338,23 +309,6 @@ def main(args, cfg_env=None):
         buffer.add(obs, act, done, is_negative=True)
     for obs, act, done in zip(union_observations, union_actions, union_dones):
         buffer.add(obs, act, done, is_negative=False)
-
-    use_validation = trajectory_cfg["percentage_validation_trajectories"] > 0.0
-    assert (
-        use_validation
-    ), "We need to set percentage_validation_trajectories to non-zero value."
-    buffer.add_validation_dataset(
-        valid_neg_observations,
-        valid_neg_actions,
-        valid_neg_dones,
-        is_negative=True,
-    )
-    buffer.add_validation_dataset(
-        valid_union_observations,
-        valid_union_actions,
-        valid_union_dones,
-        is_negative=False,
-    )
 
     # set logger
     eval_rew_deque = deque(maxlen=config["eval_episode_freq"])
@@ -404,9 +358,6 @@ def main(args, cfg_env=None):
                 target_obs=target_union_obs,
                 target_act=target_union_act,
                 config=config,
-            )
-            bc_policy_loss.register_hook(
-                lambda grad: grad * (1 / config["train_horizon"])
             )
             bc_policy_optimizer.zero_grad()
             bc_policy_loss.backward()
