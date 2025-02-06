@@ -237,7 +237,7 @@ class OnPolicyBuffer:
             cost_store[idx : idx + self.ep_len] = cost
         return (idx + self.ep_len) % capacity
 
-    def add(self, obs, act, cost=None, done=None, is_negative=False):
+    def add(self, obs, act, done=None, cost=None, is_negative=False):
         if self.has_cost:
             assert (
                 cost is not None
@@ -357,6 +357,199 @@ class OnPolicyBuffer:
                 )
             else:
                 yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act, u_idx)
+
+
+class SafeTD3Buffer(OnPolicyBuffer):
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        neg_data_size,
+        union_data_size,
+        horizon,
+        batch_size,
+        device,
+        priorities_alpha=1.0,
+        has_cost=False,
+    ):
+        super().__init__(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            neg_data_size=neg_data_size,
+            union_data_size=union_data_size,
+            horizon=horizon,
+            batch_size=batch_size,
+            device=device,
+            priorities_alpha=priorities_alpha,
+            has_cost=has_cost,
+        )
+        self._neg_done = torch.zeros(
+            (self.neg_capacity,), dtype=torch.float32, device=self.device
+        )
+        self._union_done = torch.zeros(
+            (self.union_capacity,), dtype=torch.float32, device=self.device
+        )
+
+    def _update(
+        self,
+        obs_store,
+        act_store,
+        done_store,
+        priority_store,
+        cost_store,
+        idx,
+        obs,
+        act,
+        done,
+        priority,
+        cost,
+    ):
+        ep_len = obs.shape[0]
+        obs_store[idx : idx + ep_len] = obs
+        act_store[idx : idx + ep_len] = act
+        done_store[idx : idx + ep_len] = done
+        priority_store[idx : idx + ep_len] = priority
+        if self.has_cost:
+            cost_store[idx : idx + ep_len] = cost
+        return idx + ep_len
+
+    def add(self, obs, act, done, cost=None, is_negative=False):
+        if self.has_cost:
+            assert (
+                cost is not None
+            ), "cost field cannot be none if has_cost is set to True"
+        max_priority = 1.0
+        ep_len = obs.shape[0]
+        mask = torch.arange(ep_len) >= ep_len - self.horizon + 1
+        new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
+        new_priorities[mask] = 0.0
+
+        if is_negative:
+            self._neg_idx = self._update(
+                obs_store=self._neg_obs,
+                act_store=self._neg_act,
+                done_store=self._neg_done,
+                priority_store=self._neg_priorities,
+                cost_store=self._neg_cost,
+                idx=self._neg_idx,
+                obs=obs,
+                act=act,
+                done=done,
+                priority=new_priorities,
+                cost=cost,
+            )
+        else:
+            self._union_idx = self._update(
+                obs_store=self._union_obs,
+                act_store=self._union_act,
+                done_store=self._union_done,
+                priority_store=self._union_priorities,
+                cost_store=self._union_cost,
+                idx=self._union_idx,
+                obs=obs,
+                act=act,
+                done=done,
+                priority=new_priorities,
+                cost=cost,
+            )
+
+    def sample(self):
+        batch_size = self.batch_size
+        steps_per_epoch = self.union_capacity // batch_size
+
+        union_probs = self._union_priorities**self._priorities_alpha
+        union_probs /= union_probs.sum()
+        union_total = len(union_probs)
+        union_idxs = torch.from_numpy(
+            np.random.choice(
+                union_total,
+                (steps_per_epoch, batch_size),
+                p=union_probs.cpu().numpy(),
+                replace=True,
+            )
+        ).to(self.device)
+
+        neg_probs = self._neg_priorities
+        neg_probs /= neg_probs.sum()
+        neg_total = len(neg_probs)
+        neg_idxs = torch.from_numpy(
+            np.random.choice(
+                neg_total,
+                (steps_per_epoch, batch_size),
+                p=neg_probs.cpu().numpy(),
+                replace=True,
+            )
+        ).to(self.device)
+
+        for n_idx, u_idx in zip(neg_idxs, union_idxs):
+            h_neg_obs = torch.empty(
+                (self.horizon, batch_size, *self._neg_obs.shape[1:]),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            h_neg_act = torch.empty(
+                (self.horizon, batch_size, *self._neg_act.shape[1:]),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            h_union_obs = torch.empty_like(
+                h_neg_obs, dtype=torch.float32, device=self.device
+            )
+            h_union_next_obs = torch.empty_like(
+                h_neg_obs, dtype=torch.float32, device=self.device
+            )
+            h_union_act = torch.empty_like(
+                h_neg_act, dtype=torch.float32, device=self.device
+            )
+            h_union_done = torch.empty(
+                (self.horizon, batch_size), dtype=torch.float32, device=self.device
+            )
+            if self.has_cost:
+                h_neg_cost = torch.empty(
+                    (self.horizon, batch_size), dtype=torch.float32, device=self.device
+                )
+                h_union_cost = torch.empty_like(
+                    h_neg_cost, dtype=torch.float32, device=self.device
+                )
+
+            for t in range(self.horizon):
+                _n_idx, _u_idx = n_idx + t, u_idx + t
+                h_neg_obs[t] = self._neg_obs[_n_idx]
+                h_neg_act[t] = self._neg_act[_n_idx]
+                h_union_obs[t] = self._union_obs[_u_idx]
+                h_union_act[t] = self._union_act[_u_idx]
+                # here when the trajectory ends
+                # the next state represents the initial state of the new trajectory
+                h_union_next_obs[t] = self._union_obs[_u_idx + 1]
+                h_union_done[t] = self._union_done[_u_idx]
+                if self.has_cost:
+                    h_neg_cost[t] = self._neg_cost[_n_idx]
+                    h_union_cost[t] = self._union_cost[_u_idx]
+
+            # Horizon X Batch X obs/act_dim/
+
+            if self.has_cost:
+                yield (
+                    h_neg_obs,
+                    h_neg_act,
+                    h_neg_cost,
+                    h_union_obs,
+                    h_union_act,
+                    h_union_next_obs,
+                    h_union_cost,
+                    h_union_done,
+                    u_idx,
+                )
+            else:
+                yield (
+                    h_neg_obs,
+                    h_neg_act,
+                    h_union_obs,
+                    h_union_act,
+                    h_union_next_obs,
+                    h_union_done,
+                    u_idx,
+                )
 
 
 class SafeDiceBuffer:
