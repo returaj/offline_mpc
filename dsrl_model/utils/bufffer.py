@@ -278,10 +278,7 @@ class OnPolicyBuffer:
 
     def update_priorities(self, idxs, priorities, union=True):
         p = self._union_priorities if union else self._neg_priorities
-        h = priorities.shape[0]
-        for t in range(h):
-            _idxs = idxs + t
-            p[_idxs] = priorities[t].to(self.device) + self._eps
+        p[idxs] = priorities.to(self.device) + self._eps
 
     def sample(self):
         batch_size = self.batch_size

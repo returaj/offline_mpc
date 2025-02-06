@@ -39,7 +39,7 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e2),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
@@ -51,7 +51,7 @@ default_cfg = {
     "value_weight_temp": 2.5,  # TDMPC temperature coef
     "train_horizon": 5,  # 5
     "weight_decay": 0.01,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e3),
 }
 
 trajectory_cfg = {
@@ -187,6 +187,15 @@ def calculate_target_value(
     return value_c
 
 
+def discounted_sum(gamma, matrix):
+    discount = 1.0
+    vec = 0.0
+    for v in matrix:
+        vec += discount * v
+        discount *= gamma
+    return vec
+
+
 def value_loss_fn(
     cost_model,
     bc_policy,
@@ -220,10 +229,13 @@ def value_loss_fn(
     pred_v1, pred_v2 = value.V(torch.cat([o, a], dim=1))
     value_loss += F.mse_loss(pred_v1, target_value, reduction="none")
     value_loss += F.mse_loss(pred_v2, target_value, reduction="none")
+    value_loss = value_loss.view(horizon, batch_size)
+    value_loss = discounted_sum(gamma, value_loss)
 
     priority_loss += F.l1_loss(pred_v1, target_value, reduction="none")
     priority_loss += F.l1_loss(pred_v2, target_value, reduction="none")
-    priorities = priority_loss.view(horizon, batch_size)
+    priority_loss = priority_loss.view(horizon, batch_size)
+    priorities = discounted_sum(gamma, priority_loss)
 
     return torch.mean(value_loss), priorities
 
@@ -396,6 +408,7 @@ def main(args, cfg_env=None):
                 target_next_os=target_union_os[1:],
                 config=config,
             )
+            value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
             value_cost_optimizer.zero_grad()
             value_loss.backward()
             clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
