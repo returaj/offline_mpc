@@ -334,6 +334,7 @@ def main(args, cfg_env=None):
             target_neg_act,
             target_union_obs,
             target_union_act,
+            _,
         ) in buffer.sample():
 
             reward_loss = reward_loss_fn(

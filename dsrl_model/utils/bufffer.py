@@ -124,6 +124,7 @@ class OnPolicyBuffer:
         batch_size,
         device,
         ep_len=1000,
+        priorities_alpha=1.0,
         has_cost=False,
     ):
         self.horizon = horizon
@@ -134,6 +135,7 @@ class OnPolicyBuffer:
         self.has_cost = has_cost
         self.device = torch.device(device)
         dtype = torch.float32
+        self._priorities_alpha = priorities_alpha
         self._neg_obs = torch.empty(
             (self.neg_capacity + 1, obs_dim), dtype=dtype, device=self.device
         )
@@ -274,11 +276,18 @@ class OnPolicyBuffer:
                 capacity=self.union_capacity,
             )
 
+    def update_priorities(self, idxs, priorities, union=True):
+        p = self._union_priorities if union else self._neg_priorities
+        h = priorities.shape[0]
+        for t in range(h):
+            _idxs = idxs + t
+            p[_idxs] = priorities[t].to(self.device) + self._eps
+
     def sample(self):
         batch_size = self.batch_size
         steps_per_epoch = self.union_capacity // batch_size
 
-        union_probs = self._union_priorities
+        union_probs = self._union_priorities**self._priorities_alpha
         union_probs /= union_probs.sum()
         union_total = len(union_probs)
         union_idxs = torch.from_numpy(
@@ -347,9 +356,10 @@ class OnPolicyBuffer:
                     h_union_obs,
                     h_union_act,
                     h_union_cost,
+                    u_idx,
                 )
             else:
-                yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act)
+                yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act, u_idx)
 
 
 class SafeDiceBuffer:
