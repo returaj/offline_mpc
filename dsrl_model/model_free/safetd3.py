@@ -39,7 +39,7 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e2),
+    "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
@@ -51,7 +51,7 @@ default_cfg = {
     "value_weight_temp": 2.5,  # TDMPC temperature coef
     "train_horizon": 5,  # 5
     "weight_decay": 0.01,
-    "total_iteration": int(1e3),
+    "total_iteration": int(1e6),
 }
 
 trajectory_cfg = {
