@@ -215,13 +215,17 @@ def value_loss_fn(
         gamma=gamma,
     )
 
-    value_loss = 0.0
+    value_loss, priority_loss = 0.0, 0.0
     o, a = target_os, target_acts
     pred_v1, pred_v2 = value.V(torch.cat([o, a], dim=1))
     value_loss += F.mse_loss(pred_v1, target_value, reduction="none")
     value_loss += F.mse_loss(pred_v2, target_value, reduction="none")
 
-    return torch.mean(value_loss)
+    priority_loss += F.l1_loss(pred_v1, target_value, reduction="none")
+    priority_loss += F.l1_loss(pred_v2, target_value, reduction="none")
+    priorities = priority_loss.view(horizon, batch_size)
+
+    return torch.mean(value_loss), priorities
 
 
 def main(args, cfg_env=None):
@@ -331,6 +335,7 @@ def main(args, cfg_env=None):
         batch_size=batch_size,
         device=device,
         ep_len=ep_len,
+        priorities_alpha=0.6,
     )
     for obs, act, done in zip(neg_observations, neg_actions, neg_dones):
         buffer.add(obs, act, done, is_negative=True)
@@ -362,6 +367,7 @@ def main(args, cfg_env=None):
             target_neg_acts,
             target_union_os,
             target_union_acts,
+            target_union_idx,
         ) in buffer.sample():
 
             steps += 1
@@ -380,7 +386,7 @@ def main(args, cfg_env=None):
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             cost_optimizer.step()
 
-            value_loss = value_loss_fn(
+            value_loss, priorities = value_loss_fn(
                 cost_model=cost_model,
                 bc_policy=bc_policy,
                 value=value_cost,
@@ -407,6 +413,10 @@ def main(args, cfg_env=None):
             clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
             bc_policy_optimizer.step()
             bc_scheduler.step()
+
+            buffer.update_priorities(
+                target_union_idx, priorities.clamp(max=1e4).detach()
+            )
 
             if (steps % config["update_freq"]) == 0:
                 ema(value_cost, value_cost_target, config["update_tau"])
