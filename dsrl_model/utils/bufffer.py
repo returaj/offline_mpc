@@ -424,7 +424,10 @@ class SafeTD3Buffer(OnPolicyBuffer):
         max_priority = 1.0
         done_sum = torch.sum(done) or 1.0
         true_ep_len = self.ep_len - done_sum + 1
-        mask = torch.arange(self.ep_len) >= true_ep_len - self.horizon + 1
+        mask = (
+            torch.arange(self.ep_len, device=self.device)
+            >= true_ep_len - self.horizon + 1
+        )
         new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
         new_priorities[mask] = 0.0
         self.true_capacity += torch.sum(new_priorities)
