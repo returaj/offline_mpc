@@ -139,6 +139,12 @@ def single_agent_args():
             "help": "Use default value for value_weight_temp",
         },
         {
+            "name": "--update-priority-buffer",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To update the priority of the buffer used during sampling",
+        },
+        {
             "name": "--bc-weight-binary",
             "type": lambda x: bool(strtobool(x)),
             "default": False,

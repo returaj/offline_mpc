@@ -369,6 +369,7 @@ class SafeTD3Buffer(OnPolicyBuffer):
         horizon,
         batch_size,
         device,
+        ep_len=1000,
         priorities_alpha=1.0,
         has_cost=False,
     ):
@@ -380,9 +381,11 @@ class SafeTD3Buffer(OnPolicyBuffer):
             horizon=horizon,
             batch_size=batch_size,
             device=device,
+            ep_len=ep_len,
             priorities_alpha=priorities_alpha,
             has_cost=has_cost,
         )
+        self.true_capacity = 0
         self._neg_done = torch.zeros(
             (self.neg_capacity,), dtype=torch.float32, device=self.device
         )
@@ -404,7 +407,7 @@ class SafeTD3Buffer(OnPolicyBuffer):
         priority,
         cost,
     ):
-        ep_len = obs.shape[0]
+        ep_len = self.ep_len
         obs_store[idx : idx + ep_len] = obs
         act_store[idx : idx + ep_len] = act
         done_store[idx : idx + ep_len] = done
@@ -419,10 +422,12 @@ class SafeTD3Buffer(OnPolicyBuffer):
                 cost is not None
             ), "cost field cannot be none if has_cost is set to True"
         max_priority = 1.0
-        ep_len = obs.shape[0]
-        mask = torch.arange(ep_len) >= ep_len - self.horizon + 1
+        done_sum = torch.sum(done) or 1.0
+        true_ep_len = self.ep_len - done_sum + 1
+        mask = torch.arange(self.ep_len) >= true_ep_len - self.horizon + 1
         new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
         new_priorities[mask] = 0.0
+        self.true_capacity += torch.sum(new_priorities)
 
         if is_negative:
             self._neg_idx = self._update(
@@ -457,31 +462,32 @@ class SafeTD3Buffer(OnPolicyBuffer):
         batch_size = self.batch_size
         steps_per_epoch = self.union_capacity // batch_size
 
-        union_probs = self._union_priorities**self._priorities_alpha
-        union_probs /= union_probs.sum()
-        union_total = len(union_probs)
-        union_idxs = torch.from_numpy(
-            np.random.choice(
-                union_total,
-                (steps_per_epoch, batch_size),
-                p=union_probs.cpu().numpy(),
-                replace=True,
-            )
-        ).to(self.device)
-
         neg_probs = self._neg_priorities
         neg_probs /= neg_probs.sum()
         neg_total = len(neg_probs)
-        neg_idxs = torch.from_numpy(
-            np.random.choice(
-                neg_total,
-                (steps_per_epoch, batch_size),
-                p=neg_probs.cpu().numpy(),
-                replace=True,
-            )
-        ).to(self.device)
+        union_total = len(self._union_priorities)
 
-        for n_idx, u_idx in zip(neg_idxs, union_idxs):
+        for _ in range(steps_per_epoch):
+            union_probs = self._union_priorities**self._priorities_alpha
+            union_probs /= union_probs.sum()
+            u_idx = torch.from_numpy(
+                np.random.choice(
+                    union_total,
+                    (batch_size,),
+                    p=union_probs.cpu().numpy(),
+                    replace=False,
+                )
+            ).to(self.device)
+
+            n_idx = torch.from_numpy(
+                np.random.choice(
+                    neg_total,
+                    (batch_size,),
+                    p=neg_probs.cpu().numpy(),
+                    replace=True,
+                )
+            ).to(self.device)
+
             h_neg_obs = torch.empty(
                 (self.horizon, batch_size, *self._neg_obs.shape[1:]),
                 dtype=torch.float32,

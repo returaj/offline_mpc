@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
 
-from dsrl_model.utils.bufffer import OnPolicyBuffer
+from dsrl_model.utils.bufffer import SafeTD3Buffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
     get_neg_and_union_data_2,
@@ -39,7 +39,7 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e2),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
@@ -51,7 +51,7 @@ default_cfg = {
     "value_weight_temp": 2.5,  # TDMPC temperature coef
     "train_horizon": 5,  # 5
     "weight_decay": 0.01,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e3),
 }
 
 trajectory_cfg = {
@@ -177,13 +177,20 @@ def cost_loss_fn(
 
 @torch.no_grad
 def calculate_target_value(
-    cost_model, value, bc_policy, target_os, target_acts, target_next_os, gamma
+    cost_model,
+    value,
+    bc_policy,
+    target_os,
+    target_acts,
+    target_next_os,
+    target_done,
+    gamma,
 ):
     o, a, o_next = target_os, target_acts, target_next_os
     c = cost_model(torch.cat([o, a], dim=1), use_sigmoid=True)
     policy_a = bc_policy.sample_action(o_next)
     v_next = torch.min(*value.V(torch.cat([o_next, policy_a], dim=1)))
-    value_c = c + gamma * v_next
+    value_c = c + gamma * (1 - target_done) * v_next
     return value_c
 
 
@@ -204,6 +211,7 @@ def value_loss_fn(
     target_os,
     target_acts,
     target_next_os,
+    target_done,
     config,
 ):
     gamma = config["gamma"]
@@ -213,6 +221,7 @@ def value_loss_fn(
     target_os = target_os.view(horizon * batch_size, -1)
     target_acts = target_acts.view(horizon * batch_size, -1)
     target_next_os = target_next_os.view(horizon * batch_size, -1)
+    target_done = target_done.view(horizon * batch_size)
 
     target_value = calculate_target_value(
         cost_model=cost_model,
@@ -221,6 +230,7 @@ def value_loss_fn(
         target_os=target_os,
         target_acts=target_acts,
         target_next_os=target_next_os,
+        target_done=target_done,
         gamma=gamma,
     )
 
@@ -252,6 +262,7 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["value_weight_temp"] = args.value_weight_temp or config["value_weight_temp"]
     config["policy_type"] = args.policy_type
+    config["update_priority_buffer"] = args.update_priority_buffer
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -318,6 +329,7 @@ def main(args, cfg_env=None):
     )
     neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
     # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
+
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
     )
@@ -325,6 +337,8 @@ def main(args, cfg_env=None):
         neg_data["actions"], dtype=torch.float32, device=device
     )
     neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+    neg_dones = torch.as_tensor(neg_dones, dtype=torch.float32, device=device)
+
     union_observations = torch.as_tensor(
         union_data["observations"], dtype=torch.float32, device=device
     )
@@ -332,13 +346,14 @@ def main(args, cfg_env=None):
         union_data["actions"], dtype=torch.float32, device=device
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
+    union_dones = torch.as_tensor(union_dones, dtype=torch.float32, device=device)
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
         neg_observations.shape[1] == ep_len
     ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
 
-    buffer = OnPolicyBuffer(
+    buffer = SafeTD3Buffer(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         neg_data_size=np.prod(neg_observations.shape[:-1]),
@@ -379,6 +394,8 @@ def main(args, cfg_env=None):
             target_neg_acts,
             target_union_os,
             target_union_acts,
+            target_union_next_os,
+            target_union_done,
             target_union_idx,
         ) in buffer.sample():
 
@@ -403,9 +420,10 @@ def main(args, cfg_env=None):
                 bc_policy=bc_policy,
                 value=value_cost,
                 value_target=value_cost_target,
-                target_os=target_union_os[:-1],
-                target_acts=target_union_acts[:-1],
-                target_next_os=target_union_os[1:],
+                target_os=target_union_os,
+                target_acts=target_union_acts,
+                target_next_os=target_union_next_os,
+                target_done=target_union_done,
                 config=config,
             )
             value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
@@ -427,9 +445,10 @@ def main(args, cfg_env=None):
             bc_policy_optimizer.step()
             bc_scheduler.step()
 
-            buffer.update_priorities(
-                target_union_idx, priorities.clamp(max=1e4).detach()
-            )
+            if config["update_priority_buffer"]:
+                buffer.update_priorities(
+                    target_union_idx, priorities.clamp(max=1e4).detach()
+                )
 
             if (steps % config["update_freq"]) == 0:
                 ema(value_cost, value_cost_target, config["update_tau"])
