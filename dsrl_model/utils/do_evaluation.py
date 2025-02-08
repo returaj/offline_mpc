@@ -3,9 +3,11 @@ import os
 import os.path as osp
 import re
 import time
+from functools import partial
 
 import dsrl.offline_safety_gymnasium  # type: ignore
 import gymnasium as gym
+import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -96,13 +98,21 @@ def timeit(func):
     return wrapped_func
 
 
+def normalize(mu_obs, std_obs, obs):
+    if mu_obs is None:
+        return obs
+    return (obs - mu_obs) / (std_obs + EP)
+
+
 @timeit
-def evaluate(eval_env, bc_policy, device, num_evals):
+def evaluate(eval_env, bc_policy, device, num_evals, norm_fn):
     ep_rewards, ep_costs, ep_lens = [], [], []
     for _ in range(num_evals):
         done = False
         obs, _ = eval_env.reset()
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        obs = torch.as_tensor(
+            norm_fn(obs), dtype=torch.float32, device=device
+        ).unsqueeze(0)
         rewards, costs, lens = 0, 0, 0
         while not done:
             act = bc_policy.action(obs)
@@ -111,7 +121,7 @@ def evaluate(eval_env, bc_policy, device, num_evals):
             )
             cost = info["cost"]
             next_obs = torch.as_tensor(
-                next_obs, dtype=torch.float32, device=device
+                norm_fn(next_obs), dtype=torch.float32, device=device
             ).unsqueeze(0)
             obs = next_obs
             rewards += reward
@@ -145,6 +155,12 @@ def main(args):
     bc_model_files = [
         f for f in os.listdir(path) if re.search(r"bc_policy_model_[0-9]+.pt", f)
     ]
+    state_path = osp.join(path, "../norm/state.pkl")
+    mu_obs, std_obs = None, None
+    if osp.exists(state_path):
+        state_dict = joblib.load(state_path, mmap_mode="r")
+        mu_obs, std_obs = state_dict["mu_obs"], state_dict["std_obs"]
+
     ids = sorted(
         [
             int(re.search(r"bc_policy_model_([0-9]+).pt", f).group(1))
@@ -165,6 +181,7 @@ def main(args):
             bc_policy=bc_policy,
             device=device,
             num_evals=args.num_evals,
+            norm_fn=partial(normalize, mu_obs, std_obs),
         )
         print(
             f"task: {args.task}, seed: {args.seed}, id: {id}, time: {total_time:.2f}sec"

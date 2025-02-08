@@ -69,7 +69,7 @@ def single_agent_args():
         {
             "name": "--log-dir",
             "type": str,
-            "default": "../runs",
+            "default": "dsrl_model/runs",
             "help": "directory to save agent logs",
         },
         {
@@ -143,6 +143,12 @@ def single_agent_args():
             "type": lambda x: bool(strtobool(x)),
             "default": False,
             "help": "To update the priority of the buffer used during sampling",
+        },
+        {
+            "name": "--normalize-observation",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To normalize the state observation.",
         },
         {
             "name": "--bc-weight-binary",

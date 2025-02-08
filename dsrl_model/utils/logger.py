@@ -220,7 +220,7 @@ class Logger:
         with open(osp.join(self.log_dir, "config.json"), "w") as out:
             out.write(output)
 
-    def save_state(self, state_dict, itr=None):
+    def save_state(self, state_dict, dirname="", itr=None):
         """
         Save the state dictionary using joblib's pickling mechanism.
 
@@ -234,9 +234,11 @@ class Logger:
         Returns:
             None
         """
+        fpath = osp.join(self.log_dir, dirname)
+        os.makedirs(fpath, exist_ok=True)
         fname = "state.pkl" if itr is None else "state%d.pkl" % itr
         try:
-            joblib.dump(state_dict, osp.join(self.log_dir, fname))
+            joblib.dump(state_dict, osp.join(fpath, fname))
         except:
             self.log("Warning: could not pickle state_dict.", color="red")
 

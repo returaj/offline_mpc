@@ -22,6 +22,7 @@ from dsrl_model.utils.bufffer import SafeTD3Buffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
     get_neg_and_union_data_2,
+    get_normalized_data,
 )
 from dsrl_model.utils.logger import EpochLogger
 from dsrl_model.utils.models import (
@@ -75,14 +76,19 @@ def ema(m, m_target, tau):
             p_target.data.lerp_(p.data, tau)
 
 
+def normalize_observation(mu_obs, std_obs, obs):
+    if mu_obs is None:
+        return obs
+    return (obs - mu_obs) / (std_obs + EP)
+
+
 @torch.no_grad
-def evaluate_bc_policy(eval_env, policy, cost_model, device):
+def evaluate_bc_policy(eval_env, policy, cost_model, device, norm_fn):
     eval_done = False
     eval_obs, _ = eval_env.reset()
-    # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
-    eval_obs = torch.as_tensor(eval_obs, dtype=torch.float32, device=device).unsqueeze(
-        0
-    )
+    eval_obs = torch.as_tensor(
+        norm_fn(eval_obs), dtype=torch.float32, device=device
+    ).unsqueeze(0)
     eval_reward, eval_cost, eval_pred_cost, eval_len = (
         0.0,
         0.0,
@@ -95,9 +101,8 @@ def evaluate_bc_policy(eval_env, policy, cost_model, device):
             act.detach().squeeze().cpu().numpy()
         )
         cost = info["cost"]
-        # next_obs = (next_obs - mu_obs) / (std_obs + EP)
         next_obs = torch.as_tensor(
-            next_obs, dtype=torch.float32, device=device
+            norm_fn(next_obs), dtype=torch.float32, device=device
         ).unsqueeze(0)
         with torch.no_grad():
             pred_cost = cost_model(
@@ -263,6 +268,7 @@ def main(args, cfg_env=None):
     config["value_weight_temp"] = args.value_weight_temp or config["value_weight_temp"]
     config["policy_type"] = args.policy_type
     config["update_priority_buffer"] = args.update_priority_buffer
+    config["normalize_observation"] = args.normalize_observation
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -328,7 +334,11 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
     neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
-    # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
+    mu_obs, std_obs = None, None
+    if config["normalize_observation"]:
+        neg_data, union_data, mu_obs, std_obs = get_normalized_data(
+            neg_data, union_data
+        )
 
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
@@ -475,6 +485,7 @@ def main(args, cfg_env=None):
                             policy=policy,
                             cost_model=cost_model,
                             device=device,
+                            norm_fn=partial(normalize_observation, mu_obs, std_obs),
                         )
                         norm_reward, norm_cost = eval_env.get_normalized_score(
                             eval_reward, eval_cost
@@ -545,6 +556,10 @@ def main(args, cfg_env=None):
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
     logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model")
     logger.torch_save(itr=steps, torch_saver_elements=value_cost, prefix="value_cost")
+    if config["normalize_observation"]:
+        logger.save_state(
+            state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
+        )
     logger.close()
 
 
