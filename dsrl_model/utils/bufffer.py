@@ -430,7 +430,6 @@ class SafeTD3Buffer(OnPolicyBuffer):
         )
         new_priorities = torch.full((self.ep_len,), max_priority, device=self.device)
         new_priorities[mask] = 0.0
-        self.true_capacity += torch.sum(new_priorities)
 
         if is_negative:
             self._neg_idx = self._update(
@@ -447,6 +446,7 @@ class SafeTD3Buffer(OnPolicyBuffer):
                 cost=cost,
             )
         else:
+            self.true_capacity += torch.sum(new_priorities)
             self._union_idx = self._update(
                 obs_store=self._union_obs,
                 act_store=self._union_act,
@@ -463,32 +463,19 @@ class SafeTD3Buffer(OnPolicyBuffer):
 
     def sample(self):
         batch_size = self.batch_size
-        steps_per_epoch = self.union_capacity // batch_size
+        steps_per_epoch = int(self.true_capacity.item()) // batch_size
 
-        neg_probs = self._neg_priorities
-        neg_probs /= neg_probs.sum()
-        neg_total = len(neg_probs)
-        union_total = len(self._union_priorities)
+        neg_weights = self._neg_priorities
+        # neg_probs /= neg_weights.sum()
 
         for _ in range(steps_per_epoch):
-            union_probs = self._union_priorities**self._priorities_alpha
-            union_probs /= union_probs.sum()
-            u_idx = torch.from_numpy(
-                np.random.choice(
-                    union_total,
-                    (batch_size,),
-                    p=union_probs.cpu().numpy(),
-                    replace=False,
-                )
+            union_weights = self._union_priorities**self._priorities_alpha
+            # union_probs /= union_weights.sum()
+            u_idx = torch.multinomial(
+                union_weights, num_samples=batch_size, replacement=False
             ).to(self.device)
-
-            n_idx = torch.from_numpy(
-                np.random.choice(
-                    neg_total,
-                    (batch_size,),
-                    p=neg_probs.cpu().numpy(),
-                    replace=True,
-                )
+            n_idx = torch.multinomial(
+                neg_weights, num_samples=batch_size, replacement=False
             ).to(self.device)
 
             h_neg_obs = torch.empty(
