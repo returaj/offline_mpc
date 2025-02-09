@@ -411,6 +411,7 @@ def main(args, cfg_env=None):
 
             steps += 1
 
+            cost_optimizer.zero_grad()
             cost_loss = cost_loss_fn(
                 cost_model=cost_model,
                 target_neg_os=target_neg_os,
@@ -420,11 +421,11 @@ def main(args, cfg_env=None):
                 config=config,
             )
             cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            cost_optimizer.zero_grad()
             cost_loss.backward()
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             cost_optimizer.step()
 
+            value_cost_optimizer.zero_grad()
             value_loss, priorities = value_loss_fn(
                 cost_model=cost_model,
                 bc_policy=bc_policy,
@@ -437,11 +438,14 @@ def main(args, cfg_env=None):
                 config=config,
             )
             value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            value_cost_optimizer.zero_grad()
             value_loss.backward()
             clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
             value_cost_optimizer.step()
 
+            # to ensure that when the value fn is used in policy loss
+            # then the value_cost parameters grad are zero initially.
+            value_cost.zero_grad()
+            bc_policy_optimizer.zero_grad()
             bc_policy_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
                 value=value_cost,
@@ -449,7 +453,6 @@ def main(args, cfg_env=None):
                 target_acts=target_union_acts,
                 config=config,
             )
-            bc_policy_optimizer.zero_grad()
             bc_policy_loss.backward()
             clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
             bc_policy_optimizer.step()
