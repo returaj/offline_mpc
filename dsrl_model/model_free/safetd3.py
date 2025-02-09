@@ -312,7 +312,7 @@ def main(args, cfg_env=None):
         bc_policy_optimizer,
         start_factor=1.0,
         end_factor=0.0,
-        total_iters=config["total_iteration"],
+        total_iters=config["total_iteration"] // config["value_bc_update_freq"],
     )
     cost_model = ExpCostModel(
         # (s,a)
