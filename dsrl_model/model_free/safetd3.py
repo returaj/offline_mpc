@@ -47,9 +47,10 @@ default_cfg = {
     "max_grad_norm": 10.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
+    "value_bc_update_freq": 1,
     "update_freq": 1,
     "update_tau": 0.005,
-    "value_weight_temp": 2.5,  # TDMPC temperature coef
+    "value_weight_temp": 2.5,  # TD3-BC coef
     "train_horizon": 5,  # 5
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
@@ -269,6 +270,9 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["update_priority_buffer"] = args.update_priority_buffer
     config["normalize_observation"] = args.normalize_observation
+    config["value_bc_update_freq"] = (
+        args.value_bc_update_freq or config["value_bc_update_freq"]
+    )
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -425,46 +429,49 @@ def main(args, cfg_env=None):
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             cost_optimizer.step()
 
-            value_cost_optimizer.zero_grad()
-            value_loss, priorities = value_loss_fn(
-                cost_model=cost_model,
-                bc_policy=bc_policy,
-                value=value_cost,
-                value_target=value_cost_target,
-                target_os=target_union_os,
-                target_acts=target_union_acts,
-                target_next_os=target_union_next_os,
-                target_done=target_union_done,
-                config=config,
-            )
-            value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            value_loss.backward()
-            clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
-            value_cost_optimizer.step()
-
-            # to ensure that when the value fn is used in policy loss
-            # then the value_cost parameters grad are zero initially.
-            value_cost.zero_grad()
-            bc_policy_optimizer.zero_grad()
-            bc_policy_loss = bc_policy_loss_fn(
-                bc_policy=bc_policy,
-                value=value_cost,
-                target_os=target_union_os,
-                target_acts=target_union_acts,
-                config=config,
-            )
-            bc_policy_loss.backward()
-            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
-            bc_policy_optimizer.step()
-            bc_scheduler.step()
-
-            if config["update_priority_buffer"]:
-                buffer.update_priorities(
-                    target_union_idx, priorities.clamp(max=1e4).detach()
+            if steps % config["value_bc_update_freq"] == 0:
+                value_cost_optimizer.zero_grad()
+                value_loss, priorities = value_loss_fn(
+                    cost_model=cost_model,
+                    bc_policy=bc_policy,
+                    value=value_cost,
+                    value_target=value_cost_target,
+                    target_os=target_union_os,
+                    target_acts=target_union_acts,
+                    target_next_os=target_union_next_os,
+                    target_done=target_union_done,
+                    config=config,
                 )
+                value_loss.register_hook(
+                    lambda grad: grad * (1 / config["train_horizon"])
+                )
+                value_loss.backward()
+                clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
+                value_cost_optimizer.step()
 
-            if (steps % config["update_freq"]) == 0:
-                ema(value_cost, value_cost_target, config["update_tau"])
+                # to ensure that when the value fn is used in policy loss
+                # then the value_cost parameters grad are zero initially.
+                value_cost.zero_grad()
+                bc_policy_optimizer.zero_grad()
+                bc_policy_loss = bc_policy_loss_fn(
+                    bc_policy=bc_policy,
+                    value=value_cost,
+                    target_os=target_union_os,
+                    target_acts=target_union_acts,
+                    config=config,
+                )
+                bc_policy_loss.backward()
+                clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+                bc_policy_optimizer.step()
+                bc_scheduler.step()
+
+                if config["update_priority_buffer"]:
+                    buffer.update_priorities(
+                        target_union_idx, priorities.clamp(max=1e4).detach()
+                    )
+
+                if (steps % config["update_freq"]) == 0:
+                    ema(value_cost, value_cost_target, config["update_tau"])
 
             logger.logged = False
 

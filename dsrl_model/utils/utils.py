@@ -151,6 +151,12 @@ def single_agent_args():
             "help": "To normalize the state observation.",
         },
         {
+            "name": "--value-bc-update-freq",
+            "type": int,
+            "default": None,
+            "help": "Use default value for value_bc_update_freq",
+        },
+        {
             "name": "--bc-weight-binary",
             "type": lambda x: bool(strtobool(x)),
             "default": False,
