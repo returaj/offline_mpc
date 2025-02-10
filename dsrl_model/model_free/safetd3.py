@@ -47,7 +47,6 @@ default_cfg = {
     "max_grad_norm": 10.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "value_bc_update_freq": 1,
     "update_freq": 1,
     "update_tau": 0.005,
     "value_weight_temp": 2.5,  # TD3-BC coef
@@ -270,9 +269,6 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["update_priority_buffer"] = args.update_priority_buffer
     config["normalize_observation"] = args.normalize_observation
-    config["value_bc_update_freq"] = (
-        args.value_bc_update_freq or config["value_bc_update_freq"]
-    )
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -312,7 +308,7 @@ def main(args, cfg_env=None):
         bc_policy_optimizer,
         start_factor=1.0,
         end_factor=0.0,
-        total_iters=config["total_iteration"] // config["value_bc_update_freq"],
+        total_iters=config["total_iteration"],
     )
     cost_model = ExpCostModel(
         # (s,a)
@@ -397,10 +393,11 @@ def main(args, cfg_env=None):
         seed=str(args.seed),
     )
     logger.save_config(dict_args)
-    logger.log("Start with bc_policy, cost and value training.")
 
-    # train cost, value and policy model
+    # train cost model
+    logger.log("Start with cost training.")
     steps = 0
+    start_time = time.time()
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
@@ -408,9 +405,9 @@ def main(args, cfg_env=None):
             target_neg_acts,
             target_union_os,
             target_union_acts,
-            target_union_next_os,
-            target_union_done,
-            target_union_idx,
+            _,
+            _,
+            _,
         ) in buffer.sample():
 
             steps += 1
@@ -429,49 +426,73 @@ def main(args, cfg_env=None):
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             cost_optimizer.step()
 
-            if steps % config["value_bc_update_freq"] == 0:
-                value_cost_optimizer.zero_grad()
-                value_loss, priorities = value_loss_fn(
-                    cost_model=cost_model,
-                    bc_policy=bc_policy,
-                    value=value_cost,
-                    value_target=value_cost_target,
-                    target_os=target_union_os,
-                    target_acts=target_union_acts,
-                    target_next_os=target_union_next_os,
-                    target_done=target_union_done,
-                    config=config,
+            if (steps % config["log_freq"]) == 0:
+                end_time = time.time()
+                print(
+                    f"Time per log: {end_time - start_time:.2f} sec, cost_loss: {cost_loss.item():.4f}"
                 )
-                value_loss.register_hook(
-                    lambda grad: grad * (1 / config["train_horizon"])
+                start_time = end_time
+
+            if steps >= config["total_iteration"]:
+                break
+
+    # train value and policy model
+    logger.log("Start with bc_policy, value training.")
+    steps = 0
+    while steps < config["total_iteration"]:
+        # shape: Horizon X Batch X obs/act_dim
+        for (
+            _,
+            _,
+            target_union_os,
+            target_union_acts,
+            target_union_next_os,
+            target_union_done,
+            target_union_idx,
+        ) in buffer.sample():
+
+            steps += 1
+
+            value_cost_optimizer.zero_grad()
+            value_loss, priorities = value_loss_fn(
+                cost_model=cost_model,
+                bc_policy=bc_policy,
+                value=value_cost,
+                value_target=value_cost_target,
+                target_os=target_union_os,
+                target_acts=target_union_acts,
+                target_next_os=target_union_next_os,
+                target_done=target_union_done,
+                config=config,
+            )
+            value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+            value_loss.backward()
+            clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
+            value_cost_optimizer.step()
+
+            # to ensure that when the value fn is used in policy loss
+            # then the value_cost parameters grad are zero initially.
+            value_cost.zero_grad()
+            bc_policy_optimizer.zero_grad()
+            bc_policy_loss = bc_policy_loss_fn(
+                bc_policy=bc_policy,
+                value=value_cost,
+                target_os=target_union_os,
+                target_acts=target_union_acts,
+                config=config,
+            )
+            bc_policy_loss.backward()
+            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            bc_policy_optimizer.step()
+            bc_scheduler.step()
+
+            if config["update_priority_buffer"]:
+                buffer.update_priorities(
+                    target_union_idx, priorities.clamp(max=1e4).detach()
                 )
-                value_loss.backward()
-                clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
-                value_cost_optimizer.step()
 
-                # to ensure that when the value fn is used in policy loss
-                # then the value_cost parameters grad are zero initially.
-                value_cost.zero_grad()
-                bc_policy_optimizer.zero_grad()
-                bc_policy_loss = bc_policy_loss_fn(
-                    bc_policy=bc_policy,
-                    value=value_cost,
-                    target_os=target_union_os,
-                    target_acts=target_union_acts,
-                    config=config,
-                )
-                bc_policy_loss.backward()
-                clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
-                bc_policy_optimizer.step()
-                bc_scheduler.step()
-
-                if config["update_priority_buffer"]:
-                    buffer.update_priorities(
-                        target_union_idx, priorities.clamp(max=1e4).detach()
-                    )
-
-                if (steps % config["update_freq"]) == 0:
-                    ema(value_cost, value_cost_target, config["update_tau"])
+            if (steps % config["update_freq"]) == 0:
+                ema(value_cost, value_cost_target, config["update_tau"])
 
             logger.logged = False
 
@@ -524,7 +545,6 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.mean().item())
-                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
                 logger.log_tabular("Loss/Loss_value_cost", value_loss.mean().item())
 
                 logger.log_tabular(
