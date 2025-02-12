@@ -46,6 +46,7 @@ default_cfg = {
     "hidden_sizes": [256, 256],
     "max_grad_norm": 10.0,
     "max_grad_norm_critic": 0.5,
+    "max_grad_norm_bc": 10.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "update_freq": 1,
@@ -146,7 +147,7 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     q = torch.min(*value.V(torch.cat([target_os, pred_acts], dim=1)))
     qlambda = (alpha / (torch.mean(torch.abs(q)) + EP)).detach()
     loss += qlambda * q
-    return torch.mean(loss)
+    return torch.mean(loss), torch.mean(torch.abs(q))
 
 
 def cost_loss_fn(
@@ -243,8 +244,8 @@ def value_loss_fn(
     value_loss, priority_loss = 0.0, 0.0
     o, a = target_os, target_acts
     pred_v1, pred_v2 = value.V(torch.cat([o, a], dim=1))
-    value_loss += F.mse_loss(pred_v1, target_value, reduction="none")
-    value_loss += F.mse_loss(pred_v2, target_value, reduction="none")
+    value_loss += F.huber_loss(pred_v1, target_value, delta=2.0, reduction="none")
+    value_loss += F.huber_loss(pred_v1, target_value, delta=2.0, reduction="none")
     value_loss = value_loss.view(horizon, batch_size)
     value_loss = discounted_sum(gamma, value_loss)
 
@@ -493,7 +494,7 @@ def main(args, cfg_env=None):
             # then the value_cost parameters grad are zero initially.
             value_cost.zero_grad()
             bc_policy_optimizer.zero_grad()
-            bc_policy_loss = bc_policy_loss_fn(
+            bc_policy_loss, q_loss = bc_policy_loss_fn(
                 bc_policy=bc_policy,
                 value=value_cost,
                 target_os=target_union_os,
@@ -501,7 +502,7 @@ def main(args, cfg_env=None):
                 config=config,
             )
             bc_policy_loss.backward()
-            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm_bc"])
             bc_policy_optimizer.step()
             bc_scheduler.step()
 
@@ -565,6 +566,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.mean().item())
                 logger.log_tabular("Loss/Loss_value_cost", value_loss.mean().item())
+                logger.log_tabular("Loss/bc_q_value", q_loss.mean().item())
 
                 logger.log_tabular(
                     "Norm/bc_policy",
@@ -577,6 +579,14 @@ def main(args, cfg_env=None):
                 logger.log_tabular(
                     "Norm/value_cost",
                     get_params_norm(value_cost.parameters(), grads=False),
+                )
+                logger.log_tabular(
+                    "Norm/grads/bc_policy",
+                    get_params_norm(bc_policy.parameters(), grads=True),
+                )
+                logger.log_tabular(
+                    "Norm/grads/value_cost",
+                    get_params_norm(value_cost.parameters(), grads=True),
                 )
                 if args.use_eval:
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
