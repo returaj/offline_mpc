@@ -45,6 +45,7 @@ default_cfg = {
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
     "max_grad_norm": 10.0,
+    "max_grad_norm_critic": 0.5,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "update_freq": 1,
@@ -255,6 +256,50 @@ def value_loss_fn(
     return torch.mean(value_loss), priorities
 
 
+def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
+    # train cost model
+    logger.log("Start with cost training.")
+    steps = 0
+    start_time = time.time()
+    while steps < config["total_iteration"]:
+        # shape: Horizon X Batch X obs/act_dim
+        for (
+            target_neg_os,
+            target_neg_acts,
+            target_union_os,
+            target_union_acts,
+            _,
+            _,
+            _,
+        ) in buffer.sample():
+
+            steps += 1
+
+            cost_optimizer.zero_grad()
+            cost_loss = cost_loss_fn(
+                cost_model=cost_model,
+                target_neg_os=target_neg_os,
+                target_neg_acts=target_neg_acts,
+                target_union_os=target_union_os,
+                target_union_acts=target_union_acts,
+                config=config,
+            )
+            cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+            cost_loss.backward()
+            clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
+            cost_optimizer.step()
+
+            if (steps % config["log_freq"]) == 0:
+                end_time = time.time()
+                print(
+                    f"Time per log: {end_time - start_time:.2f} sec, cost_loss: {cost_loss.item():.4f}"
+                )
+                start_time = end_time
+
+            if steps >= config["total_iteration"]:
+                break
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -262,13 +307,15 @@ def main(args, cfg_env=None):
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
-    device = torch.device(f"{args.device}:{args.device_id}")
+    device_name = "cpu" if args.device == "cpu" else f"{args.device}:{args.device_id}"
+    device = torch.device(device_name)
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["value_weight_temp"] = args.value_weight_temp or config["value_weight_temp"]
     config["policy_type"] = args.policy_type
     config["update_priority_buffer"] = args.update_priority_buffer
     config["normalize_observation"] = args.normalize_observation
+    config["cost_model_path"] = args.cost_model_path
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -394,47 +441,19 @@ def main(args, cfg_env=None):
     )
     logger.save_config(dict_args)
 
-    # train cost model
-    logger.log("Start with cost training.")
-    steps = 0
-    start_time = time.time()
-    while steps < config["total_iteration"]:
-        # shape: Horizon X Batch X obs/act_dim
-        for (
-            target_neg_os,
-            target_neg_acts,
-            target_union_os,
-            target_union_acts,
-            _,
-            _,
-            _,
-        ) in buffer.sample():
-
-            steps += 1
-
-            cost_optimizer.zero_grad()
-            cost_loss = cost_loss_fn(
-                cost_model=cost_model,
-                target_neg_os=target_neg_os,
-                target_neg_acts=target_neg_acts,
-                target_union_os=target_union_os,
-                target_union_acts=target_union_acts,
-                config=config,
-            )
-            cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            cost_loss.backward()
-            clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
-            cost_optimizer.step()
-
-            if (steps % config["log_freq"]) == 0:
-                end_time = time.time()
-                print(
-                    f"Time per log: {end_time - start_time:.2f} sec, cost_loss: {cost_loss.item():.4f}"
-                )
-                start_time = end_time
-
-            if steps >= config["total_iteration"]:
-                break
+    if config["cost_model_path"] is not None:
+        logger.log("Loading cost model.")
+        cost_model = logger.torch_load(
+            model=cost_model, model_path=config["cost_model_path"], device=device
+        )
+    else:
+        pretrain_cost_model(
+            cost_model=cost_model,
+            cost_optimizer=cost_optimizer,
+            buffer=buffer,
+            logger=logger,
+            config=config,
+        )
 
     # train value and policy model
     logger.log("Start with bc_policy, value training.")
@@ -467,7 +486,7 @@ def main(args, cfg_env=None):
             )
             value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
             value_loss.backward()
-            clip_grad_norm_(value_cost.parameters(), config["max_grad_norm"])
+            clip_grad_norm_(value_cost.parameters(), config["max_grad_norm_critic"])
             value_cost_optimizer.step()
 
             # to ensure that when the value fn is used in policy loss

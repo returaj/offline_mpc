@@ -151,10 +151,10 @@ def single_agent_args():
             "help": "To normalize the state observation.",
         },
         {
-            "name": "--value-bc-update-freq",
-            "type": int,
+            "name": "--cost-model-path",
+            "type": str,
             "default": None,
-            "help": "Use default value for value_bc_update_freq",
+            "help": "set the path of cost model if it already exists.",
         },
         {
             "name": "--bc-weight-binary",

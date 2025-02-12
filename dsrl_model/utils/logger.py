@@ -19,6 +19,7 @@ import csv
 import json
 import os
 import os.path as osp
+import re
 import warnings
 
 import joblib
@@ -316,6 +317,12 @@ class Logger:
         # free logged information in all processes...
         self.log_current_row.clear()
         self.first_row = False
+
+    def torch_load(self, model, model_path, device):
+        model.load_state_dict(
+            torch.load(model_path, weights_only=True, map_location=device)
+        )
+        return model
 
 
 class EpochLogger(Logger):
