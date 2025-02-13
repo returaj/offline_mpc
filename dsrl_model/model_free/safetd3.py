@@ -46,10 +46,10 @@ default_cfg = {
     "hidden_sizes": [256, 256],
     "max_grad_norm": 10.0,
     "max_grad_norm_critic": 0.5,
-    "max_grad_norm_bc": 10.0,
+    "max_grad_norm_bc": 1.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "update_freq": 1,
+    "update_freq": 2,
     "update_tau": 0.005,
     "value_weight_temp": 2.5,  # TD3-BC coef
     "train_horizon": 5,  # 5
@@ -349,6 +349,7 @@ def main(args, cfg_env=None):
             act_dim=act_space.shape[0],
             hidden_size=config["hidden_sizes"][0],
         ).to(device)
+    bc_policy_target = deepcopy(bc_policy)
     bc_policy_optimizer = torch.optim.AdamW(
         bc_policy.parameters(), lr=config["bc_lr"], weight_decay=config["weight_decay"]
     )
@@ -476,7 +477,7 @@ def main(args, cfg_env=None):
             value_cost_optimizer.zero_grad()
             value_loss, priorities = value_loss_fn(
                 cost_model=cost_model,
-                bc_policy=bc_policy,
+                bc_policy=bc_policy_target,
                 value=value_cost,
                 value_target=value_cost_target,
                 target_os=target_union_os,
@@ -490,29 +491,30 @@ def main(args, cfg_env=None):
             clip_grad_norm_(value_cost.parameters(), config["max_grad_norm_critic"])
             value_cost_optimizer.step()
 
-            # to ensure that when the value fn is used in policy loss
-            # then the value_cost parameters grad are zero initially.
-            value_cost.zero_grad()
-            bc_policy_optimizer.zero_grad()
-            bc_policy_loss, q_loss = bc_policy_loss_fn(
-                bc_policy=bc_policy,
-                value=value_cost,
-                target_os=target_union_os,
-                target_acts=target_union_acts,
-                config=config,
-            )
-            bc_policy_loss.backward()
-            clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm_bc"])
-            bc_policy_optimizer.step()
-            bc_scheduler.step()
-
             if config["update_priority_buffer"]:
                 buffer.update_priorities(
                     target_union_idx, priorities.clamp(max=1e4).detach()
                 )
 
             if (steps % config["update_freq"]) == 0:
+                # to ensure that when the value fn is used in policy loss
+                # then the value_cost parameters grad are zero initially.
+                value_cost.zero_grad()
+                bc_policy_optimizer.zero_grad()
+                bc_policy_loss, q_loss = bc_policy_loss_fn(
+                    bc_policy=bc_policy,
+                    value=value_cost,
+                    target_os=target_union_os,
+                    target_acts=target_union_acts,
+                    config=config,
+                )
+                bc_policy_loss.backward()
+                clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm_bc"])
+                bc_policy_optimizer.step()
+                # bc_scheduler.step()
+
                 ema(value_cost, value_cost_target, config["update_tau"])
+                ema(bc_policy, bc_policy_target, config["update_tau"])
 
             logger.logged = False
 
