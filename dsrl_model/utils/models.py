@@ -450,7 +450,7 @@ class TdmpcCostModel(nn.Module):
 
 
 class TdmpcValue(nn.Module):
-    def __init__(self, obs_dim, hidden_size=512):
+    def __init__(self, obs_dim, hidden_size=512, last_act=nn.Identity()):
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(obs_dim, hidden_size),
@@ -459,20 +459,25 @@ class TdmpcValue(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, 1),
+            last_act,
         )
         self.apply(orthogonal_init)
-        self.model[-1].weight.data.fill_(0)
-        self.model[-1].bias.data.fill_(0)
+        self.model[-2].weight.data.fill_(0)
+        self.model[-2].bias.data.fill_(0)
 
     def forward(self, obs):
         return torch.squeeze(self.model(obs), -1)
 
 
 class EnsembleValue(nn.Module):
-    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64], last_act=nn.Identity()):
         super().__init__()
-        self._V1 = TdmpcValue(obs_dim=obs_dim)
-        self._V2 = TdmpcValue(obs_dim=obs_dim)
+        self._V1 = TdmpcValue(
+            obs_dim=obs_dim, hidden_size=hidden_sizes[0], last_act=last_act
+        )
+        self._V2 = TdmpcValue(
+            obs_dim=obs_dim, hidden_size=hidden_sizes[0], last_act=last_act
+        )
 
     def V(self, obs):
         return self._V1(obs), self._V2(obs)

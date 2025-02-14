@@ -14,6 +14,7 @@ import gymnasium as gym
 import h5py
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.optim.lr_scheduler import LinearLR
@@ -144,10 +145,10 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
         recon_loss = F.mse_loss(pred_acts, target_acts, reduction="none").sum(dim=1)
         loss += recon_loss
 
-    q = torch.min(*value.V(torch.cat([target_os, pred_acts], dim=1)))
+    q = torch.max(*value.V(torch.cat([target_os, pred_acts], dim=1)))
     qlambda = (alpha / (torch.mean(torch.abs(q)) + EP)).detach()
     loss += qlambda * q
-    return torch.mean(loss), torch.mean(torch.abs(q))
+    return torch.mean(loss), torch.mean(q)
 
 
 def cost_loss_fn(
@@ -196,7 +197,7 @@ def calculate_target_value(
     o, a, o_next = target_os, target_acts, target_next_os
     c = cost_model(torch.cat([o, a], dim=1), use_sigmoid=True)
     policy_a = bc_policy.sample_action(o_next)
-    v_next = torch.min(*value.V(torch.cat([o_next, policy_a], dim=1)))
+    v_next = torch.max(*value.V(torch.cat([o_next, policy_a], dim=1)))
     value_c = c + gamma * (1 - target_done) * v_next
     return value_c
 
