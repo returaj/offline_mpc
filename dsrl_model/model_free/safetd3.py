@@ -456,6 +456,7 @@ def main(args, cfg_env=None):
             logger=logger,
             config=config,
         )
+        logger.torch_save(itr=0, torch_saver_elements=cost_model, prefix="cost_model")
 
     # train value and policy model
     logger.log("Start with bc_policy, value training.")
