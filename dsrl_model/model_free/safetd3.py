@@ -263,6 +263,7 @@ def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
     logger.log("Start with cost training.")
     steps = 0
     start_time = time.time()
+    loss, best_model = torch.inf, deepcopy(cost_model)
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
@@ -291,6 +292,10 @@ def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
             clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
             cost_optimizer.step()
 
+            if loss >= cost_loss:
+                ema(cost_model, best_model, tau=1.0)
+                loss = cost_loss
+
             if (steps % config["log_freq"]) == 0:
                 end_time = time.time()
                 print(
@@ -300,6 +305,7 @@ def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
 
             if steps >= config["total_iteration"]:
                 break
+    return best_model
 
 
 def main(args, cfg_env=None):
@@ -450,7 +456,7 @@ def main(args, cfg_env=None):
             model=cost_model, model_path=config["cost_model_path"], device=device
         )
     else:
-        pretrain_cost_model(
+        cost_model = pretrain_cost_model(
             cost_model=cost_model,
             cost_optimizer=cost_optimizer,
             buffer=buffer,
