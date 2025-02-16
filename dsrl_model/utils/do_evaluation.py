@@ -3,6 +3,7 @@ import os
 import os.path as osp
 import re
 import time
+from distutils.util import strtobool
 from functools import partial
 
 import dsrl.offline_safety_gymnasium  # type: ignore
@@ -13,7 +14,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from dsrl_model.utils.models import SafeDiceTanhMixtureActor
+from dsrl_model.utils.models import ExpCostModel, SafeDiceTanhMixtureActor
 from dsrl_model.utils.utils import ActionRepeater
 
 EP = 1e-6
@@ -69,6 +70,12 @@ def create_arguments():
             "default": 5,
             "help": "number of evaluations",
         },
+        {
+            "name": "--add-cost-pred",
+            "type": str,
+            "default": "cost_model_model_0.pt",
+            "help": "cost model file name to add if it exists",
+        },
     ]
     parser = argparse.ArgumentParser(description="RL Policy")
     for param in custom_parameters:
@@ -88,6 +95,15 @@ def load_model(obs_dim, act_dim, hidden_size, path, device):
     return bc
 
 
+def load_cost_model(obs_dim, act_dim, hidden_size, path, device):
+    cost_model = ExpCostModel(
+        obs_dim=obs_dim + act_dim, hidden_sizes=[hidden_size, hidden_size]
+    ).to(device)
+    cost_model.load_state_dict(torch.load(path, weights_only=True, map_location=device))
+    cost_model.eval()
+    return cost_model
+
+
 def timeit(func):
     def wrapped_func(*args, **kwargs):
         start_time = time.time()
@@ -105,15 +121,15 @@ def normalize(mu_obs, std_obs, obs):
 
 
 @timeit
-def evaluate(eval_env, bc_policy, device, num_evals, norm_fn):
-    ep_rewards, ep_costs, ep_lens = [], [], []
+def evaluate(eval_env, bc_policy, device, num_evals, norm_fn, cost_model=None):
+    ep_rewards, ep_costs, ep_lens, ep_pred_costs = [], [], [], []
     for _ in range(num_evals):
         done = False
         obs, _ = eval_env.reset()
         obs = torch.as_tensor(
             norm_fn(obs), dtype=torch.float32, device=device
         ).unsqueeze(0)
-        rewards, costs, lens = 0, 0, 0
+        rewards, costs, lens, pred_cost = 0, 0, 0, 0
         while not done:
             act = bc_policy.action(obs)
             next_obs, reward, terminated, truncated, info = eval_env.step(
@@ -123,6 +139,10 @@ def evaluate(eval_env, bc_policy, device, num_evals, norm_fn):
             next_obs = torch.as_tensor(
                 norm_fn(next_obs), dtype=torch.float32, device=device
             ).unsqueeze(0)
+            if cost_model is not None:
+                pred_cost += cost_model(
+                    torch.cat([obs, act], dim=1), use_sigmoid=True
+                ).item()
             obs = next_obs
             rewards += reward
             costs += cost
@@ -131,7 +151,13 @@ def evaluate(eval_env, bc_policy, device, num_evals, norm_fn):
         ep_rewards.append(rewards)
         ep_costs.append(costs)
         ep_lens.append(lens)
-    return np.mean(ep_rewards), np.mean(ep_costs), np.mean(ep_lens)
+        ep_pred_costs.append(pred_cost)
+    return (
+        np.mean(ep_rewards),
+        np.mean(ep_costs),
+        np.mean(ep_lens),
+        np.mean(ep_pred_costs),
+    )
 
 
 def save_csv(steps, values, path):
@@ -161,13 +187,25 @@ def main(args):
         state_dict = joblib.load(state_path, mmap_mode="r")
         mu_obs, std_obs = state_dict["mu_obs"], state_dict["std_obs"]
 
+    cost_model = None
+    cost_model_path = osp.join(path, args.add_cost_pred)
+    to_add_cost_pred = osp.exists(cost_model_path)
+    if to_add_cost_pred:
+        cost_model = load_cost_model(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            hidden_size=config["hidden_size"],
+            path=cost_model_path,
+            device=device,
+        )
+
     ids = sorted(
         [
             int(re.search(r"bc_policy_model_([0-9]+).pt", f).group(1))
             for f in bc_model_files
         ]
     )
-    reward_values, cost_values, length_values = [], [], []
+    reward_values, cost_values, length_values, pred_cost_values = [], [], [], []
     for id in ids:
         bc_policy = load_model(
             obs_dim=obs_space.shape[0],
@@ -176,12 +214,13 @@ def main(args):
             path=osp.join(path, f"bc_policy_model_{id}.pt"),
             device=device,
         )
-        total_time, reward, cost, length = evaluate(
+        total_time, reward, cost, length, pred_cost = evaluate(
             eval_env=eval_env,
             bc_policy=bc_policy,
             device=device,
             num_evals=args.num_evals,
             norm_fn=partial(normalize, mu_obs, std_obs),
+            cost_model=cost_model,
         )
         print(
             f"task: {args.task}, seed: {args.seed}, id: {id}, time: {total_time:.2f}sec"
@@ -189,6 +228,7 @@ def main(args):
         reward_values.append(reward)
         cost_values.append(cost)
         length_values.append(length)
+        pred_cost_values.append(pred_cost)
 
     log_dir = args.log_dir
     if log_dir is None:
@@ -208,6 +248,12 @@ def main(args):
         length_values,
         osp.join(log_dir, f"ep_length_{args.num_evals}_{args.seed}.csv"),
     )
+    if to_add_cost_pred:
+        save_csv(
+            ids,
+            pred_cost_values,
+            osp.join(log_dir, f"ep_pred_cost_{args.num_evals}_{args.seed}.csv"),
+        )
 
 
 if __name__ == "__main__":
