@@ -31,6 +31,7 @@ from dsrl_model.utils.models import (
     Encoder,
     EnsembleValue,
     ExpCostModel,
+    SafeAttentionCritic,
     SafeDiceTanhMixtureActor,
     TdmpcCostModel,
     TdmpcDynamics,
@@ -108,9 +109,7 @@ def evaluate_bc_policy(eval_env, policy, cost_model, device, norm_fn):
             norm_fn(next_obs), dtype=torch.float32, device=device
         ).unsqueeze(0)
         with torch.no_grad():
-            pred_cost = cost_model(
-                torch.cat([eval_obs, act], dim=1), use_sigmoid=True
-            ).item()
+            pred_cost = cost_model(torch.cat([eval_obs, act], dim=1), True).item()
         eval_obs = next_obs
         eval_reward += reward
         eval_cost += cost
@@ -161,20 +160,24 @@ def cost_loss_fn(
 ):
     gamma = config["gamma"]
     horizon = target_neg_acts.shape[0]
-    discount, total_neg_pref, total_union_pref = 1.0, 0.0, 0.0
     device = target_neg_os.device
+    tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
+    tu = torch.cat([target_union_os, target_union_acts], dim=-1)
 
-    for t in range(horizon):
-        tno, tuo = target_neg_os[t], target_union_os[t]
-        tna, tua = target_neg_acts[t], target_union_acts[t]
-        tn, tu = torch.cat([tno, tna], dim=1), torch.cat([tuo, tua], dim=1)
-        total_neg_pref += discount * cost_model(tn, use_sigmoid=True)
-        total_union_pref += discount * cost_model(tu, use_sigmoid=True)
-        discount *= gamma
+    if config["use_cost_attention"]:
+        p_neg = cost_model(tn, use_sigmoid=True)
+        p_union = cost_model(tu, use_sigmoid=True)
+    else:
+        discount, total_neg_pref, total_union_pref = 1.0, 0.0, 0.0
+        for t in range(horizon):
+            total_neg_pref += discount * cost_model(tn[t], use_sigmoid=True)
+            total_union_pref += discount * cost_model(tu[t], use_sigmoid=True)
+            discount *= gamma
 
-    exp_neg, exp_union = torch.exp(total_neg_pref), torch.exp(total_union_pref)
-    sum_exp = exp_neg + exp_union
-    p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
+        exp_neg, exp_union = torch.exp(total_neg_pref), torch.exp(total_union_pref)
+        sum_exp = exp_neg + exp_union
+        p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
+
     target_zeros = torch.zeros_like(p_union, device=device)
     target_ones = torch.ones_like(p_neg, device=device)
     loss = F.binary_cross_entropy(p_union, target_zeros)
@@ -184,21 +187,37 @@ def cost_loss_fn(
 
 
 @torch.no_grad
+def get_cost(cost_model, obs, acts, config):
+    horizon = obs.shape[0]
+
+    oa = torch.cat([obs, acts], dim=-1)
+    cost = cost_model(oa, use_sigmoid=True)
+    if config["use_cost_attention"]:
+        # for attention based cost size is: #batch
+        # convert to size: horizon x batch
+        cost = (
+            cost.unsqueeze(1)
+            .repeat(1, horizon)
+            .permute(1, 0)
+            .contiguous()
+            .view(horizon, -1)
+        )
+
+    return cost
+
+
+@torch.no_grad
 def calculate_target_value(
-    cost_model,
     value,
     bc_policy,
-    target_os,
-    target_acts,
     target_next_os,
     target_done,
+    target_cost,
     gamma,
 ):
-    o, a, o_next = target_os, target_acts, target_next_os
-    c = cost_model(torch.cat([o, a], dim=1), use_sigmoid=True)
-    policy_a = bc_policy.sample_action(o_next)
-    v_next = torch.max(*value.V(torch.cat([o_next, policy_a], dim=1)))
-    value_c = c + gamma * (1 - target_done) * v_next
+    policy_a = bc_policy.sample_action(target_next_os)
+    v_next = torch.max(*value.V(torch.cat([target_next_os, policy_a], dim=1)))
+    value_c = target_cost + gamma * (1 - target_done) * v_next
     return value_c
 
 
@@ -225,20 +244,22 @@ def value_loss_fn(
     gamma = config["gamma"]
 
     horizon, batch_size, _ = target_os.shape
+
+    target_cost = get_cost(cost_model, target_os, target_acts, config)
+
     # Horizon_Batch X obs/act_dim
     target_os = target_os.view(horizon * batch_size, -1)
     target_acts = target_acts.view(horizon * batch_size, -1)
     target_next_os = target_next_os.view(horizon * batch_size, -1)
     target_done = target_done.view(horizon * batch_size)
+    target_cost = target_cost.view(horizon * batch_size)
 
     target_value = calculate_target_value(
-        cost_model=cost_model,
         value=value_target,
         bc_policy=bc_policy,
-        target_os=target_os,
-        target_acts=target_acts,
         target_next_os=target_next_os,
         target_done=target_done,
+        target_cost=target_cost,
         gamma=gamma,
     )
 
@@ -324,6 +345,7 @@ def main(args, cfg_env=None):
     config["update_priority_buffer"] = args.update_priority_buffer
     config["normalize_observation"] = args.normalize_observation
     config["cost_model_path"] = args.cost_model_path
+    config["use_cost_attention"] = args.use_cost_attention
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -366,14 +388,25 @@ def main(args, cfg_env=None):
         end_factor=0.0,
         total_iters=config["total_iteration"],
     )
-    cost_model = ExpCostModel(
-        # (s,a)
-        obs_dim=obs_space.shape[0] + act_space.shape[0],
-        hidden_sizes=config["hidden_sizes"],
-    ).to(device)
+
+    if config["use_cost_attention"]:
+        cost_model = SafeAttentionCritic(
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            horizon=config["train_horizon"],
+            latent_dim=config["hidden_sizes"][0],
+            num_attentions=2,
+        ).to(device)
+    else:
+        cost_model = ExpCostModel(
+            # (s,a)
+            obs_dim=obs_space.shape[0] + act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+        ).to(device)
     cost_optimizer = torch.optim.AdamW(
         cost_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
     )
+
     value_cost = EnsembleValue(
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
@@ -530,10 +563,14 @@ def main(args, cfg_env=None):
                 eval_episodes = config["eval_episode_freq"]
                 if args.use_eval:
                     eval_start_time = time.time()
-                    policy = (
+                    eval_policy = (
                         bc_policy.decode_bc
                         if config["policy_type"] == "vae"
                         else bc_policy.action
+                    )
+                    eval_cost_fn = lambda *_: torch.tensor(0.0)
+                    eval_cost_model = (
+                        eval_cost_fn if config["use_cost_attention"] else cost_model
                     )
                     for id in range(eval_episodes):
                         (
@@ -543,8 +580,8 @@ def main(args, cfg_env=None):
                             eval_len,
                         ) = evaluate_bc_policy(
                             eval_env=eval_env,
-                            policy=policy,
-                            cost_model=cost_model,
+                            policy=eval_policy,
+                            cost_model=eval_cost_model,
                             device=device,
                             norm_fn=partial(normalize_observation, mu_obs, std_obs),
                         )
@@ -610,11 +647,6 @@ def main(args, cfg_env=None):
                 )
                 logger.torch_save(
                     itr=steps,
-                    torch_saver_elements=cost_model,
-                    prefix="cost_model",
-                )
-                logger.torch_save(
-                    itr=steps,
                     torch_saver_elements=value_cost,
                     prefix="value_cost",
                 )
@@ -623,7 +655,6 @@ def main(args, cfg_env=None):
                 break
 
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
-    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model")
     logger.torch_save(itr=steps, torch_saver_elements=value_cost, prefix="value_cost")
     if config["normalize_observation"]:
         logger.save_state(

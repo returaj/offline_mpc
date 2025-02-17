@@ -683,6 +683,37 @@ def positionalencoding1d(d_model, length):
     return pe
 
 
+class SafeAttentionCritic(nn.Module):
+    def __init__(
+        self, obs_dim, act_dim, horizon, latent_dim=256, num_heads=4, num_attentions=1
+    ):
+        super().__init__()
+        self.encoder = nn.Linear(obs_dim + act_dim, latent_dim)
+        self.pos_encoding = positionalencoding1d(latent_dim, horizon)
+        self.mask = torch.triu(
+            torch.ones(horizon, horizon, dtype=torch.bool), diagonal=1
+        )
+        self.attentions = [
+            MultiHeadAttention(latent_dim, num_heads) for _ in range(num_attentions)
+        ]
+        self.cost_pred = nn.Linear(latent_dim, 1)
+
+    def forward(self, x, use_sigmoid=True):  # shape x: horizon X batch X obs_act_dim
+        batch_size = x.shape[1]
+        # reshape x to: batch X horizon X obs_act_dim
+        x = x.permute(1, 0, 2)
+        x = self.encoder(x)
+        x += self.pos_encoding
+        mask = self.mask.unsqueeze(0).repeat(batch_size, 1, 1)
+        for attn in self.attentions:
+            x, _ = attn(x, x, x, mask)
+        x = x[:, -1, :]
+        c = torch.squeeze(self.cost_pred(x), -1)
+        if use_sigmoid:
+            return torch.sigmoid(c)
+        return c, x
+
+
 class SafeDiceCritic(nn.Module):
     def __init__(
         self,

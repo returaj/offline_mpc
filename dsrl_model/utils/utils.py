@@ -192,6 +192,12 @@ def single_agent_args():
             "default": "loss_1_bce",  # loss_1, loss_2
             "help": "safemil loss function type",
         },
+        {
+            "name": "--use-cost-attention",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use attention based cost model and pred trajectory cost",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
