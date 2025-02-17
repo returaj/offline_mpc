@@ -685,11 +685,18 @@ def positionalencoding1d(d_model, length):
 
 class SafeAttentionCritic(nn.Module):
     def __init__(
-        self, obs_dim, act_dim, horizon, latent_dim=256, num_heads=4, num_attentions=1
+        self,
+        obs_dim,
+        act_dim,
+        horizon,
+        device,
+        latent_dim=256,
+        num_heads=4,
+        num_attentions=1,
     ):
         super().__init__()
         self.encoder = nn.Linear(obs_dim + act_dim, latent_dim)
-        self.pos_encoding = positionalencoding1d(latent_dim, horizon)
+        self.pos_encoding = positionalencoding1d(latent_dim, horizon).to(device)
         self.mask = torch.triu(
             torch.ones(horizon, horizon, dtype=torch.bool), diagonal=1
         )

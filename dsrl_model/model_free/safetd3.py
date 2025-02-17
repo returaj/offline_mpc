@@ -396,6 +396,7 @@ def main(args, cfg_env=None):
             horizon=config["train_horizon"],
             latent_dim=config["hidden_sizes"][0],
             num_attentions=2,
+            device=device,
         ).to(device)
     else:
         cost_model = ExpCostModel(
