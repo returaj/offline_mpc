@@ -698,8 +698,9 @@ class SafeAttentionCritic(nn.Module):
         self.encoder = nn.Linear(obs_dim + act_dim, latent_dim)
         self.pos_encoding = positionalencoding1d(latent_dim, horizon).to(device)
         self.mask = torch.triu(
-            torch.ones(horizon, horizon, dtype=torch.bool), diagonal=1
-        )
+            torch.ones(horizon, horizon, dtype=torch.bool),
+            diagonal=1,
+        ).to(device)
         self.attentions = nn.ModuleList(
             [MultiHeadAttention(latent_dim, num_heads) for _ in range(num_attentions)]
         )
