@@ -31,8 +31,8 @@ from dsrl_model.utils.models import (
     Encoder,
     EnsembleValue,
     ExpCostModel,
-    SafeAttentionCritic,
     SafeDiceTanhMixtureActor,
+    SafeTransformerCritic,
     TdmpcCostModel,
     TdmpcDynamics,
 )
@@ -390,12 +390,12 @@ def main(args, cfg_env=None):
     )
 
     if config["use_cost_attention"]:
-        cost_model = SafeAttentionCritic(
+        cost_model = SafeTransformerCritic(
             obs_dim=obs_space.shape[0],
             act_dim=act_space.shape[0],
             horizon=config["train_horizon"],
             latent_dim=config["hidden_sizes"][0],
-            num_attentions=2,
+            num_attentions=1,
             device=device,
         ).to(device)
     else:

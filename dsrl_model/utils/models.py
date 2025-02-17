@@ -683,7 +683,27 @@ def positionalencoding1d(d_model, length):
     return pe
 
 
-class SafeAttentionCritic(nn.Module):
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, d_model, d_ff, num_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, num_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff), nn.ReLU(), nn.Linear(d_ff, d_model)
+        )
+
+    def forward(self, x, mask=None):  # x shape: horizon x batch x d_model
+        x_norm = self.ln1(x)
+        attn_x, _ = self.attn(x_norm, x_norm, x_norm, attn_mask=mask)
+        # residual connection
+        x = x + attn_x
+        # residual connection
+        x = x + self.ff(self.ln2(x))
+        return x
+
+
+class SafeTransformerCritic(nn.Module):
     def __init__(
         self,
         obs_dim,
@@ -696,26 +716,26 @@ class SafeAttentionCritic(nn.Module):
     ):
         super().__init__()
         self.encoder = nn.Linear(obs_dim + act_dim, latent_dim)
-        self.pos_encoding = positionalencoding1d(latent_dim, horizon).to(device)
+        self.pos_encoding = positionalencoding1d(latent_dim, horizon)
+        self.pos_encoding = self.pos_encoding.unsqueeze(1).to(device)
         self.mask = torch.triu(
-            torch.ones(horizon, horizon, dtype=torch.bool),
-            diagonal=1,
-        ).to(device)
-        self.attentions = nn.ModuleList(
-            [MultiHeadAttention(latent_dim, num_heads) for _ in range(num_attentions)]
+            torch.ones(horizon, horizon, dtype=torch.bool, device=device), diagonal=1
+        )
+        d_ff = 4 * latent_dim
+        self.transformers = nn.ModuleList(
+            [
+                TransformerEncoderBlock(latent_dim, d_ff, num_heads)
+                for _ in range(num_attentions)
+            ]
         )
         self.cost_pred = nn.Linear(latent_dim, 1)
 
     def forward(self, x, use_sigmoid=True):  # shape x: horizon X batch X obs_act_dim
-        batch_size = x.shape[1]
-        # reshape x to: batch X horizon X obs_act_dim
-        x = x.permute(1, 0, 2)
         x = self.encoder(x)
         x += self.pos_encoding
-        mask = self.mask.unsqueeze(0).repeat(batch_size, 1, 1)
-        for attn in self.attentions:
-            x, _ = attn(x, x, x, mask)
-        x = x[:, -1, :]
+        for attn in self.transformers:
+            x = attn(x, self.mask)
+        x = x[-1]
         c = torch.squeeze(self.cost_pred(x), -1)
         if use_sigmoid:
             return torch.sigmoid(c)
