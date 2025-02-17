@@ -700,9 +700,9 @@ class SafeAttentionCritic(nn.Module):
         self.mask = torch.triu(
             torch.ones(horizon, horizon, dtype=torch.bool), diagonal=1
         )
-        self.attentions = [
-            MultiHeadAttention(latent_dim, num_heads) for _ in range(num_attentions)
-        ]
+        self.attentions = nn.ModuleList(
+            [MultiHeadAttention(latent_dim, num_heads) for _ in range(num_attentions)]
+        )
         self.cost_pred = nn.Linear(latent_dim, 1)
 
     def forward(self, x, use_sigmoid=True):  # shape x: horizon X batch X obs_act_dim
