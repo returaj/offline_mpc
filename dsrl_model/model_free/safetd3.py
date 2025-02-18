@@ -65,8 +65,6 @@ trajectory_cfg = {
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
     "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
     "num_negative_trajectories": 50,
-    "num_union_trajectories": 200,
-    "percentage_validation_trajectories": 0.2,
 }
 
 
@@ -291,7 +289,7 @@ def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
     steps = 0
     start_time = time.time()
     loss, best_model = torch.inf, deepcopy(cost_model)
-    while steps < config["total_iteration"]:
+    while steps < 1e5:  # config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
             target_neg_os,

@@ -74,9 +74,9 @@ def get_neg_and_union_data_2(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
 
     num_neg_traj = config["num_negative_trajectories"]
-    num_union_traj = config["num_union_trajectories"]
 
-    neg_idx = np.where(traj_cost > 75.0)[0]
+    neg_traj_cost = np.max(traj_cost) * 0.7
+    neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
     union_idx = np.delete(np.arange(traj_cost.shape[0]), neg_idx[:num_neg_traj])
 
     keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
