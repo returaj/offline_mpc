@@ -338,6 +338,11 @@ def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
                 )
                 start_time = end_time
 
+            if (steps % config["save_freq"]) == 0:
+                logger.torch_save(
+                    itr=steps, torch_saver_elements=cost_model, prefix="cost"
+                )
+
             if steps >= config["total_iteration"]:
                 break
     return best_model
@@ -511,7 +516,7 @@ def main(args, cfg_env=None):
             logger=logger,
             config=config,
         )
-        logger.torch_save(itr=0, torch_saver_elements=cost_model, prefix="cost_model")
+        logger.torch_save(itr=0, torch_saver_elements=cost_model, prefix="best_cost")
 
     # train value and policy model
     logger.log("Start with bc_policy, value training.")
