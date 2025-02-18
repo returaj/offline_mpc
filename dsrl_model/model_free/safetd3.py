@@ -42,7 +42,7 @@ from dsrl_model.utils.utils import ActionRepeater, get_params_norm, single_agent
 EP = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e3),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
@@ -53,10 +53,12 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "update_freq": 2,
     "update_tau": 0.005,
+    "gap_regularizer": 1000,
+    "cost_pred_gap": 0.005,
     "value_weight_temp": 2.5,  # TD3-BC coef
     "train_horizon": 5,  # 5
     "weight_decay": 0.01,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e4),
 }
 
 trajectory_cfg = {
@@ -150,6 +152,14 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     return torch.mean(loss), torch.mean(q)
 
 
+def gap_based_regularizer(pred_cost, gap):
+    num_pair = 2
+    batch = pred_cost.shape[0] // num_pair
+    cost_pair = pred_cost[: batch * num_pair].view(num_pair, batch)
+    diff = torch.abs(cost_pair[0] - cost_pair[1])
+    return torch.sum(diff[diff < gap])
+
+
 def cost_loss_fn(
     cost_model,
     target_neg_os,
@@ -182,6 +192,10 @@ def cost_loss_fn(
     target_ones = torch.ones_like(p_neg, device=device)
     loss = F.binary_cross_entropy(p_union, target_zeros)
     loss += F.binary_cross_entropy(p_neg, target_ones)
+
+    loss += config["gap_regularizer"] * gap_based_regularizer(
+        p_union, config["cost_pred_gap"]
+    )
 
     return torch.mean(loss)
 
