@@ -71,10 +71,16 @@ def create_arguments():
             "help": "number of evaluations",
         },
         {
-            "name": "--add-cost-pred",
+            "name": "--cost-model-path",
             "type": str,
             "default": "cost_model_model_0.pt",
             "help": "cost model file name to add if it exists",
+        },
+        {
+            "name": "--add-predicted-cost",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "whether to add predicted cost information",
         },
     ]
     parser = argparse.ArgumentParser(description="RL Policy")
@@ -188,8 +194,8 @@ def main(args):
         mu_obs, std_obs = state_dict["mu_obs"], state_dict["std_obs"]
 
     cost_model = None
-    cost_model_path = osp.join(path, args.add_cost_pred)
-    to_add_cost_pred = osp.exists(cost_model_path)
+    cost_model_path = osp.join(path, args.cost_model_path)
+    to_add_cost_pred = args.add_predicted_cost and osp.exists(cost_model_path)
     if to_add_cost_pred:
         cost_model = load_cost_model(
             obs_dim=obs_space.shape[0],
