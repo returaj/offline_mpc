@@ -46,12 +46,13 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
-    "max_grad_norm": 10.0,
-    "max_grad_norm_critic": 0.5,
+    "max_grad_norm_cost": 1.0,
+    "max_grad_norm_critic": 1.0,
     "max_grad_norm_bc": 1.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "update_freq": 2,
+    "update_bc_freq": 2,
+    "update_cost_freq": 10,
     "update_tau": 0.005,
     "value_weight_temp": 2.5,  # TD3-BC coef
     "train_horizon": 5,  # 5
@@ -155,7 +156,6 @@ def cost_loss_fn(
     target_union_os,
     target_union_acts,
     config,
-    label_smoothing=0.5,
 ):
     gamma = config["gamma"]
     horizon = target_neg_acts.shape[0]
@@ -178,11 +178,7 @@ def cost_loss_fn(
         p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
 
     target_zeros = torch.zeros_like(p_union, device=device)
-    target_zeros = (
-        1 - label_smoothing
-    ) * target_zeros + label_smoothing * p_union.detach()
     target_ones = torch.ones_like(p_neg, device=device)
-    target_ones = (1 - label_smoothing) * target_ones + label_smoothing * p_neg.detach()
 
     loss = F.binary_cross_entropy(p_union, target_zeros)
     loss += F.binary_cross_entropy(p_neg, target_ones)
@@ -283,59 +279,99 @@ def value_loss_fn(
     return torch.mean(value_loss), priorities
 
 
-def pretrain_cost_model(cost_model, cost_optimizer, buffer, logger, config):
+def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
     # train cost model
-    logger.log("Start with cost training.")
-    steps = 0
-    start_time = time.time()
-    loss, best_model = torch.inf, deepcopy(cost_model)
-    while steps < 1e5:  # config["total_iteration"]:
-        # shape: Horizon X Batch X obs/act_dim
-        for (
-            target_neg_os,
-            target_neg_acts,
-            target_union_os,
-            target_union_acts,
-            _,
-            _,
-            _,
-        ) in buffer.sample():
+    (
+        target_neg_os,
+        target_neg_acts,
+        target_union_os,
+        target_union_acts,
+        _,
+        _,
+        _,
+    ) = buffer_sample
 
-            steps += 1
+    cost_loss = torch.tensor(0.0)
+    if (steps % config["update_cost_freq"]) == 0:
+        cost_optimizer.zero_grad()
+        cost_loss = cost_loss_fn(
+            cost_model=cost_model,
+            target_neg_os=target_neg_os,
+            target_neg_acts=target_neg_acts,
+            target_union_os=target_union_os,
+            target_union_acts=target_union_acts,
+            config=config,
+        )
+        cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+        cost_loss.backward()
+        clip_grad_norm_(cost_model.parameters(), config["max_grad_norm_cost"])
+        cost_optimizer.step()
 
-            cost_optimizer.zero_grad()
-            cost_loss = cost_loss_fn(
-                cost_model=cost_model,
-                target_neg_os=target_neg_os,
-                target_neg_acts=target_neg_acts,
-                target_union_os=target_union_os,
-                target_union_acts=target_union_acts,
-                config=config,
-            )
-            cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            cost_loss.backward()
-            clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
-            cost_optimizer.step()
+    return cost_loss
 
-            if loss >= cost_loss:
-                ema(cost_model, best_model, tau=1.0)
-                loss = cost_loss
 
-            if (steps % config["log_freq"]) == 0:
-                end_time = time.time()
-                print(
-                    f"Time per log: {end_time - start_time:.2f} sec, cost_loss: {cost_loss.item():.4f}"
-                )
-                start_time = end_time
+def train_value_and_policy_model(
+    cost_model,
+    value_cost,
+    value_cost_target,
+    bc_policy,
+    bc_policy_target,
+    value_cost_optimizer,
+    bc_policy_optimizer,
+    bc_scheduler,
+    buffer_sample,
+    config,
+    steps,
+):
+    (
+        _,
+        _,
+        target_union_os,
+        target_union_acts,
+        target_union_next_os,
+        target_union_done,
+        _,
+    ) = buffer_sample
 
-            if (steps % config["save_freq"]) == 0:
-                logger.torch_save(
-                    itr=steps, torch_saver_elements=cost_model, prefix="cost"
-                )
+    value_cost_optimizer.zero_grad()
+    value_loss, priorities = value_loss_fn(
+        cost_model=cost_model,
+        bc_policy=bc_policy_target,
+        value=value_cost,
+        value_target=value_cost_target,
+        target_os=target_union_os,
+        target_acts=target_union_acts,
+        target_next_os=target_union_next_os,
+        target_done=target_union_done,
+        config=config,
+    )
+    value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+    value_loss.backward()
+    clip_grad_norm_(value_cost.parameters(), config["max_grad_norm_critic"])
+    value_cost_optimizer.step()
 
-            if steps >= config["total_iteration"]:
-                break
-    return best_model
+    bc_policy_loss = q_loss = torch.tensor(0.0)
+    if (steps % config["update_bc_freq"]) == 0:
+        # to ensure that when the value fn is used in policy loss
+        # then the value_cost parameters grad are zero initially.
+        value_cost.zero_grad()
+        bc_policy_optimizer.zero_grad()
+        bc_policy_loss, q_loss = bc_policy_loss_fn(
+            bc_policy=bc_policy,
+            value=value_cost,
+            target_os=target_union_os,
+            target_acts=target_union_acts,
+            config=config,
+        )
+        bc_policy_loss.backward()
+        clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm_bc"])
+        bc_policy_optimizer.step()
+        # bc_scheduler.step()
+
+        ema(value_cost, value_cost_target, config["update_tau"])
+        ema(bc_policy, bc_policy_target, config["update_tau"])
+
+    return value_loss, bc_policy_loss, q_loss, priorities
 
 
 def main(args, cfg_env=None):
@@ -395,7 +431,7 @@ def main(args, cfg_env=None):
         bc_policy_optimizer,
         start_factor=1.0,
         end_factor=0.0,
-        total_iters=config["total_iteration"],
+        total_iters=config["total_iteration"] // config["update_bc_freq"],
     )
 
     if config["use_cost_attention"]:
@@ -493,79 +529,43 @@ def main(args, cfg_env=None):
     )
     logger.save_config(dict_args)
 
-    if config["cost_model_path"] is not None:
-        logger.log("Loading cost model.")
-        cost_model = logger.torch_load(
-            model=cost_model, model_path=config["cost_model_path"], device=device
-        )
-    else:
-        cost_model = pretrain_cost_model(
-            cost_model=cost_model,
-            cost_optimizer=cost_optimizer,
-            buffer=buffer,
-            logger=logger,
-            config=config,
-        )
-        logger.torch_save(itr=0, torch_saver_elements=cost_model, prefix="best_cost")
-
-    # train value and policy model
-    logger.log("Start with bc_policy, value training.")
+    # train cost, value and policy model
+    logger.log("Start cost, value and bc_policy training.")
     steps = 0
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
-        for (
-            _,
-            _,
-            target_union_os,
-            target_union_acts,
-            target_union_next_os,
-            target_union_done,
-            target_union_idx,
-        ) in buffer.sample():
+        for buffer_sample in buffer.sample():
 
             steps += 1
 
-            value_cost_optimizer.zero_grad()
-            value_loss, priorities = value_loss_fn(
+            cost_loss = train_cost_model(
                 cost_model=cost_model,
-                bc_policy=bc_policy_target,
-                value=value_cost,
-                value_target=value_cost_target,
-                target_os=target_union_os,
-                target_acts=target_union_acts,
-                target_next_os=target_union_next_os,
-                target_done=target_union_done,
+                cost_optimizer=cost_optimizer,
+                buffer_sample=buffer_sample,
                 config=config,
+                steps=steps,
             )
-            value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
-            value_loss.backward()
-            clip_grad_norm_(value_cost.parameters(), config["max_grad_norm_critic"])
-            value_cost_optimizer.step()
+
+            value_loss, bc_policy_loss, q_loss, priorities = (
+                train_value_and_policy_model(
+                    cost_model=cost_model,
+                    value_cost=value_cost,
+                    value_cost_target=value_cost_target,
+                    value_cost_optimizer=value_cost_optimizer,
+                    bc_policy=bc_policy,
+                    bc_policy_target=bc_policy_target,
+                    bc_policy_optimizer=bc_policy_optimizer,
+                    bc_scheduler=bc_scheduler,
+                    buffer_sample=buffer_sample,
+                    config=config,
+                    steps=steps,
+                )
+            )
 
             if config["update_priority_buffer"]:
                 buffer.update_priorities(
-                    target_union_idx, priorities.clamp(max=1e4).detach()
+                    buffer_sample[-1], priorities.clamp(max=1e4).detach()
                 )
-
-            if (steps % config["update_freq"]) == 0:
-                # to ensure that when the value fn is used in policy loss
-                # then the value_cost parameters grad are zero initially.
-                value_cost.zero_grad()
-                bc_policy_optimizer.zero_grad()
-                bc_policy_loss, q_loss = bc_policy_loss_fn(
-                    bc_policy=bc_policy,
-                    value=value_cost,
-                    target_os=target_union_os,
-                    target_acts=target_union_acts,
-                    config=config,
-                )
-                bc_policy_loss.backward()
-                clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm_bc"])
-                bc_policy_optimizer.step()
-                # bc_scheduler.step()
-
-                ema(value_cost, value_cost_target, config["update_tau"])
-                ema(bc_policy, bc_policy_target, config["update_tau"])
 
             logger.logged = False
 
@@ -622,20 +622,25 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.mean().item())
+                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
                 logger.log_tabular("Loss/Loss_value_cost", value_loss.mean().item())
                 logger.log_tabular("Loss/bc_q_value", q_loss.mean().item())
 
+                logger.log_tabular(
+                    "Norm/cost",
+                    get_params_norm(cost_model.parameters(), grads=False),
+                )
                 logger.log_tabular(
                     "Norm/bc_policy",
                     get_params_norm(bc_policy.parameters(), grads=False),
                 )
                 logger.log_tabular(
-                    "Norm/cost_model",
-                    get_params_norm(cost_model.parameters(), grads=False),
-                )
-                logger.log_tabular(
                     "Norm/value_cost",
                     get_params_norm(value_cost.parameters(), grads=False),
+                )
+                logger.log_tabular(
+                    "Norm/grads/cost",
+                    get_params_norm(cost_model.parameters(), grads=True),
                 )
                 logger.log_tabular(
                     "Norm/grads/bc_policy",
@@ -657,6 +662,11 @@ def main(args, cfg_env=None):
                 )
                 logger.torch_save(
                     itr=steps,
+                    torch_saver_elements=cost_model,
+                    prefix="cost",
+                )
+                logger.torch_save(
+                    itr=steps,
                     torch_saver_elements=value_cost,
                     prefix="value_cost",
                 )
@@ -665,6 +675,7 @@ def main(args, cfg_env=None):
                 break
 
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost")
     logger.torch_save(itr=steps, torch_saver_elements=value_cost, prefix="value_cost")
     if config["normalize_observation"]:
         logger.save_state(
