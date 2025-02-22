@@ -156,6 +156,7 @@ def cost_loss_fn(
     target_union_os,
     target_union_acts,
     config,
+    bootstrap_lambda=0.5,
 ):
     gamma = config["gamma"]
     horizon = target_neg_acts.shape[0]
@@ -177,11 +178,11 @@ def cost_loss_fn(
         sum_exp = exp_neg + exp_union
         p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
 
-    target_zeros = torch.zeros_like(p_union, device=device)
-    target_ones = torch.ones_like(p_neg, device=device)
+    target_union = bootstrap_lambda * p_union.detach()
+    target_neg = torch.ones_like(p_neg, device=device)
 
-    loss = F.binary_cross_entropy(p_union, target_zeros)
-    loss += F.binary_cross_entropy(p_neg, target_ones)
+    loss = F.binary_cross_entropy(p_union, target_union)
+    loss += F.binary_cross_entropy(p_neg, target_neg)
 
     return torch.mean(loss)
 
