@@ -444,7 +444,7 @@ def main(args, cfg_env=None):
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=reward_model,
-                    prefix="reward_model",
+                    prefix="reward",
                 )
 
             if steps >= config["total_iteration"]:
@@ -452,7 +452,7 @@ def main(args, cfg_env=None):
 
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
     logger.torch_save(
-        itr=steps, torch_saver_elements=reward_model, prefix="reward_model"
+        itr=steps, torch_saver_elements=reward_model, prefix="reward"
     )
     logger.close()
 

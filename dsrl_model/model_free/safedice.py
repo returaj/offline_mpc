@@ -535,21 +535,21 @@ def main(args, cfg_env=None):
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=cost_model,
-                    prefix="cost_model",
+                    prefix="cost",
                 )
                 logger.torch_save(
                     itr=steps,
                     torch_saver_elements=critic_model,
-                    prefix="critic_model",
+                    prefix="critic",
                 )
 
             if steps >= config["total_iteration"]:
                 break
 
     logger.torch_save(itr=steps, torch_saver_elements=actor, prefix="bc_policy")
-    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost_model")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost")
     logger.torch_save(
-        itr=steps, torch_saver_elements=critic_model, prefix="critic_model"
+        itr=steps, torch_saver_elements=critic_model, prefix="critic"
     )
     logger.close()
 
