@@ -198,6 +198,12 @@ def single_agent_args():
             "default": False,
             "help": "use attention based cost model and pred trajectory cost",
         },
+        {
+            "name": "--use-td3-style-bc",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use td3 style policy learning, i.e. add bc plus value term",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

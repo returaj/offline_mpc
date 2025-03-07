@@ -143,10 +143,17 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
         recon_loss = F.mse_loss(pred_acts, target_acts, reduction="none").sum(dim=1)
         loss += recon_loss
 
-    q = torch.max(*value.V(torch.cat([target_os, pred_acts], dim=1)))
-    qlambda = (alpha / (torch.mean(torch.abs(q)) + EP)).detach()
-    loss += qlambda * q
-    return torch.mean(loss), torch.mean(q)
+    v = torch.max(*value.V(torch.cat([target_os, pred_acts], dim=1)))
+    q = torch.max(*value.V(torch.cat([target_os, target_acts], dim=1)))
+
+    if config["use_td3_style_bc"]:
+        qlambda = (alpha / (torch.mean(torch.abs(v)) + EP)).detach()
+        loss += qlambda * v
+    else:
+        weight = torch.exp(-(q - v) / alpha).detach()
+        weight /= torch.mean(weight) + EP
+        loss = weight * loss
+    return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
 
 def cost_loss_fn(
@@ -351,13 +358,13 @@ def train_value_and_policy_model(
     clip_grad_norm_(value_cost.parameters(), config["max_grad_norm_critic"])
     value_cost_optimizer.step()
 
-    bc_policy_loss = q_loss = torch.tensor(0.0)
+    bc_policy_loss = q_loss = v_loss = torch.tensor(0.0)
     if (steps % config["update_bc_freq"]) == 0:
         # to ensure that when the value fn is used in policy loss
         # then the value_cost parameters grad are zero initially.
         value_cost.zero_grad()
         bc_policy_optimizer.zero_grad()
-        bc_policy_loss, q_loss = bc_policy_loss_fn(
+        bc_policy_loss, q_loss, v_loss = bc_policy_loss_fn(
             bc_policy=bc_policy,
             value=value_cost,
             target_os=target_union_os,
@@ -372,7 +379,7 @@ def train_value_and_policy_model(
         ema(value_cost, value_cost_target, config["update_tau"])
         ema(bc_policy, bc_policy_target, config["update_tau"])
 
-    return value_loss, bc_policy_loss, q_loss, priorities
+    return value_loss, bc_policy_loss, q_loss, v_loss, priorities
 
 
 def main(args, cfg_env=None):
@@ -392,6 +399,7 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["cost_model_path"] = args.cost_model_path
     config["use_cost_attention"] = args.use_cost_attention
+    config["use_td3_style_bc"] = args.use_td3_style_bc
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -547,7 +555,7 @@ def main(args, cfg_env=None):
                 steps=steps,
             )
 
-            value_loss, bc_policy_loss, q_loss, priorities = (
+            value_loss, bc_policy_loss, q_loss, v_loss, priorities = (
                 train_value_and_policy_model(
                     cost_model=cost_model,
                     value_cost=value_cost,
@@ -626,6 +634,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
                 logger.log_tabular("Loss/Loss_value_cost", value_loss.mean().item())
                 logger.log_tabular("Loss/bc_q_value", q_loss.mean().item())
+                logger.log_tabular("Loss/bc_v_value", v_loss.mean().item())
 
                 logger.log_tabular(
                     "Norm/cost",
@@ -639,18 +648,18 @@ def main(args, cfg_env=None):
                     "Norm/value_cost",
                     get_params_norm(value_cost.parameters(), grads=False),
                 )
-                logger.log_tabular(
-                    "Norm/grads/cost",
-                    get_params_norm(cost_model.parameters(), grads=True),
-                )
-                logger.log_tabular(
-                    "Norm/grads/bc_policy",
-                    get_params_norm(bc_policy.parameters(), grads=True),
-                )
-                logger.log_tabular(
-                    "Norm/grads/value_cost",
-                    get_params_norm(value_cost.parameters(), grads=True),
-                )
+                # logger.log_tabular(
+                #     "Norm/grads/cost",
+                #     get_params_norm(cost_model.parameters(), grads=True),
+                # )
+                # logger.log_tabular(
+                #     "Norm/grads/bc_policy",
+                #     get_params_norm(bc_policy.parameters(), grads=True),
+                # )
+                # logger.log_tabular(
+                #     "Norm/grads/value_cost",
+                #     get_params_norm(value_cost.parameters(), grads=True),
+                # )
                 if args.use_eval:
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
                 logger.dump_tabular()
