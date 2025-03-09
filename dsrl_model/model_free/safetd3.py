@@ -150,8 +150,12 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
         qlambda = (alpha / (torch.mean(torch.abs(v)) + EP)).detach()
         loss += qlambda * v
     else:
-        weight = torch.exp(-(q - v) / alpha).detach()
-        weight /= torch.mean(weight) + EP
+        # weight = torch.exp(-(q - v) / alpha).detach()
+        # weight /= torch.mean(weight) + EP
+        # the following lines calculate the same as above
+        neg_adv = (-(q - v) / alpha).detach()
+        z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
+        weight = torch.exp(neg_adv - z)
         loss = weight * loss
     return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
