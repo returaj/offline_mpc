@@ -127,7 +127,7 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     target_os = target_os.view(horizon * batch_size, -1)
     target_acts = target_acts.view(horizon * batch_size, -1)
 
-    loss = 0.0
+    bc_loss = 0.0
 
     pred_acts = None
     if config["policy_type"] == "vae":
@@ -137,18 +137,18 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
             1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
         ).sum(dim=1)
         # 0.5 weight is from BCQ implementation See @aviralkumar implementation
-        loss += recon_loss + 0.5 * kl_loss
+        bc_loss = recon_loss + 0.5 * kl_loss
     else:
         pred_acts, *_ = bc_policy(target_os)
         recon_loss = F.mse_loss(pred_acts, target_acts, reduction="none").sum(dim=1)
-        loss += recon_loss
+        bc_loss = recon_loss
 
     v = torch.max(*value.V(torch.cat([target_os, pred_acts], dim=1)))
     q = torch.max(*value.V(torch.cat([target_os, target_acts], dim=1)))
 
     if config["use_td3_style_bc"]:
-        qlambda = (alpha / (torch.mean(torch.abs(v)) + EP)).detach()
-        loss += qlambda * v
+        qlambda = (alpha * bc_loss.mean() / (torch.mean(torch.abs(v)) + EP)).detach()
+        loss = bc_loss + qlambda * v
     else:
         # weight = torch.exp(-(q - v) / alpha).detach()
         # weight /= torch.mean(weight) + EP
@@ -156,7 +156,7 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
         neg_adv = (-(q - v) / alpha).detach()
         z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
         weight = torch.exp(neg_adv - z)
-        loss = weight * loss
+        loss = weight * bc_loss
     return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
 
@@ -306,6 +306,8 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
     cost_loss = torch.tensor(0.0)
     if (steps % config["update_cost_freq"]) == 0:
         cost_optimizer.zero_grad()
+        bootstrap_lambda = (3 * 0.5 / config["total_iteration"]) * steps
+        bootstrap_lambda = min(0.5, bootstrap_lambda)
         cost_loss = cost_loss_fn(
             cost_model=cost_model,
             target_neg_os=target_neg_os,
@@ -313,6 +315,7 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
             target_union_os=target_union_os,
             target_union_acts=target_union_acts,
             config=config,
+            bootstrap_lambda=bootstrap_lambda,
         )
         cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
         cost_loss.backward()
