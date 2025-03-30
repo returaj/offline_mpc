@@ -409,6 +409,21 @@ def orthogonal_init(m):
             nn.init.zeros_(m.bias)
 
 
+class ContrastiveCostModel(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        sizes = [obs_dim] + hidden_sizes + [128]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            layers += [affine_layer, act]
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, obs):
+        return self.model(obs)
+
+
 class ExpCostModel(nn.Module):
     def __init__(self, obs_dim, hidden_sizes=[64, 64]):
         super().__init__()

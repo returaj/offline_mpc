@@ -28,6 +28,7 @@ from dsrl_model.utils.dsrl_dataset import (
 from dsrl_model.utils.logger import EpochLogger
 from dsrl_model.utils.models import (
     BcqVAE,
+    ContrastiveCostModel,
     Encoder,
     EnsembleValue,
     ExpCostModel,
@@ -160,6 +161,61 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
 
+def compute_contrastive_ce_loss(p, q):
+    q = F.log_softmax(q, dim=1)
+    p = p / p.sum(dim=1, keepdim=True).clamp(min=1.0)
+    loss = torch.sum(p * q, dim=1)
+    return -torch.mean(loss)
+
+
+def cost_contrastive_loss_fn(
+    cost_model,
+    target_neg_os,
+    target_neg_acts,
+    target_union_os,
+    target_union_acts,
+    config,
+    bootstrap_lambda=0.5,
+):
+    del bootstrap_lambda, config
+
+    temperature = 0.07  # value from SupContrast
+    num_neg_extra_ones = 5
+
+    horizon, batch_size, _ = target_neg_acts.shape
+    device = target_neg_os.device
+
+    tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
+    tu = torch.cat([target_union_os, target_union_acts], dim=-1)
+    neg_zs, union_zs = cost_model(tn), cost_model(tu)
+
+    # horizon mask
+    horizon_mask = torch.ones((horizon, horizon), device=device, dtype=torch.float32)
+    mask = torch.eye(batch_size, device=device, dtype=torch.float32)
+    mask = torch.kron(mask, horizon_mask)
+
+    # loss for union_z
+    union_zs = torch.concat(torch.unbind(union_zs, dim=1), dim=0)  # HB x obs
+    union_logits = torch.matmul(union_zs, union_zs.T) / temperature
+    union_logits_max, _ = torch.max(union_logits, dim=1, keepdim=True)
+    union_logits = union_logits - union_logits_max.detach()
+    union_mask = mask
+    union_loss = compute_contrastive_ce_loss(union_mask, union_logits)
+
+    # loss for neg_z
+    neg_zs = torch.concat(torch.unbind(neg_zs, dim=1), dim=0)  # HB x obs
+    neg_logits = torch.matmul(neg_zs, neg_zs.T) / temperature
+    neg_logits_max, _ = torch.max(neg_logits, dim=1, keepdim=True)
+    neg_logits = neg_logits - neg_logits_max.detach()
+    neg_mask = mask
+    zeros_pos = (neg_mask == 0).to(torch.float32)
+    indx = torch.multinomial(zeros_pos, num_neg_extra_ones, replacement=False)
+    neg_mask = neg_mask.scatter(1, indx, 1)
+    neg_loss = compute_contrastive_ce_loss(neg_mask, neg_logits)
+
+    return neg_loss + union_loss
+
+
 def cost_loss_fn(
     cost_model,
     target_neg_os,
@@ -199,21 +255,35 @@ def cost_loss_fn(
 
 
 @torch.no_grad
-def get_cost(cost_model, obs, acts, config):
+def get_target_neg_z(cost_model, obs, acts, target_neg_z, config):
+    tau = config["update_tau"]
+    z = cost_model(torch.concat([obs, acts], dim=-1))
+    z = F.normalize(z.sum(dim=(0, 1), keepdim=True), dim=-1)
+    target_neg_z = (1 - tau) * target_neg_z + tau * z
+    return target_neg_z
+
+
+@torch.no_grad
+def get_cost(cost_model, obs, acts, target_neg_z, config):
     horizon = obs.shape[0]
 
     oa = torch.cat([obs, acts], dim=-1)
-    cost = cost_model(oa, use_sigmoid=True)
-    if config["use_cost_attention"]:
-        # for attention based cost size is: #batch
-        # convert to size: horizon x batch
-        cost = (
-            cost.unsqueeze(1)
-            .repeat(1, horizon)
-            .permute(1, 0)
-            .contiguous()
-            .view(horizon, -1)
-        )
+
+    if config["use_cost_contrastive"]:
+        z = cost_model(oa)
+        cost = (z * target_neg_z).sum(dim=-1)
+    else:
+        cost = cost_model(oa, use_sigmoid=True)
+        if config["use_cost_attention"]:
+            # for attention based cost size is: #batch
+            # convert to size: horizon x batch
+            cost = (
+                cost.unsqueeze(1)
+                .repeat(1, horizon)
+                .permute(1, 0)
+                .contiguous()
+                .view(horizon, -1)
+            )
 
     return cost
 
@@ -243,7 +313,6 @@ def discounted_sum(gamma, matrix):
 
 
 def value_loss_fn(
-    cost_model,
     bc_policy,
     value,
     value_target,
@@ -251,13 +320,12 @@ def value_loss_fn(
     target_acts,
     target_next_os,
     target_done,
+    target_cost,
     config,
 ):
     gamma = config["gamma"]
 
     horizon, batch_size, _ = target_os.shape
-
-    target_cost = get_cost(cost_model, target_os, target_acts, config)
 
     # Horizon_Batch X obs/act_dim
     target_os = target_os.view(horizon * batch_size, -1)
@@ -292,6 +360,10 @@ def value_loss_fn(
 
 
 def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
+    cost_fn = (
+        cost_contrastive_loss_fn if config["use_cost_contrastive"] else cost_loss_fn
+    )
+
     # train cost model
     (
         target_neg_os,
@@ -308,7 +380,7 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
         cost_optimizer.zero_grad()
         bootstrap_lambda = (3 * 0.5 / config["total_iteration"]) * steps
         bootstrap_lambda = min(0.5, bootstrap_lambda)
-        cost_loss = cost_loss_fn(
+        cost_loss = cost_fn(
             cost_model=cost_model,
             target_neg_os=target_neg_os,
             target_neg_acts=target_neg_acts,
@@ -335,12 +407,13 @@ def train_value_and_policy_model(
     bc_policy_optimizer,
     bc_scheduler,
     buffer_sample,
+    target_neg_z,
     config,
     steps,
 ):
     (
-        _,
-        _,
+        target_neg_os,
+        target_neg_acts,
         target_union_os,
         target_union_acts,
         target_union_next_os,
@@ -348,9 +421,16 @@ def train_value_and_policy_model(
         _,
     ) = buffer_sample
 
+    if config["use_cost_contrastive"]:
+        target_neg_z = get_target_neg_z(
+            cost_model, target_neg_os, target_neg_acts, target_neg_z, config
+        )
+    target_cost = get_cost(
+        cost_model, target_union_os, target_union_acts, target_neg_z, config
+    )
+
     value_cost_optimizer.zero_grad()
     value_loss, priorities = value_loss_fn(
-        cost_model=cost_model,
         bc_policy=bc_policy_target,
         value=value_cost,
         value_target=value_cost_target,
@@ -358,6 +438,7 @@ def train_value_and_policy_model(
         target_acts=target_union_acts,
         target_next_os=target_union_next_os,
         target_done=target_union_done,
+        target_cost=target_cost,
         config=config,
     )
     value_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
@@ -386,7 +467,7 @@ def train_value_and_policy_model(
         ema(value_cost, value_cost_target, config["update_tau"])
         ema(bc_policy, bc_policy_target, config["update_tau"])
 
-    return value_loss, bc_policy_loss, q_loss, v_loss, priorities
+    return value_loss, bc_policy_loss, q_loss, v_loss, priorities, target_neg_z
 
 
 def main(args, cfg_env=None):
@@ -406,6 +487,7 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["cost_model_path"] = args.cost_model_path
     config["use_cost_attention"] = args.use_cost_attention
+    config["use_cost_contrastive"] = args.use_cost_contrastive
     config["use_td3_style_bc"] = args.use_td3_style_bc
 
     # evaluation environment
@@ -458,6 +540,11 @@ def main(args, cfg_env=None):
             latent_dim=config["hidden_sizes"][0],
             num_attentions=1,
             device=device,
+        ).to(device)
+    elif config["use_cost_contrastive"]:
+        cost_model = ContrastiveCostModel(
+            obs_dim=obs_space.shape[0] + act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
         ).to(device)
     else:
         cost_model = ExpCostModel(
@@ -548,6 +635,7 @@ def main(args, cfg_env=None):
     # train cost, value and policy model
     logger.log("Start cost, value and bc_policy training.")
     steps = 0
+    target_neg_z = torch.tensor(0.0)
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for buffer_sample in buffer.sample():
@@ -562,7 +650,7 @@ def main(args, cfg_env=None):
                 steps=steps,
             )
 
-            value_loss, bc_policy_loss, q_loss, v_loss, priorities = (
+            value_loss, bc_policy_loss, q_loss, v_loss, priorities, target_neg_z = (
                 train_value_and_policy_model(
                     cost_model=cost_model,
                     value_cost=value_cost,
@@ -573,6 +661,7 @@ def main(args, cfg_env=None):
                     bc_policy_optimizer=bc_policy_optimizer,
                     bc_scheduler=bc_scheduler,
                     buffer_sample=buffer_sample,
+                    target_neg_z=target_neg_z,
                     config=config,
                     steps=steps,
                 )
@@ -643,6 +732,8 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Loss/bc_q_value", q_loss.mean().item())
                 logger.log_tabular("Loss/bc_v_value", v_loss.mean().item())
 
+                logger.log_tabular("Norm/neg_z", target_neg_z.norm())
+
                 logger.log_tabular(
                     "Norm/cost",
                     get_params_norm(cost_model.parameters(), grads=False),
@@ -698,6 +789,8 @@ def main(args, cfg_env=None):
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
         )
+    if config["use_cost_contrastive"]:
+        logger.save_state(state_dict={"neg_z": target_neg_z.numpy()}, dirname="neg_z")
     logger.close()
 
 

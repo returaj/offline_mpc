@@ -199,6 +199,12 @@ def single_agent_args():
             "help": "use attention based cost model and pred trajectory cost",
         },
         {
+            "name": "--use-cost-contrastive",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use contrastive based cost learning same as SupContrast paper",
+        },
+        {
             "name": "--use-td3-style-bc",
             "type": lambda x: bool(strtobool(x)),
             "default": False,
