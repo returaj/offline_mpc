@@ -421,7 +421,7 @@ class ContrastiveCostModel(nn.Module):
         self.model = nn.Sequential(*layers)
 
     def forward(self, obs):
-        return self.model(obs)
+        return F.normalize(self.model(obs), dim=-1, p=2.0)
 
 
 class ExpCostModel(nn.Module):

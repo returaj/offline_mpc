@@ -179,7 +179,7 @@ def cost_contrastive_loss_fn(
 ):
     del bootstrap_lambda, config
 
-    temperature = 0.07  # value from SupContrast
+    temperature = 0.1  # value from SupContrast
     num_neg_extra_ones = 5
 
     horizon, batch_size, _ = target_neg_acts.shape
@@ -790,7 +790,9 @@ def main(args, cfg_env=None):
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
         )
     if config["use_cost_contrastive"]:
-        logger.save_state(state_dict={"neg_z": target_neg_z.numpy()}, dirname="neg_z")
+        logger.save_state(
+            state_dict={"neg_z": target_neg_z.cpu().numpy()}, dirname="neg_z"
+        )
     logger.close()
 
 
