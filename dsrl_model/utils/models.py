@@ -419,6 +419,7 @@ class ContrastiveCostModel(nn.Module):
             affine_layer = nn.Linear(sizes[j], sizes[j + 1])
             layers += [affine_layer, act]
         self.model = nn.Sequential(*layers)
+        self.apply(orthogonal_init)
 
     def forward(self, obs):
         return F.normalize(self.model(obs), dim=-1, p=2.0)

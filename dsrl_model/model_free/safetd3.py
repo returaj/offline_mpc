@@ -53,7 +53,7 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "update_bc_freq": 2,
-    "update_cost_freq": 10,
+    "update_cost_freq": 5,
     "update_tau": 0.005,
     "value_weight_temp": 2.5,  # TD3-BC coef
     "train_horizon": 5,  # 5
@@ -147,17 +147,19 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     v = torch.max(*value.V(torch.cat([target_os, pred_acts], dim=1)))
     q = torch.max(*value.V(torch.cat([target_os, target_acts], dim=1)))
 
+    # bc_lambda = torch.exp(-(q - v) / alpha).detach()
+    # bc_lambda /= torch.mean(weight) + EP
+    # the following lines calculate the same as above
+    neg_adv = (-(q - v) / 0.2).detach()
+    log_Z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
+    bc_lambda = torch.exp(neg_adv - log_Z)
+
     if config["use_td3_style_bc"]:
-        qlambda = (alpha * bc_loss.mean() / (torch.mean(torch.abs(v)) + EP)).detach()
-        loss = bc_loss + qlambda * v
+        # v_lambda = (alpha * bc_loss.mean() / (torch.mean(torch.abs(v)) + EP)).detach()
+        v_lambda = alpha
+        loss = bc_lambda * bc_loss + v_lambda * v
     else:
-        # weight = torch.exp(-(q - v) / alpha).detach()
-        # weight /= torch.mean(weight) + EP
-        # the following lines calculate the same as above
-        neg_adv = (-(q - v) / alpha).detach()
-        z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
-        weight = torch.exp(neg_adv - z)
-        loss = weight * bc_loss
+        loss = bc_lambda * bc_loss
     return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
 
@@ -179,11 +181,11 @@ def cost_contrastive_loss_fn(
 ):
     del bootstrap_lambda, config
 
-    temperature = 0.1  # value from SupContrast
-    num_neg_extra_ones = 5
-
     horizon, batch_size, _ = target_neg_acts.shape
     device = target_neg_os.device
+
+    temperature = 0.1  # value from SupContrast
+    num_neg_extra_ones = 10 * horizon
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
@@ -272,6 +274,7 @@ def get_cost(cost_model, obs, acts, target_neg_z, config):
     if config["use_cost_contrastive"]:
         z = cost_model(oa)
         cost = (z * target_neg_z).sum(dim=-1)
+        cost = (cost + 1) / 2  # scaled to (0,1)
     else:
         cost = cost_model(oa, use_sigmoid=True)
         if config["use_cost_attention"]:
