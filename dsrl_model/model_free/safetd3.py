@@ -150,7 +150,7 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     # bc_lambda = torch.exp(-(q - v) / alpha).detach()
     # bc_lambda /= torch.mean(weight) + EP
     # the following lines calculate the same as above
-    neg_adv = (-(q - v) / 0.2).detach()
+    neg_adv = (-(q - v) / 0.5).detach()
     log_Z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
     bc_lambda = torch.exp(neg_adv - log_Z)
 
@@ -185,7 +185,7 @@ def cost_contrastive_loss_fn(
     device = target_neg_os.device
 
     temperature = 0.1  # value from SupContrast
-    num_neg_extra_ones = 10 * horizon
+    num_neg_extra_traj = 10
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
@@ -194,14 +194,13 @@ def cost_contrastive_loss_fn(
     # horizon mask
     horizon_mask = torch.ones((horizon, horizon), device=device, dtype=torch.float32)
     mask = torch.eye(batch_size, device=device, dtype=torch.float32)
-    mask = torch.kron(mask, horizon_mask)
 
     # loss for union_z
     union_zs = torch.concat(torch.unbind(union_zs, dim=1), dim=0)  # HB x obs
     union_logits = torch.matmul(union_zs, union_zs.T) / temperature
     union_logits_max, _ = torch.max(union_logits, dim=1, keepdim=True)
     union_logits = union_logits - union_logits_max.detach()
-    union_mask = mask
+    union_mask = torch.kron(mask, horizon_mask)
     union_loss = compute_contrastive_ce_loss(union_mask, union_logits)
 
     # loss for neg_z
@@ -209,12 +208,11 @@ def cost_contrastive_loss_fn(
     neg_logits = torch.matmul(neg_zs, neg_zs.T) / temperature
     neg_logits_max, _ = torch.max(neg_logits, dim=1, keepdim=True)
     neg_logits = neg_logits - neg_logits_max.detach()
-    neg_mask = mask
-    zeros_pos = (neg_mask == 0).to(torch.float32)
-    indx = torch.multinomial(zeros_pos, num_neg_extra_ones, replacement=False)
-    neg_mask = neg_mask.scatter(1, indx, 1)
+    zeros_pos = (mask == 0).to(torch.float32)
+    indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
+    neg_mask = mask.scatter(1, indx, 1)
+    neg_mask = torch.kron(neg_mask, horizon_mask)
     neg_loss = compute_contrastive_ce_loss(neg_mask, neg_logits)
-
     return neg_loss + union_loss
 
 
