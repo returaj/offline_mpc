@@ -195,25 +195,45 @@ def cost_contrastive_loss_fn(
     horizon_mask = torch.ones((horizon, horizon), device=device, dtype=torch.float32)
     mask = torch.eye(batch_size, device=device, dtype=torch.float32)
 
-    # loss for union_z
+    # logits for union and non-pref
     union_zs = torch.concat(torch.unbind(union_zs, dim=1), dim=0)  # HB x obs
-    union_logits = torch.matmul(union_zs, union_zs.T) / temperature
-    union_logits_max, _ = torch.max(union_logits, dim=1, keepdim=True)
-    union_logits = union_logits - union_logits_max.detach()
-    union_mask = torch.kron(mask, horizon_mask)
-    union_loss = compute_contrastive_ce_loss(union_mask, union_logits)
-
-    # loss for neg_z
     neg_zs = torch.concat(torch.unbind(neg_zs, dim=1), dim=0)  # HB x obs
-    neg_logits = torch.matmul(neg_zs, neg_zs.T) / temperature
-    neg_logits_max, _ = torch.max(neg_logits, dim=1, keepdim=True)
-    neg_logits = neg_logits - neg_logits_max.detach()
+    combined_zs = torch.concat([union_zs, neg_zs], dim=0)  # 2HB x obs
+    combined_logits = torch.matmul(combined_zs, combined_zs.T) / temperature
+    combined_logits_max, _ = torch.max(combined_logits, dim=1, keepdim=True)
+    combined_logits = combined_logits - combined_logits_max.detach()
+
+    # mask for union and non-pref
+    union_mask = torch.kron(mask, horizon_mask)
     zeros_pos = (mask == 0).to(torch.float32)
     indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
     neg_mask = mask.scatter(1, indx, 1)
     neg_mask = torch.kron(neg_mask, horizon_mask)
-    neg_loss = compute_contrastive_ce_loss(neg_mask, neg_logits)
-    return neg_loss + union_loss
+    combined_mask = torch.block_diag(union_mask, neg_mask)
+
+    loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
+
+    # union_zs = torch.concat(torch.unbind(union_zs, dim=1), dim=0)  # HB x obs
+    # union_logits = torch.matmul(union_zs, union_zs.T) / temperature
+    # union_logits_max, _ = torch.max(union_logits, dim=1, keepdim=True)
+    # union_logits = union_logits - union_logits_max.detach()
+    # union_mask = torch.kron(mask, horizon_mask)
+    # union_loss = compute_contrastive_ce_loss(union_mask, union_logits)
+
+    # # loss for neg_z
+    # neg_zs = torch.concat(torch.unbind(neg_zs, dim=1), dim=0)  # HB x obs
+    # neg_logits = torch.matmul(neg_zs, neg_zs.T) / temperature
+    # neg_logits_max, _ = torch.max(neg_logits, dim=1, keepdim=True)
+    # neg_logits = neg_logits - neg_logits_max.detach()
+    # zeros_pos = (mask == 0).to(torch.float32)
+    # indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
+    # neg_mask = mask.scatter(1, indx, 1)
+    # neg_mask = torch.kron(neg_mask, horizon_mask)
+    # neg_loss = compute_contrastive_ce_loss(neg_mask, neg_logits)
+
+    # loss = neg_loss + union_loss
+
+    return loss
 
 
 def cost_loss_fn(
