@@ -200,6 +200,9 @@ def cost_contrastive_loss_fn(
     neg_zs = torch.concat(torch.unbind(neg_zs, dim=1), dim=0)  # HB x obs
     combined_zs = torch.concat([union_zs, neg_zs], dim=0)  # 2HB x obs
     combined_logits = torch.matmul(combined_zs, combined_zs.T) / temperature
+    # remove the self instance from the loss fn
+    diag_mask = torch.eye(combined_logits.shape[0], device=device).bool()
+    combined_logits = combined_logits.masked_fill(diag_mask, -1e9)
     combined_logits_max, _ = torch.max(combined_logits, dim=1, keepdim=True)
     combined_logits = combined_logits - combined_logits_max.detach()
 
@@ -210,6 +213,8 @@ def cost_contrastive_loss_fn(
     neg_mask = mask.scatter(1, indx, 1)
     neg_mask = torch.kron(neg_mask, horizon_mask)
     combined_mask = torch.block_diag(union_mask, neg_mask)
+    # remove the self instance from the loss fn
+    combined_mask.fill_diagonal_(0.0)
 
     loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
 
