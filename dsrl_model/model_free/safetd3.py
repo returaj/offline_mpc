@@ -179,13 +179,13 @@ def cost_contrastive_loss_fn(
     config,
     bootstrap_lambda=0.5,
 ):
-    del bootstrap_lambda, config
+    del bootstrap_lambda
 
     horizon, batch_size, _ = target_neg_acts.shape
     device = target_neg_os.device
 
     temperature = 0.1  # value from SupContrast
-    num_neg_extra_traj = 10
+    num_neg_extra_traj = config["num_neg_extra_traj"]
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
@@ -515,6 +515,7 @@ def main(args, cfg_env=None):
     config["use_cost_attention"] = args.use_cost_attention
     config["use_cost_contrastive"] = args.use_cost_contrastive
     config["use_td3_style_bc"] = args.use_td3_style_bc
+    config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
 
     # evaluation environment
     eval_env = gym.make(args.task)

@@ -210,6 +210,12 @@ def single_agent_args():
             "default": False,
             "help": "use td3 style policy learning, i.e. add bc plus value term",
         },
+        {
+            "name": "--num-neg-extra-traj",
+            "type": int,
+            "default": 10,
+            "help": "nu value used for dwbc algorithm",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
