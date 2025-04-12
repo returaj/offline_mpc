@@ -418,11 +418,14 @@ class ContrastiveCostModel(nn.Module):
             act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
             affine_layer = nn.Linear(sizes[j], sizes[j + 1])
             layers += [affine_layer, act]
-        self.model = nn.Sequential(*layers)
+        self.encoder = nn.Sequential(*layers)
+        self.projection = nn.Linear(sizes[-1], 1)
         self.apply(orthogonal_init)
 
     def forward(self, obs):
-        return F.normalize(self.model(obs), dim=-1, p=2.0)
+        z = F.normalize(self.encoder(obs), dim=-1, p=2.0)
+        cost = torch.sigmoid(self.projection(z))
+        return z, cost
 
 
 class ExpCostModel(nn.Module):

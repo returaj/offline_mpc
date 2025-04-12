@@ -109,11 +109,11 @@ def evaluate_bc_policy(eval_env, policy, cost_model, device, norm_fn):
             norm_fn(next_obs), dtype=torch.float32, device=device
         ).unsqueeze(0)
         with torch.no_grad():
-            pred_cost = cost_model(torch.cat([eval_obs, act], dim=1), True).item()
+            pred_cost = cost_model(torch.cat([eval_obs, act], dim=1))
         eval_obs = next_obs
         eval_reward += reward
         eval_cost += cost
-        eval_pred_cost += pred_cost
+        eval_pred_cost += pred_cost.item()
         eval_len += 1
         eval_done = terminated or truncated
     return eval_reward, eval_cost, eval_pred_cost, eval_len
@@ -189,7 +189,7 @@ def cost_contrastive_loss_fn(
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
-    neg_zs, union_zs = cost_model(tn), cost_model(tu)
+    (neg_zs, _), (union_zs, _) = cost_model(tn), cost_model(tu)
 
     # horizon mask
     horizon_mask = torch.ones((horizon, horizon), device=device, dtype=torch.float32)
@@ -217,31 +217,10 @@ def cost_contrastive_loss_fn(
     combined_mask.fill_diagonal_(0.0)
 
     loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
-
-    # union_zs = torch.concat(torch.unbind(union_zs, dim=1), dim=0)  # HB x obs
-    # union_logits = torch.matmul(union_zs, union_zs.T) / temperature
-    # union_logits_max, _ = torch.max(union_logits, dim=1, keepdim=True)
-    # union_logits = union_logits - union_logits_max.detach()
-    # union_mask = torch.kron(mask, horizon_mask)
-    # union_loss = compute_contrastive_ce_loss(union_mask, union_logits)
-
-    # # loss for neg_z
-    # neg_zs = torch.concat(torch.unbind(neg_zs, dim=1), dim=0)  # HB x obs
-    # neg_logits = torch.matmul(neg_zs, neg_zs.T) / temperature
-    # neg_logits_max, _ = torch.max(neg_logits, dim=1, keepdim=True)
-    # neg_logits = neg_logits - neg_logits_max.detach()
-    # zeros_pos = (mask == 0).to(torch.float32)
-    # indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
-    # neg_mask = mask.scatter(1, indx, 1)
-    # neg_mask = torch.kron(neg_mask, horizon_mask)
-    # neg_loss = compute_contrastive_ce_loss(neg_mask, neg_logits)
-
-    # loss = neg_loss + union_loss
-
     return loss
 
 
-def cost_loss_fn(
+def cost_pref_loss_fn(
     cost_model,
     target_neg_os,
     target_neg_acts,
@@ -262,8 +241,13 @@ def cost_loss_fn(
     else:
         discount, total_neg_pref, total_union_pref = 1.0, 0.0, 0.0
         for t in range(horizon):
-            total_neg_pref += discount * cost_model(tn[t], use_sigmoid=True)
-            total_union_pref += discount * cost_model(tu[t], use_sigmoid=True)
+            if config["use_cost_contrastive"]:
+                (_, cost_neg), (_, cost_union) = cost_model(tn[t]), cost_model(tu[t])
+            else:
+                cost_neg = cost_model(tn[t], use_sigmoid=True)
+                cost_union = cost_model(tu[t], use_sigmoid=True)
+            total_neg_pref += discount * cost_neg
+            total_union_pref += discount * cost_union
             discount *= gamma
 
         exp_neg, exp_union = torch.exp(total_neg_pref), torch.exp(total_union_pref)
@@ -280,24 +264,13 @@ def cost_loss_fn(
 
 
 @torch.no_grad
-def get_target_neg_z(cost_model, obs, acts, target_neg_z, config):
-    tau = config["update_tau"]
-    z = cost_model(torch.concat([obs, acts], dim=-1))
-    z = F.normalize(z.sum(dim=(0, 1), keepdim=True), dim=-1)
-    target_neg_z = (1 - tau) * target_neg_z + tau * z
-    return target_neg_z
-
-
-@torch.no_grad
-def get_cost(cost_model, obs, acts, target_neg_z, config):
+def get_cost(cost_model, obs, acts, config):
     horizon = obs.shape[0]
 
     oa = torch.cat([obs, acts], dim=-1)
 
     if config["use_cost_contrastive"]:
-        z = cost_model(oa)
-        cost = (z * target_neg_z).sum(dim=-1)
-        cost = (cost + 1) / 2  # scaled to (0,1)
+        _, cost = cost_model(oa)
     else:
         cost = cost_model(oa, use_sigmoid=True)
         if config["use_cost_attention"]:
@@ -386,10 +359,6 @@ def value_loss_fn(
 
 
 def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
-    cost_fn = (
-        cost_contrastive_loss_fn if config["use_cost_contrastive"] else cost_loss_fn
-    )
-
     # train cost model
     (
         target_neg_os,
@@ -401,12 +370,12 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
         _,
     ) = buffer_sample
 
-    cost_loss = torch.tensor(0.0)
+    cost_loss = cost_pref_loss = cost_contrast_loss = torch.tensor(0.0)
     if (steps % config["update_cost_freq"]) == 0:
         cost_optimizer.zero_grad()
         bootstrap_lambda = (3 * 0.5 / config["total_iteration"]) * steps
         bootstrap_lambda = min(0.5, bootstrap_lambda)
-        cost_loss = cost_fn(
+        cost_pref_loss = cost_pref_loss_fn(
             cost_model=cost_model,
             target_neg_os=target_neg_os,
             target_neg_acts=target_neg_acts,
@@ -415,12 +384,23 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
             config=config,
             bootstrap_lambda=bootstrap_lambda,
         )
+        if config["use_cost_contrastive"]:
+            cost_contrast_loss = cost_contrastive_loss_fn(
+                cost_model=cost_model,
+                target_neg_os=target_neg_os,
+                target_neg_acts=target_neg_acts,
+                target_union_os=target_union_os,
+                target_union_acts=target_union_acts,
+                config=config,
+                bootstrap_lambda=bootstrap_lambda,
+            )
+        cost_loss = cost_pref_loss + cost_contrast_loss
         cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
         cost_loss.backward()
         clip_grad_norm_(cost_model.parameters(), config["max_grad_norm_cost"])
         cost_optimizer.step()
 
-    return cost_loss
+    return cost_loss, cost_pref_loss, cost_contrast_loss
 
 
 def train_value_and_policy_model(
@@ -433,13 +413,12 @@ def train_value_and_policy_model(
     bc_policy_optimizer,
     bc_scheduler,
     buffer_sample,
-    target_neg_z,
     config,
     steps,
 ):
     (
-        target_neg_os,
-        target_neg_acts,
+        _,
+        _,
         target_union_os,
         target_union_acts,
         target_union_next_os,
@@ -447,13 +426,7 @@ def train_value_and_policy_model(
         _,
     ) = buffer_sample
 
-    if config["use_cost_contrastive"]:
-        target_neg_z = get_target_neg_z(
-            cost_model, target_neg_os, target_neg_acts, target_neg_z, config
-        )
-    target_cost = get_cost(
-        cost_model, target_union_os, target_union_acts, target_neg_z, config
-    )
+    target_cost = get_cost(cost_model, target_union_os, target_union_acts, config)
 
     value_cost_optimizer.zero_grad()
     value_loss, priorities = value_loss_fn(
@@ -493,7 +466,7 @@ def train_value_and_policy_model(
         ema(value_cost, value_cost_target, config["update_tau"])
         ema(bc_policy, bc_policy_target, config["update_tau"])
 
-    return value_loss, bc_policy_loss, q_loss, v_loss, priorities, target_neg_z
+    return value_loss, bc_policy_loss, q_loss, v_loss, priorities
 
 
 def main(args, cfg_env=None):
@@ -662,14 +635,13 @@ def main(args, cfg_env=None):
     # train cost, value and policy model
     logger.log("Start cost, value and bc_policy training.")
     steps = 0
-    target_neg_z = torch.tensor(0.0)
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for buffer_sample in buffer.sample():
 
             steps += 1
 
-            cost_loss = train_cost_model(
+            cost_loss, cost_pref_loss, cost_contrast_loss = train_cost_model(
                 cost_model=cost_model,
                 cost_optimizer=cost_optimizer,
                 buffer_sample=buffer_sample,
@@ -677,7 +649,7 @@ def main(args, cfg_env=None):
                 steps=steps,
             )
 
-            value_loss, bc_policy_loss, q_loss, v_loss, priorities, target_neg_z = (
+            value_loss, bc_policy_loss, q_loss, v_loss, priorities = (
                 train_value_and_policy_model(
                     cost_model=cost_model,
                     value_cost=value_cost,
@@ -688,7 +660,6 @@ def main(args, cfg_env=None):
                     bc_policy_optimizer=bc_policy_optimizer,
                     bc_scheduler=bc_scheduler,
                     buffer_sample=buffer_sample,
-                    target_neg_z=target_neg_z,
                     config=config,
                     steps=steps,
                 )
@@ -753,13 +724,13 @@ def main(args, cfg_env=None):
                     logger.log_tabular("Metrics/EvalEpLen", np.mean(eval_len_deque))
 
                 logger.log_tabular("Train/Steps", steps)
-                logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.mean().item())
-                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
-                logger.log_tabular("Loss/Loss_value_cost", value_loss.mean().item())
-                logger.log_tabular("Loss/bc_q_value", q_loss.mean().item())
-                logger.log_tabular("Loss/bc_v_value", v_loss.mean().item())
-
-                logger.log_tabular("Norm/neg_z", target_neg_z.norm())
+                logger.log_tabular("Loss/Loss_cost", cost_loss.item())
+                logger.log_tabular("Loss/Loss_cost_pref", cost_pref_loss.item())
+                logger.log_tabular("Loss/Loss_cost_contrast", cost_contrast_loss.item())
+                logger.log_tabular("Loss/Loss_value_cost", value_loss.item())
+                logger.log_tabular("Loss/Loss_bc_policy", bc_policy_loss.item())
+                logger.log_tabular("Loss/bc_q_value", q_loss.item())
+                logger.log_tabular("Loss/bc_v_value", v_loss.item())
 
                 logger.log_tabular(
                     "Norm/cost",
@@ -815,10 +786,6 @@ def main(args, cfg_env=None):
     if config["normalize_observation"]:
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
-        )
-    if config["use_cost_contrastive"]:
-        logger.save_state(
-            state_dict={"neg_z": target_neg_z.cpu().numpy()}, dirname="neg_z"
         )
     logger.close()
 
