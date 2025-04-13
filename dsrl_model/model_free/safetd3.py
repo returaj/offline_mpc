@@ -109,11 +109,11 @@ def evaluate_bc_policy(eval_env, policy, cost_model, device, norm_fn):
             norm_fn(next_obs), dtype=torch.float32, device=device
         ).unsqueeze(0)
         with torch.no_grad():
-            pred_cost = cost_model(torch.cat([eval_obs, act], dim=1))
+            pred_cost = cost_model(torch.cat([eval_obs, act], dim=1)).item()
         eval_obs = next_obs
         eval_reward += reward
         eval_cost += cost
-        eval_pred_cost += pred_cost.item()
+        eval_pred_cost += pred_cost
         eval_len += 1
         eval_done = terminated or truncated
     return eval_reward, eval_cost, eval_pred_cost, eval_len
@@ -241,7 +241,7 @@ def cost_pref_loss_fn(
     else:
         discount, total_neg_pref, total_union_pref = 1.0, 0.0, 0.0
         for t in range(horizon):
-            if config["use_cost_contrastive"]:
+            if config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
                 (_, cost_neg), (_, cost_union) = cost_model(tn[t]), cost_model(tu[t])
             else:
                 cost_neg = cost_model(tn[t], use_sigmoid=True)
@@ -269,7 +269,7 @@ def get_cost(cost_model, obs, acts, config):
 
     oa = torch.cat([obs, acts], dim=-1)
 
-    if config["use_cost_contrastive"]:
+    if config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
         _, cost = cost_model(oa)
     else:
         cost = cost_model(oa, use_sigmoid=True)
@@ -487,6 +487,7 @@ def main(args, cfg_env=None):
     config["cost_model_path"] = args.cost_model_path
     config["use_cost_attention"] = args.use_cost_attention
     config["use_cost_contrastive"] = args.use_cost_contrastive
+    config["pretrain_cost_contrastive"] = args.pretrain_cost_contrastive
     config["use_td3_style_bc"] = args.use_td3_style_bc
     config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
 
@@ -541,7 +542,7 @@ def main(args, cfg_env=None):
             num_attentions=1,
             device=device,
         ).to(device)
-    elif config["use_cost_contrastive"]:
+    elif config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
         cost_model = ContrastiveCostModel(
             obs_dim=obs_space.shape[0] + act_space.shape[0],
             hidden_sizes=config["hidden_sizes"],
@@ -631,6 +632,45 @@ def main(args, cfg_env=None):
         seed=str(args.seed),
     )
     logger.save_config(dict_args)
+
+    # pretrain cost_contrastive
+    if config["pretrain_cost_contrastive"]:
+        logger.log("Start cost contrastive training.")
+        steps = 0
+        while steps < config["total_iteration"]:
+            for buffer_sample in buffer.sample():
+                steps += 1
+
+                (
+                    target_neg_os,
+                    target_neg_acts,
+                    target_union_os,
+                    target_union_acts,
+                    _,
+                    _,
+                    _,
+                ) = buffer_sample
+
+                cost_contrast_loss = cost_contrastive_loss_fn(
+                    cost_model=cost_model,
+                    target_neg_os=target_neg_os,
+                    target_neg_acts=target_neg_acts,
+                    target_union_os=target_union_os,
+                    target_union_acts=target_union_acts,
+                    config=config,
+                )
+                cost_optimizer.zero_grad()
+                cost_contrast_loss.backward()
+                clip_grad_norm_(cost_model.parameters(), config["max_grad_norm_cost"])
+                cost_optimizer.step()
+
+                if steps % config["log_freq"] == 0:
+                    print(f"Contrastive cost loss: {cost_contrast_loss:.3f}")
+
+                if steps >= config["total_iteration"]:
+                    break
+
+        cost_model.freeze_encoder()
 
     # train cost, value and policy model
     logger.log("Start cost, value and bc_policy training.")

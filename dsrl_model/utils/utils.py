@@ -205,6 +205,12 @@ def single_agent_args():
             "help": "use contrastive based cost learning same as SupContrast paper",
         },
         {
+            "name": "--pretrain-cost-contrastive",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "pretrain the cost contrative first then train the linear cost model",
+        },
+        {
             "name": "--use-td3-style-bc",
             "type": lambda x: bool(strtobool(x)),
             "default": False,

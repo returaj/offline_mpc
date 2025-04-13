@@ -427,6 +427,10 @@ class ContrastiveCostModel(nn.Module):
         cost = torch.sigmoid(self.projection(z))
         return z, cost
 
+    def freeze_encoder(self):
+        for params in self.encoder.parameters():
+            params.requires_grad = False
+
 
 class ExpCostModel(nn.Module):
     def __init__(self, obs_dim, hidden_sizes=[64, 64]):
