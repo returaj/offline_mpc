@@ -220,7 +220,7 @@ def single_agent_args():
             "name": "--num-neg-extra-traj",
             "type": int,
             "default": 10,
-            "help": "nu value used for dwbc algorithm",
+            "help": "number of extra negative trajectories used in cost contrastive learning",
         },
     ]
     # Create argument parser
