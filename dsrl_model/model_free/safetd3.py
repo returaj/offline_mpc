@@ -250,15 +250,28 @@ def cost_pref_loss_fn(
             total_union_pref += discount * cost_union
             discount *= gamma
 
+        if config["use_expected_cost_pref"]:
+            bag_size = 32
+            total_neg_pref = total_neg_pref.view(-1, bag_size).mean(dim=-1)
+            total_union_pref = total_union_pref.view(-1, bag_size).mean(dim=-1)
+
         exp_neg, exp_union = torch.exp(total_neg_pref), torch.exp(total_union_pref)
         sum_exp = exp_neg + exp_union
         p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
 
-    target_union = bootstrap_lambda * p_union.detach()
-    target_neg = torch.ones_like(p_neg, device=device)
+    if config["use_expected_cost_pref"]:
+        target_union = torch.zeros_like(p_union, device=device)
+    else:
+        target_union = bootstrap_lambda * p_union.detach()
 
     loss = F.binary_cross_entropy(p_union, target_union)
-    loss += F.binary_cross_entropy(p_neg, target_neg)
+    # # the following lines are not needed.
+    # as addining this lines makes the total loss as:
+    # say p = p_union,
+    # loss = - (\lambda p) log(p) - (1-\lambda p) log(1-p) - log(1-p)
+    # the last term -log(1-p) is not needed, as the gradient update can make it unstable.
+    # target_neg = torch.ones_like(p_neg, device=device)
+    # loss += F.binary_cross_entropy(p_neg, target_neg)
 
     return torch.mean(loss)
 
@@ -490,6 +503,7 @@ def main(args, cfg_env=None):
     config["pretrain_cost_contrastive"] = args.pretrain_cost_contrastive
     config["use_td3_style_bc"] = args.use_td3_style_bc
     config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
+    config["use_expected_cost_pref"] = args.use_expected_cost_pref
 
     # evaluation environment
     eval_env = gym.make(args.task)

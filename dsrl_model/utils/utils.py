@@ -222,6 +222,12 @@ def single_agent_args():
             "default": 10,
             "help": "number of extra negative trajectories used in cost contrastive learning",
         },
+        {
+            "name": "--use-expected-cost-pref",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "use td3 style policy learning, i.e. add bc plus value term",
+        }
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
