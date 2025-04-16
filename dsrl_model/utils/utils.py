@@ -225,7 +225,7 @@ def single_agent_args():
         {
             "name": "--use-expected-cost-pref",
             "type": lambda x: bool(strtobool(x)),
-            "default": True,
+            "default": False,
             "help": "use td3 style policy learning, i.e. add bc plus value term",
         }
     ]
