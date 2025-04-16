@@ -185,7 +185,7 @@ def cost_contrastive_loss_fn(
     device = target_neg_os.device
 
     temperature = 0.1  # value from SupContrast
-    num_neg_extra_traj = config["num_neg_extra_traj"]
+    # num_neg_extra_traj = config["num_neg_extra_traj"]
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
@@ -208,9 +208,10 @@ def cost_contrastive_loss_fn(
 
     # mask for union and non-pref
     union_mask = torch.kron(mask, horizon_mask)
-    zeros_pos = (mask == 0).to(torch.float32)
-    indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
-    neg_mask = mask.scatter(1, indx, 1)
+    # zeros_pos = (mask == 0).to(torch.float32)
+    # indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
+    # neg_mask = mask.scatter(1, indx, 1)
+    neg_mask = torch.ones((batch_size, batch_size), device=device, dtype=torch.float32)
     neg_mask = torch.kron(neg_mask, horizon_mask)
     combined_mask = torch.block_diag(union_mask, neg_mask)
     # remove the self instance from the loss fn
