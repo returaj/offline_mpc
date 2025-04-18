@@ -152,7 +152,9 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     # the following lines calculate the same as above
     neg_adv = (-(q - v) / 0.5).detach()
     log_Z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
-    bc_lambda = torch.exp(neg_adv - log_Z)
+    # bc_lambda = torch.exp(neg_adv - log_Z)
+    log_Z = log_Z.clamp(max=2.0)
+    bc_lambda = torch.exp(log_Z)
 
     if config["use_td3_style_bc"]:
         # v_lambda = (alpha * bc_loss.mean() / (torch.mean(torch.abs(v)) + EP)).detach()
@@ -372,6 +374,44 @@ def value_loss_fn(
     return torch.mean(value_loss), priorities
 
 
+def pretrain_cost_contrastive_model(cost_model, cost_optimizer, buffer, config):
+    steps = 0
+    while steps < config["total_iteration"]:
+        for buffer_sample in buffer.sample():
+            steps += 1
+
+            (
+                target_neg_os,
+                target_neg_acts,
+                target_union_os,
+                target_union_acts,
+                _,
+                _,
+                _,
+            ) = buffer_sample
+
+            cost_contrast_loss = cost_contrastive_loss_fn(
+                cost_model=cost_model,
+                target_neg_os=target_neg_os,
+                target_neg_acts=target_neg_acts,
+                target_union_os=target_union_os,
+                target_union_acts=target_union_acts,
+                config=config,
+            )
+            cost_optimizer.zero_grad()
+            cost_contrast_loss.backward()
+            clip_grad_norm_(cost_model.parameters(), config["max_grad_norm_cost"])
+            cost_optimizer.step()
+
+            if steps % config["log_freq"] == 0:
+                print(f"Contrastive cost loss: {cost_contrast_loss:.3f}")
+
+            if steps >= config["total_iteration"]:
+                break
+
+    return cost_model
+
+
 def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
     # train cost model
     (
@@ -502,6 +542,7 @@ def main(args, cfg_env=None):
     config["use_cost_attention"] = args.use_cost_attention
     config["use_cost_contrastive"] = args.use_cost_contrastive
     config["pretrain_cost_contrastive"] = args.pretrain_cost_contrastive
+    config["cost_model_path"] = args.cost_model_path
     config["use_td3_style_bc"] = args.use_td3_style_bc
     config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
     config["use_expected_cost_pref"] = args.use_expected_cost_pref
@@ -650,40 +691,21 @@ def main(args, cfg_env=None):
 
     # pretrain cost_contrastive
     if config["pretrain_cost_contrastive"]:
-        logger.log("Start cost contrastive training.")
-        steps = 0
-        while steps < config["total_iteration"]:
-            for buffer_sample in buffer.sample():
-                steps += 1
-
-                (
-                    target_neg_os,
-                    target_neg_acts,
-                    target_union_os,
-                    target_union_acts,
-                    _,
-                    _,
-                    _,
-                ) = buffer_sample
-
-                cost_contrast_loss = cost_contrastive_loss_fn(
-                    cost_model=cost_model,
-                    target_neg_os=target_neg_os,
-                    target_neg_acts=target_neg_acts,
-                    target_union_os=target_union_os,
-                    target_union_acts=target_union_acts,
-                    config=config,
-                )
-                cost_optimizer.zero_grad()
-                cost_contrast_loss.backward()
-                clip_grad_norm_(cost_model.parameters(), config["max_grad_norm_cost"])
-                cost_optimizer.step()
-
-                if steps % config["log_freq"] == 0:
-                    print(f"Contrastive cost loss: {cost_contrast_loss:.3f}")
-
-                if steps >= config["total_iteration"]:
-                    break
+        cost_model_path = args.cost_model_path
+        if (cost_model_path is not None) and (osp.exists(osp.abspath(cost_model_path))):
+            logger.log("Load cost contrastive model.")
+            cost_model_path = osp.abspath(cost_model_path)
+            cost_model.load_state_dict(
+                torch.load(cost_model_path, weights_only=True, map_location=device)
+            )
+        else:
+            logger.log("Start cost contrastive training.")
+            cost_model = pretrain_cost_contrastive_model(
+                cost_model=cost_model,
+                cost_optimizer=cost_optimizer,
+                buffer=buffer,
+                config=config,
+            )
 
         cost_model.freeze_encoder()
 
