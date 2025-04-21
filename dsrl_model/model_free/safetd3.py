@@ -120,7 +120,7 @@ def evaluate_bc_policy(eval_env, policy, cost_model, device, norm_fn):
 
 
 def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
-    alpha = config["value_weight_temp"]
+    alpha, beta = config["value_weight_temp"], config["bc_weight_temp"]
 
     # Horizon X Batch X obs/act_dim
     horizon, batch_size, _ = target_os.shape
@@ -150,7 +150,7 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     # bc_lambda = torch.exp(-(q - v) / alpha).detach()
     # bc_lambda /= torch.mean(weight) + EP
     # the following lines calculate the same as above
-    neg_adv = (-(q - v) / 0.5).detach()
+    neg_adv = (-(q - v) / beta).detach()
     log_Z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
     # bc_lambda = torch.exp(neg_adv - log_Z)
     log_Z = log_Z.clamp(max=2.0)
@@ -187,7 +187,7 @@ def cost_contrastive_loss_fn(
     device = target_neg_os.device
 
     temperature = 0.1  # value from SupContrast
-    # num_neg_extra_traj = config["num_neg_extra_traj"]
+    num_neg_extra_traj = config["num_neg_extra_traj"]
 
     tn = torch.cat([target_neg_os, target_neg_acts], dim=-1)
     tu = torch.cat([target_union_os, target_union_acts], dim=-1)
@@ -210,11 +210,14 @@ def cost_contrastive_loss_fn(
 
     # mask for union and non-pref
     union_mask = torch.kron(mask, horizon_mask)
-    # zeros_pos = (mask == 0).to(torch.float32)
-    # indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
-    # neg_mask = mask.scatter(1, indx, 1)
-    neg_mask = torch.ones((batch_size, batch_size), device=device, dtype=torch.float32)
-    neg_mask = torch.kron(neg_mask, horizon_mask)
+    if num_neg_extra_traj > 0:
+        zeros_pos = (mask == 0).to(torch.float32)
+        indx = torch.multinomial(zeros_pos, num_neg_extra_traj, replacement=False)
+        neg_mask = mask.scatter(1, indx, 1)
+        # neg_mask = torch.ones((batch_size, batch_size), device=device, dtype=torch.float32)
+        neg_mask = torch.kron(neg_mask, horizon_mask)
+    else:
+        neg_mask = torch.kron(mask, horizon_mask)
     combined_mask = torch.block_diag(union_mask, neg_mask)
     # remove the self instance from the loss fn
     combined_mask.fill_diagonal_(0.0)
@@ -426,9 +429,12 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
 
     cost_loss = cost_pref_loss = cost_contrast_loss = torch.tensor(0.0)
     if (steps % config["update_cost_freq"]) == 0:
+        max_bootstrap_lambda = config["bootstrap_lambda"]
         cost_optimizer.zero_grad()
-        bootstrap_lambda = (3 * 0.5 / config["total_iteration"]) * steps
-        bootstrap_lambda = min(0.5, bootstrap_lambda)
+        bootstrap_lambda = (
+            3 * max_bootstrap_lambda / config["total_iteration"]
+        ) * steps
+        bootstrap_lambda = min(max_bootstrap_lambda, bootstrap_lambda)
         cost_pref_loss = cost_pref_loss_fn(
             cost_model=cost_model,
             target_neg_os=target_neg_os,
@@ -534,7 +540,9 @@ def main(args, cfg_env=None):
     device = torch.device(device_name)
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
+    config["bootstrap_lambda"] = args.bootstrap_lambda
     config["value_weight_temp"] = args.value_weight_temp or config["value_weight_temp"]
+    config["bc_weight_temp"] = args.bc_weight_temp
     config["policy_type"] = args.policy_type
     config["update_priority_buffer"] = args.update_priority_buffer
     config["normalize_observation"] = args.normalize_observation
@@ -542,7 +550,6 @@ def main(args, cfg_env=None):
     config["use_cost_attention"] = args.use_cost_attention
     config["use_cost_contrastive"] = args.use_cost_contrastive
     config["pretrain_cost_contrastive"] = args.pretrain_cost_contrastive
-    config["cost_model_path"] = args.cost_model_path
     config["use_td3_style_bc"] = args.use_td3_style_bc
     config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
     config["use_expected_cost_pref"] = args.use_expected_cost_pref

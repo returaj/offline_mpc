@@ -227,7 +227,19 @@ def single_agent_args():
             "type": lambda x: bool(strtobool(x)),
             "default": False,
             "help": "use td3 style policy learning, i.e. add bc plus value term",
-        }
+        },
+        {
+            "name": "--bootstrap-lambda",
+            "type": float,
+            "default": 0.3,
+            "help": "bootstrap lambda value for cost preference learning",
+        },
+        {
+            "name": "--bc-weight-temp",
+            "type": float,
+            "default": 0.5,
+            "help": "weighted temperature hyper-parameter for BC",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
