@@ -169,11 +169,11 @@ def evaluate(
                 norm_fn(next_obs), dtype=torch.float32, device=device
             ).unsqueeze(0)
             if cost_model is not None:
-                out = cost_model(torch.cat([obs, act], dim=1), use_sigmoid=True)
+                oa = torch.cat([obs, act], dim=1)
                 if is_contrastive:
-                    pred_cost += out[-1].item()
+                    pred_cost += cost_model(oa)[-1].item()
                 else:
-                    pred_cost += out.item()
+                    pred_cost += cost_model(oa, use_sigmoid=True).item()
             obs = next_obs
             rewards += reward
             costs += cost
