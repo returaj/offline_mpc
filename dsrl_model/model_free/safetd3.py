@@ -153,15 +153,15 @@ def bc_policy_loss_fn(bc_policy, value, target_os, target_acts, config):
     neg_adv = (-(q - v) / beta).detach()
     log_Z = torch.logsumexp(neg_adv, dim=0) - np.log(neg_adv.shape[0]) + EP
     # bc_lambda = torch.exp(neg_adv - log_Z)
-    log_Z = log_Z.clamp(max=2.0)
-    bc_lambda = torch.exp(log_Z)
+    log_Z = log_Z.clamp(max=5.0)
+    weight_beta = torch.exp(log_Z)
 
     if config["use_td3_style_bc"]:
         # v_lambda = (alpha * bc_loss.mean() / (torch.mean(torch.abs(v)) + EP)).detach()
-        v_lambda = alpha
-        loss = bc_lambda * bc_loss + v_lambda * v
+        v_alpha = alpha
+        loss = bc_loss + v_alpha * weight_beta * v
     else:
-        loss = bc_lambda * bc_loss
+        loss = weight_beta * bc_loss
     return torch.mean(loss), torch.mean(torch.abs(q)), torch.mean(torch.abs(v))
 
 
