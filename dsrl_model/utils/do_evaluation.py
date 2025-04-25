@@ -14,7 +14,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from dsrl_model.utils.models import ExpCostModel, SafeDiceTanhMixtureActor
+from dsrl_model.utils.models import (
+    ContrastiveCostModel,
+    ExpCostModel,
+    SafeDiceTanhMixtureActor,
+)
 from dsrl_model.utils.utils import ActionRepeater
 
 EP = 1e-6
@@ -82,6 +86,12 @@ def create_arguments():
             "default": False,
             "help": "whether to add predicted cost information",
         },
+        {
+            "name": "--is-contrastive",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "whether to use contrastive cost for prediction",
+        },
     ]
     parser = argparse.ArgumentParser(description="RL Policy")
     for param in custom_parameters:
@@ -101,10 +111,15 @@ def load_model(obs_dim, act_dim, hidden_size, path, device):
     return bc
 
 
-def load_cost_model(obs_dim, act_dim, hidden_size, path, device):
-    cost_model = ExpCostModel(
-        obs_dim=obs_dim + act_dim, hidden_sizes=[hidden_size, hidden_size]
-    ).to(device)
+def load_cost_model(obs_dim, act_dim, hidden_size, path, device, is_contrastive):
+    if is_contrastive:
+        cost_model = ContrastiveCostModel(
+            obs_dim=obs_dim + act_dim, hidden_sizes=[hidden_size, hidden_size]
+        ).to(device)
+    else:
+        cost_model = ExpCostModel(
+            obs_dim=obs_dim + act_dim, hidden_sizes=[hidden_size, hidden_size]
+        ).to(device)
     cost_model.load_state_dict(torch.load(path, weights_only=True, map_location=device))
     cost_model.eval()
     return cost_model
@@ -127,7 +142,15 @@ def normalize(mu_obs, std_obs, obs):
 
 
 @timeit
-def evaluate(eval_env, bc_policy, device, num_evals, norm_fn, cost_model=None):
+def evaluate(
+    eval_env,
+    bc_policy,
+    device,
+    num_evals,
+    norm_fn,
+    cost_model=None,
+    is_contrastive=False,
+):
     ep_rewards, ep_costs, ep_lens, ep_pred_costs = [], [], [], []
     for _ in range(num_evals):
         done = False
@@ -146,9 +169,11 @@ def evaluate(eval_env, bc_policy, device, num_evals, norm_fn, cost_model=None):
                 norm_fn(next_obs), dtype=torch.float32, device=device
             ).unsqueeze(0)
             if cost_model is not None:
-                pred_cost += cost_model(
-                    torch.cat([obs, act], dim=1), use_sigmoid=True
-                ).item()
+                out = cost_model(torch.cat([obs, act], dim=1), use_sigmoid=True)
+                if is_contrastive:
+                    pred_cost += out[-1].item()
+                else:
+                    pred_cost += out.item()
             obs = next_obs
             rewards += reward
             costs += cost
@@ -193,6 +218,7 @@ def main(args):
         state_dict = joblib.load(state_path, mmap_mode="r")
         mu_obs, std_obs = state_dict["mu_obs"], state_dict["std_obs"]
 
+    is_contrastive = args.is_contrastive
     cost_model = None
     cost_model_path = osp.join(path, args.cost_model_path)
     to_add_cost_pred = args.add_predicted_cost and osp.exists(cost_model_path)
@@ -203,6 +229,7 @@ def main(args):
             hidden_size=config["hidden_size"],
             path=cost_model_path,
             device=device,
+            is_contrastive=is_contrastive,
         )
 
     ids = sorted(
@@ -227,6 +254,7 @@ def main(args):
             num_evals=args.num_evals,
             norm_fn=partial(normalize, mu_obs, std_obs),
             cost_model=cost_model,
+            is_contrastive=is_contrastive,
         )
         print(
             f"task: {args.task}, seed: {args.seed}, id: {id}, time: {total_time:.2f}sec"
