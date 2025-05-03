@@ -427,6 +427,10 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
     ) = buffer_sample
 
     cost_loss = cost_pref_loss = cost_contrast_loss = torch.tensor(0.0)
+
+    if config["pretrain_cost_contrastive"]:
+        return cost_loss, cost_pref_loss, cost_contrast_loss
+
     if (steps % config["update_cost_freq"]) == 0:
         max_bootstrap_lambda = config["bootstrap_lambda"]
         cost_optimizer.zero_grad()
@@ -604,17 +608,18 @@ def main(args, cfg_env=None):
             num_attentions=1,
             device=device,
         ).to(device)
-    elif config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
+    # elif config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
+    else:
         cost_model = ContrastiveCostModel(
             obs_dim=obs_space.shape[0] + act_space.shape[0],
             hidden_sizes=config["hidden_sizes"],
         ).to(device)
-    else:
-        cost_model = ExpCostModel(
-            # (s,a)
-            obs_dim=obs_space.shape[0] + act_space.shape[0],
-            hidden_sizes=config["hidden_sizes"],
-        ).to(device)
+    # else:
+    #     cost_model = ExpCostModel(
+    #         # (s,a)
+    #         obs_dim=obs_space.shape[0] + act_space.shape[0],
+    #         hidden_sizes=config["hidden_sizes"],
+    #     ).to(device)
     cost_optimizer = torch.optim.AdamW(
         cost_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
     )
