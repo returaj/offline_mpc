@@ -151,6 +151,9 @@ def evaluate(
     cost_model=None,
     is_contrastive=False,
 ):
+    cost_nper = 0.1  # 10% percent
+    num_nper = int(num_evals * cost_nper)
+
     ep_rewards, ep_costs, ep_lens, ep_pred_costs = [], [], [], []
     for _ in range(num_evals):
         done = False
@@ -183,9 +186,11 @@ def evaluate(
         ep_costs.append(costs)
         ep_lens.append(lens)
         ep_pred_costs.append(pred_cost)
+    ep_worst_nper_cost = sorted(ep_costs)[-num_nper:]
     return (
         np.mean(ep_rewards),
         np.mean(ep_costs),
+        np.mean(ep_worst_nper_cost),
         np.mean(ep_lens),
         np.mean(ep_pred_costs),
     )
@@ -238,7 +243,8 @@ def main(args):
             for f in bc_model_files
         ]
     )
-    reward_values, cost_values, length_values, pred_cost_values = [], [], [], []
+    reward_values, length_values = [], []
+    cost_values, worst_cost_values, pred_cost_values = [], [], []
     for id in ids:
         bc_policy = load_model(
             obs_dim=obs_space.shape[0],
@@ -247,7 +253,7 @@ def main(args):
             path=osp.join(path, f"bc_policy_model_{id}.pt"),
             device=device,
         )
-        total_time, reward, cost, length, pred_cost = evaluate(
+        total_time, reward, cost, worst_cost, length, pred_cost = evaluate(
             eval_env=eval_env,
             bc_policy=bc_policy,
             device=device,
@@ -261,6 +267,7 @@ def main(args):
         )
         reward_values.append(reward)
         cost_values.append(cost)
+        worst_cost_values.append(worst_cost)
         length_values.append(length)
         pred_cost_values.append(pred_cost)
 
@@ -276,6 +283,11 @@ def main(args):
         ids,
         cost_values,
         osp.join(log_dir, f"ep_cost_{args.num_evals}_{args.seed}.csv"),
+    )
+    save_csv(
+        ids,
+        worst_cost_values,
+        osp.join(log_dir, f"ep_worst_cost_{args.num_evals}_{args.seed}.csv"),
     )
     save_csv(
         ids,
