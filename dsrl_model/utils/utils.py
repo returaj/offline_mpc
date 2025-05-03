@@ -202,6 +202,12 @@ def single_agent_args():
             "name": "--use-cost-contrastive",
             "type": lambda x: bool(strtobool(x)),
             "default": False,
+            "help": "use contrastive based cost model",
+        },
+        {
+            "name": "--use-contrastive-loss",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
             "help": "use contrastive based cost learning same as SupContrast paper",
         },
         {

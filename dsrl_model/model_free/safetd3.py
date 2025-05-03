@@ -447,7 +447,7 @@ def train_cost_model(cost_model, cost_optimizer, buffer_sample, config, steps):
             config=config,
             bootstrap_lambda=bootstrap_lambda,
         )
-        if config["use_cost_contrastive"]:
+        if config["use_cost_contrastive"] and config["use_contrastive_loss"]:
             cost_contrast_loss = cost_contrastive_loss_fn(
                 cost_model=cost_model,
                 target_neg_os=target_neg_os,
@@ -552,6 +552,7 @@ def main(args, cfg_env=None):
     config["cost_model_path"] = args.cost_model_path
     config["use_cost_attention"] = args.use_cost_attention
     config["use_cost_contrastive"] = args.use_cost_contrastive
+    config["use_contrastive_loss"] = args.use_contrastive_loss
     config["pretrain_cost_contrastive"] = args.pretrain_cost_contrastive
     config["use_td3_style_bc"] = args.use_td3_style_bc
     config["num_neg_extra_traj"] = int(args.num_neg_extra_traj)
@@ -608,18 +609,17 @@ def main(args, cfg_env=None):
             num_attentions=1,
             device=device,
         ).to(device)
-    # elif config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
-    else:
+    elif config["use_cost_contrastive"] or config["pretrain_cost_contrastive"]:
         cost_model = ContrastiveCostModel(
             obs_dim=obs_space.shape[0] + act_space.shape[0],
             hidden_sizes=config["hidden_sizes"],
         ).to(device)
-    # else:
-    #     cost_model = ExpCostModel(
-    #         # (s,a)
-    #         obs_dim=obs_space.shape[0] + act_space.shape[0],
-    #         hidden_sizes=config["hidden_sizes"],
-    #     ).to(device)
+    else:
+        cost_model = ExpCostModel(
+            # (s,a)
+            obs_dim=obs_space.shape[0] + act_space.shape[0],
+            hidden_sizes=config["hidden_sizes"],
+        ).to(device)
     cost_optimizer = torch.optim.AdamW(
         cost_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
     )
