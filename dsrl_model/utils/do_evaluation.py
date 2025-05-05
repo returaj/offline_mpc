@@ -22,6 +22,7 @@ from dsrl_model.utils.models import (
 from dsrl_model.utils.utils import ActionRepeater
 
 EP = 1e-6
+WORST_COST_EVALS = [0.1, 0.2, 0.25, 0.3, 0.5]
 
 default_cfg = {
     "hidden_size": 256,
@@ -151,8 +152,7 @@ def evaluate(
     cost_model=None,
     is_contrastive=False,
 ):
-    cost_nper = 0.1  # 10% percent
-    num_nper = int(num_evals * cost_nper)
+    num_cost_percent = [int(num_evals * per) for per in WORST_COST_EVALS]
 
     ep_rewards, ep_costs, ep_lens, ep_pred_costs = [], [], [], []
     for _ in range(num_evals):
@@ -186,11 +186,12 @@ def evaluate(
         ep_costs.append(costs)
         ep_lens.append(lens)
         ep_pred_costs.append(pred_cost)
-    ep_worst_nper_cost = sorted(ep_costs)[-num_nper:]
+    ep_costs = sorted(ep_costs)
+    mean_worst_costs = [np.mean(ep_costs[-num:]) for num in num_cost_percent]
     return (
         np.mean(ep_rewards),
         np.mean(ep_costs),
-        np.mean(ep_worst_nper_cost),
+        mean_worst_costs,
         np.mean(ep_lens),
         np.mean(ep_pred_costs),
     )
@@ -244,7 +245,8 @@ def main(args):
         ]
     )
     reward_values, length_values = [], []
-    cost_values, worst_cost_values, pred_cost_values = [], [], []
+    cost_values, pred_cost_values = [], []
+    worst_cost_values = [[] for _ in WORST_COST_EVALS]
     for id in ids:
         bc_policy = load_model(
             obs_dim=obs_space.shape[0],
@@ -253,7 +255,7 @@ def main(args):
             path=osp.join(path, f"bc_policy_model_{id}.pt"),
             device=device,
         )
-        total_time, reward, cost, worst_cost, length, pred_cost = evaluate(
+        total_time, reward, cost, worst_costs, length, pred_cost = evaluate(
             eval_env=eval_env,
             bc_policy=bc_policy,
             device=device,
@@ -267,9 +269,10 @@ def main(args):
         )
         reward_values.append(reward)
         cost_values.append(cost)
-        worst_cost_values.append(worst_cost)
         length_values.append(length)
         pred_cost_values.append(pred_cost)
+        for i, worst_cost in enumerate(worst_costs):
+            worst_cost_values[i].append(worst_cost)
 
     log_dir = args.log_dir
     if log_dir is None:
@@ -286,14 +289,16 @@ def main(args):
     )
     save_csv(
         ids,
-        worst_cost_values,
-        osp.join(log_dir, f"ep_worst_cost_{args.num_evals}_{args.seed}.csv"),
-    )
-    save_csv(
-        ids,
         length_values,
         osp.join(log_dir, f"ep_length_{args.num_evals}_{args.seed}.csv"),
     )
+    for i, per in enumerate(WORST_COST_EVALS):
+        save_csv(
+            ids,
+            worst_cost_values[i],
+            osp.join(log_dir, f"ep_worst_cost_{per}_{args.num_evals}_{args.seed}.csv"),
+        )
+
     if to_add_cost_pred:
         save_csv(
             ids,
