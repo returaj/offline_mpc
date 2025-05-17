@@ -246,6 +246,12 @@ def single_agent_args():
             "default": 0.5,
             "help": "weighted temperature hyper-parameter for BC",
         },
+        {
+            "name": "--num-non-preferred",
+            "type": int,
+            "default": 50,
+            "help": "number of non-preferred trajectories D_N",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

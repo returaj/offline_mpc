@@ -541,6 +541,9 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device_name = "cpu" if args.device == "cpu" else f"{args.device}:{args.device_id}"
     device = torch.device(device_name)
+
+    trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["bootstrap_lambda"] = args.bootstrap_lambda

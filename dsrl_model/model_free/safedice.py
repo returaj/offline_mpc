@@ -247,6 +247,9 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
+
+    trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+
     config = {**default_cfg, **trajectory_cfg}
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
     config["act_train_use_logprob"] = (
@@ -548,9 +551,7 @@ def main(args, cfg_env=None):
 
     logger.torch_save(itr=steps, torch_saver_elements=actor, prefix="bc_policy")
     logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost")
-    logger.torch_save(
-        itr=steps, torch_saver_elements=critic_model, prefix="critic"
-    )
+    logger.torch_save(itr=steps, torch_saver_elements=critic_model, prefix="critic")
     logger.close()
 
 

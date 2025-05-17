@@ -204,6 +204,9 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
+
+    trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["bag_size"] = 1
@@ -451,9 +454,7 @@ def main(args, cfg_env=None):
                 break
 
     logger.torch_save(itr=steps, torch_saver_elements=bc_policy, prefix="bc_policy")
-    logger.torch_save(
-        itr=steps, torch_saver_elements=reward_model, prefix="reward"
-    )
+    logger.torch_save(itr=steps, torch_saver_elements=reward_model, prefix="reward")
     logger.close()
 
 
