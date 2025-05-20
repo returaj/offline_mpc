@@ -93,7 +93,6 @@ def get_neg_and_union_data_2(d4rl_data, config):
         neg_data["costs"].sum(1).mean(),
         neg_data["rewards"].sum(1).mean(),
     )
-    print(neg_data["costs"].sum(1))
     print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
 
     print(f"Number of union trajectory dataset: {union_data['observations'].shape[0]}")
@@ -101,7 +100,6 @@ def get_neg_and_union_data_2(d4rl_data, config):
         union_data["costs"].sum(1).mean(),
         union_data["rewards"].sum(1).mean(),
     )
-    print(union_data["costs"].sum(1))
     print(f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}")
 
     return neg_data, union_data
