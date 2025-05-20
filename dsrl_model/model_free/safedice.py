@@ -249,6 +249,7 @@ def main(args, cfg_env=None):
     device = torch.device(f"{args.device}:{args.device_id}")
 
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+    trajectory_cfg["num_union_trajectories"] = args.num_union
 
     config = {**default_cfg, **trajectory_cfg}
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]

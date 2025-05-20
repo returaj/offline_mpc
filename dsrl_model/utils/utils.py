@@ -252,6 +252,12 @@ def single_agent_args():
             "default": 50,
             "help": "number of non-preferred trajectories D_N",
         },
+        {
+            "name": "--num-union",
+            "type": int,
+            "default": -1,
+            "help": "number of union trajectories D_U",
+        }
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

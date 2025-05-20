@@ -67,6 +67,7 @@ trajectory_cfg = {
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
     "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
     "num_negative_trajectories": 50,
+    "num_union_trajectories": -1,
 }
 
 
@@ -543,6 +544,7 @@ def main(args, cfg_env=None):
     device = torch.device(device_name)
 
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+    trajectory_cfg["num_union_trajectories"] = args.num_union
 
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
