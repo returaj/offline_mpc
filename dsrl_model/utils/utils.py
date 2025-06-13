@@ -69,7 +69,7 @@ def single_agent_args():
         {
             "name": "--log-dir",
             "type": str,
-            "default": "../runs",
+            "default": "dsrl_model/runs",
             "help": "directory to save agent logs",
         },
         {
@@ -139,6 +139,24 @@ def single_agent_args():
             "help": "Use default value for value_weight_temp",
         },
         {
+            "name": "--update-priority-buffer",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To update the priority of the buffer used during sampling",
+        },
+        {
+            "name": "--normalize-observation",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "To normalize the state observation.",
+        },
+        {
+            "name": "--cost-model-path",
+            "type": str,
+            "default": None,
+            "help": "set the path of cost model if it already exists.",
+        },
+        {
             "name": "--bc-weight-binary",
             "type": lambda x: bool(strtobool(x)),
             "default": False,
@@ -174,6 +192,72 @@ def single_agent_args():
             "default": "loss_1_bce",  # loss_1, loss_2
             "help": "safemil loss function type",
         },
+        {
+            "name": "--use-cost-attention",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use attention based cost model and pred trajectory cost",
+        },
+        {
+            "name": "--use-cost-contrastive",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use contrastive based cost model",
+        },
+        {
+            "name": "--use-contrastive-loss",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "use contrastive based cost learning same as SupContrast paper",
+        },
+        {
+            "name": "--pretrain-cost-contrastive",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "pretrain the cost contrative first then train the linear cost model",
+        },
+        {
+            "name": "--use-td3-style-bc",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use td3 style policy learning, i.e. add bc plus value term",
+        },
+        {
+            "name": "--num-neg-extra-traj",
+            "type": int,
+            "default": 10,
+            "help": "number of extra negative trajectories used in cost contrastive learning",
+        },
+        {
+            "name": "--use-expected-cost-pref",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use td3 style policy learning, i.e. add bc plus value term",
+        },
+        {
+            "name": "--bootstrap-lambda",
+            "type": float,
+            "default": 0.3,
+            "help": "bootstrap lambda value for cost preference learning",
+        },
+        {
+            "name": "--bc-weight-temp",
+            "type": float,
+            "default": 0.5,
+            "help": "weighted temperature hyper-parameter for BC",
+        },
+        {
+            "name": "--num-non-preferred",
+            "type": int,
+            "default": 50,
+            "help": "number of non-preferred trajectories D_N",
+        },
+        {
+            "name": "--num-union",
+            "type": int,
+            "default": -1,
+            "help": "number of union trajectories D_U",
+        }
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

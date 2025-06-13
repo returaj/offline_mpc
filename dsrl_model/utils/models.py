@@ -409,6 +409,29 @@ def orthogonal_init(m):
             nn.init.zeros_(m.bias)
 
 
+class ContrastiveCostModel(nn.Module):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+        super().__init__()
+        sizes = [obs_dim] + hidden_sizes + [128]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nn.ELU() if j < len(sizes) - 2 else nn.Identity()
+            affine_layer = nn.Linear(sizes[j], sizes[j + 1])
+            layers += [affine_layer, act]
+        self.encoder = nn.Sequential(*layers)
+        self.projection = nn.Linear(sizes[-1], 1)
+        self.apply(orthogonal_init)
+
+    def forward(self, obs):
+        z = F.normalize(self.encoder(obs), dim=-1, p=2.0)
+        cost = torch.sigmoid(self.projection(z))
+        return z, cost
+
+    def freeze_encoder(self):
+        for params in self.encoder.parameters():
+            params.requires_grad = False
+
+
 class ExpCostModel(nn.Module):
     def __init__(self, obs_dim, hidden_sizes=[64, 64]):
         super().__init__()
@@ -450,7 +473,7 @@ class TdmpcCostModel(nn.Module):
 
 
 class TdmpcValue(nn.Module):
-    def __init__(self, obs_dim, hidden_size=512):
+    def __init__(self, obs_dim, hidden_size=512, last_act=nn.Identity()):
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(obs_dim, hidden_size),
@@ -459,20 +482,25 @@ class TdmpcValue(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ELU(),
             nn.Linear(hidden_size, 1),
+            last_act,
         )
         self.apply(orthogonal_init)
-        self.model[-1].weight.data.fill_(0)
-        self.model[-1].bias.data.fill_(0)
+        self.model[-2].weight.data.fill_(0)
+        self.model[-2].bias.data.fill_(0)
 
     def forward(self, obs):
         return torch.squeeze(self.model(obs), -1)
 
 
 class EnsembleValue(nn.Module):
-    def __init__(self, obs_dim, hidden_sizes=[64, 64]):
+    def __init__(self, obs_dim, hidden_sizes=[64, 64], last_act=nn.Identity()):
         super().__init__()
-        self._V1 = TdmpcValue(obs_dim=obs_dim)
-        self._V2 = TdmpcValue(obs_dim=obs_dim)
+        self._V1 = TdmpcValue(
+            obs_dim=obs_dim, hidden_size=hidden_sizes[0], last_act=last_act
+        )
+        self._V2 = TdmpcValue(
+            obs_dim=obs_dim, hidden_size=hidden_sizes[0], last_act=last_act
+        )
 
     def V(self, obs):
         return self._V1(obs), self._V2(obs)
@@ -676,6 +704,65 @@ def positionalencoding1d(d_model, length):
     pe[:, 0::2] = torch.sin(position.float() * div_term)
     pe[:, 1::2] = torch.cos(position.float() * div_term)
     return pe
+
+
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, d_model, d_ff, num_heads):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, num_heads)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff), nn.ReLU(), nn.Linear(d_ff, d_model)
+        )
+
+    def forward(self, x, mask=None):  # x shape: horizon x batch x d_model
+        x_norm = self.ln1(x)
+        attn_x, _ = self.attn(x_norm, x_norm, x_norm, attn_mask=mask)
+        # residual connection
+        x = x + attn_x
+        # residual connection
+        x = x + self.ff(self.ln2(x))
+        return x
+
+
+class SafeTransformerCritic(nn.Module):
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        horizon,
+        device,
+        latent_dim=256,
+        num_heads=4,
+        num_attentions=1,
+    ):
+        super().__init__()
+        self.encoder = nn.Linear(obs_dim + act_dim, latent_dim)
+        self.pos_encoding = positionalencoding1d(latent_dim, horizon)
+        self.pos_encoding = self.pos_encoding.unsqueeze(1).to(device)
+        self.mask = torch.triu(
+            torch.ones(horizon, horizon, dtype=torch.bool, device=device), diagonal=1
+        )
+        d_ff = 4 * latent_dim
+        self.transformers = nn.ModuleList(
+            [
+                TransformerEncoderBlock(latent_dim, d_ff, num_heads)
+                for _ in range(num_attentions)
+            ]
+        )
+        self.cost_pred = nn.Linear(latent_dim, 1)
+
+    def forward(self, x, use_sigmoid=True):  # shape x: horizon X batch X obs_act_dim
+        x = self.encoder(x)
+        x += self.pos_encoding
+        for attn in self.transformers:
+            x = attn(x, self.mask)
+        x = x[-1]
+        c = torch.squeeze(self.cost_pred(x), -1)
+        if use_sigmoid:
+            return torch.sigmoid(c)
+        return c, x
 
 
 class SafeDiceCritic(nn.Module):
