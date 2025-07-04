@@ -172,3 +172,4 @@ data/
 
 # additional run files
 osrl_evaluate.py
+.vscode
