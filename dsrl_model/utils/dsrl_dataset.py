@@ -73,7 +73,7 @@ def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
 def get_neg_and_union_data_2(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
 
-    percentage = 0.8
+    true_percentage = 1.0 - config["non_pref_noise"]
 
     num_neg_traj = config["num_negative_trajectories"]
     num_union_traj = config["num_union_trajectories"]
@@ -82,7 +82,7 @@ def get_neg_and_union_data_2(d4rl_data, config):
     neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
 
     num_neg_traj = min(len(neg_idx), num_neg_traj)
-    num_true_neg_traj = int(num_neg_traj * percentage)
+    num_true_neg_traj = int(num_neg_traj * true_percentage)
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
     true_neg_shuffled_idx = np.random.choice(
