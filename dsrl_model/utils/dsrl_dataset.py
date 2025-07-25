@@ -73,12 +73,26 @@ def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
 def get_neg_and_union_data_2(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
 
+    percentage = 0.8
+
     num_neg_traj = config["num_negative_trajectories"]
     num_union_traj = config["num_union_trajectories"]
 
     neg_traj_cost = np.max(traj_cost) * 0.7
     neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
-    neg_shuffled_idx = np.random.choice(neg_idx, size=num_neg_traj, replace=False)
+
+    num_neg_traj = min(len(neg_idx), num_neg_traj)
+    num_true_neg_traj = int(num_neg_traj * percentage)
+    num_false_neg_traj = num_neg_traj - num_true_neg_traj
+
+    true_neg_shuffled_idx = np.random.choice(
+        neg_idx, size=num_true_neg_traj, replace=False
+    )
+    union_idx = np.delete(np.arange(traj_cost.shape[0]), true_neg_shuffled_idx)
+    false_neg_shuffled_idx = np.random.choice(
+        union_idx, size=num_false_neg_traj, replace=False
+    )
+    neg_shuffled_idx = np.concatenate([true_neg_shuffled_idx, false_neg_shuffled_idx])
 
     union_idx = np.delete(np.arange(traj_cost.shape[0]), neg_shuffled_idx)
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
