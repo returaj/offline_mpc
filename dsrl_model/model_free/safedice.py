@@ -61,7 +61,7 @@ trajectory_cfg = {
     "density": 1.0,
     "target_cost": 25.0,
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
-    "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
+    "inpaint_ranges": ((0.3, 0.7, 0.0, 0.5),),
     "num_negative_trajectories": 50,
     "num_union_trajectories": 200,
     "percentage_validation_trajectories": 0.2,
