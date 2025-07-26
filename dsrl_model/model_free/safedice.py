@@ -250,6 +250,7 @@ def main(args, cfg_env=None):
 
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
+    trajectory_cfg["non_pref_noise"] = args.non_pref_noise
 
     config = {**default_cfg, **trajectory_cfg}
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]

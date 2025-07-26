@@ -257,7 +257,13 @@ def single_agent_args():
             "type": int,
             "default": -1,
             "help": "number of union trajectories D_U",
-        }
+        },
+        {
+            "name": "--non-pref-noise",
+            "type": float,
+            "default": 0.0,
+            "help": "fraction of noisy label in the non-preferred dataset",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
