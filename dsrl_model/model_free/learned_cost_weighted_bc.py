@@ -269,7 +269,7 @@ def bc_policy_loss_fn(
         cost_weight = cost_model(target, use_sigmoid=True)
         weight = discounted_sum(cost_weight, gamma)
         if config["bc_weight_binary"]:
-            margin = neg_mean_cost - 0.1 * neg_std_cost
+            margin = torch.mean(weight)  # neg_mean_cost - 0.1 * neg_std_cost
             final_weight = torch.where(
                 weight <= margin,
                 torch.tensor(1.0).to(device),
@@ -338,7 +338,9 @@ def cost_loss_fn(
     elif config["cost_loss_type"] == "loss_2":
         expected_neg_bag_cost = neg_bag_cost.mean()
         expected_union_bag_cost = union_bag_cost.mean()
-        loss = -torch.log(expected_neg_bag_cost + EP) + torch.log(expected_union_bag_cost + EP)
+        loss = -torch.log(expected_neg_bag_cost + EP) + torch.log(
+            expected_union_bag_cost + EP
+        )
     else:
         raise Exception(
             f"{config['cost_loss_type']} is not a valid cost loss type."
