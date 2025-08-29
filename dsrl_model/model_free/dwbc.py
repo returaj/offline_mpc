@@ -21,7 +21,7 @@ from torch.optim.lr_scheduler import LinearLR
 from dsrl_model.utils.bufffer import SafeDiceBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data,
+    get_neg_and_union_data_2,
 )
 from dsrl_model.utils.logger import EpochLogger
 from dsrl_model.utils.models import (
@@ -57,17 +57,11 @@ default_cfg = {
 
 trajectory_cfg = {
     "density": 1.0,
-    # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
-    "inpaint_ranges": (
-        (0.0, 0.5, 0.0, 0.5),
-        (0.5, 1.0, 0.0, 0.5),
-        (0.25, 0.75, 0.0, 1.0),
-    ),
     "target_cost": 25.0,
-    "true_alpha": 0.5,  # dU = alpha * dN + (1-alpha) * dP
+    # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
+    "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
     "num_negative_trajectories": 50,
-    "num_union_negative_trajectories": 100,
-    "num_union_positive_trajectories": 100,
+    "num_union_trajectories": -1,
     "percentage_validation_trajectories": 0.2,
 }
 
@@ -178,6 +172,11 @@ def main(args, cfg_env=None):
     torch.backends.cudnn.deterministic = True
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
+
+    trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+    trajectory_cfg["num_union_trajectories"] = args.num_union
+    trajectory_cfg["non_pref_noise"] = args.non_pref_noise
+
     config = {**default_cfg, **trajectory_cfg}
     config["dwbc_nu"] = args.dwbc_nu or config["dwbc_nu"]
 
@@ -229,7 +228,7 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
+    neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
     # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
@@ -245,29 +244,6 @@ def main(args, cfg_env=None):
         union_data["actions"], dtype=torch.float32, device=device
     )
     union_dones = union_data["timeouts"] | union_data["terminals"]
-
-    # create negative validation dataset
-    valid_neg_size = int(
-        neg_observations.shape[0] * trajectory_cfg["percentage_validation_trajectories"]
-    )
-    valid_neg_observations = neg_observations[:valid_neg_size]
-    valid_neg_actions = neg_actions[:valid_neg_size]
-    valid_neg_dones = neg_dones[:valid_neg_size]
-    neg_observations = neg_observations[valid_neg_size:]
-    neg_actions = neg_actions[valid_neg_size:]
-    neg_dones = neg_dones[valid_neg_size:]
-
-    # create union validation dataset
-    valid_union_size = int(
-        union_observations.shape[0]
-        * trajectory_cfg["percentage_validation_trajectories"]
-    )
-    valid_union_observations = union_observations[:valid_union_size]
-    valid_union_actions = union_actions[:valid_union_size]
-    valid_union_dones = union_dones[:valid_union_size]
-    union_observations = union_observations[valid_union_size:]
-    union_actions = union_actions[valid_union_size:]
-    union_dones = union_dones[valid_union_size:]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
