@@ -268,8 +268,9 @@ def bc_policy_loss_fn(
         # Horizon X Batch_Bag
         cost_weight = cost_model(target, use_sigmoid=True)
         weight = discounted_sum(cost_weight, gamma)
+        margin = torch.mean(weight)
         if config["bc_weight_binary"]:
-            margin = torch.mean(weight)  # neg_mean_cost - 0.1 * neg_std_cost
+            # margin = neg_mean_cost - 0.1 * neg_std_cost
             final_weight = torch.where(
                 weight <= margin,
                 torch.tensor(1.0).to(device),
@@ -277,7 +278,7 @@ def bc_policy_loss_fn(
             )
         else:
             # final_weight = (1 / (weight + EP2)) ** config["cost_weight_temp"]
-            weight = torch.exp(-weight / config["cost_weight_temp"])
+            weight = torch.exp((margin - weight) / config["cost_weight_temp"])
             final_weight = weight / (torch.mean(weight) + EP2)
     loss = final_weight * loss
     return torch.mean(loss)
