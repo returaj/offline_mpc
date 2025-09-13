@@ -359,6 +359,46 @@ class OnPolicyBuffer:
                 yield (h_neg_obs, h_neg_act, h_union_obs, h_union_act, u_idx)
 
 
+class SafeCLBuffer(OnPolicyBuffer):
+    def __init__(
+        self,
+        obs_dim,
+        act_dim,
+        neg_data_size,
+        union_data_size,
+        horizon,
+        batch_size,
+        device,
+        ep_len=1000,
+        priorities_alpha=1.0,
+        has_cost=False,
+    ):
+        super().__init__(
+            obs_dim=obs_dim,
+            act_dim=act_dim,
+            neg_data_size=neg_data_size,
+            union_data_size=union_data_size,
+            horizon=horizon,
+            batch_size=batch_size,
+            device=device,
+            ep_len=ep_len,
+            priorities_alpha=priorities_alpha,
+            has_cost=has_cost,
+        )
+        self._union_labels = -torch.ones(
+            (self.union_capacity,), dtype=torch.float32, device=self.device
+        )
+
+    def update_labels(self, idxs, labels):
+        self._union_labels[idxs] = labels.to(self.device)
+
+    def sample(self):
+        for buffer in super().sample():
+            uidx = buffer[-1]
+            sample_label = self._union_labels[uidx]
+            yield (*buffer, sample_label)
+
+
 class SafeTD3Buffer(OnPolicyBuffer):
     def __init__(
         self,
