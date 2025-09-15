@@ -44,13 +44,14 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_sizes": [256, 256],
-    "max_grad_norm": 10.0,
-    "bag_size": 1,
+    "max_grad_norm": 1.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 5,  # 20
     "update_label_freq": 5,
-    "update_pref_bc_freq": 10,
+    "update_cost_bc_freq": 10,
+    "warmup_steps": int(1e4),
+    "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
     "total_iteration": int(1e6),
@@ -119,7 +120,7 @@ def discounted_sum(vector_x, gamma):
 
 def bc_policy_loss_fn(
     bc_policy,
-    pref_model,
+    cost_model,
     target_obs,
     target_act,
     config,
@@ -132,7 +133,7 @@ def bc_policy_loss_fn(
     target_act = target_act.view(horizon * batch_size, -1)
 
     with torch.no_grad():
-        weight = pref_model(
+        weight = 1.0 - cost_model(
             torch.cat([target_obs, target_act], dim=1), use_sigmoid=True
         )
 
@@ -152,8 +153,8 @@ def bc_policy_loss_fn(
     return torch.mean(loss)
 
 
-def pref_loss_fn(
-    pref_model,
+def cost_loss_fn(
+    cost_model,
     target_neg_obs,
     target_neg_act,
     target_union_obs,
@@ -193,6 +194,113 @@ def pref_loss_fn(
     return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
 
 
+def compute_contrastive_ce_loss(p, q):
+    q = F.log_softmax(q, dim=1)
+    p = p / p.sum(dim=1, keepdim=True).clamp(min=1.0)
+    loss = torch.sum(p * q, dim=1)
+    return -torch.mean(loss)
+
+
+def train_embedding_model(
+    embedding_model,
+    embedding_optimizer,
+    target_neg_obs,
+    target_neg_act,
+    target_union_obs,
+    target_union_act,
+    target_union_label,
+    config,
+):
+    device = target_neg_obs.device
+    _, batch_size, _ = target_neg_obs.shape
+
+    # shape: Horizon X Batch X obs_act_dim
+    target_neg = torch.concat([target_neg_obs, target_neg_act], dim=-1)
+    target_union = torch.concat([target_union_obs, target_union_act], dim=-1)
+
+    # Batch X embd_dim
+    _, neg_z = embedding_model(target_neg, use_sigmoid=False)
+    _, union_z = embedding_model(target_union, use_sigmoid=False)
+
+    temperature = 0.1  # value from SupContrast
+    combined_z = torch.concat([neg_z, union_z], dim=0)
+    combined_logits = torch.matmul(combined_z, combined_z.T) / temperature
+    # remove the self instance from the logits
+    combined_logits.fill_diagonal_(-1e9)
+    # combined_logits_max, _ = torch.max(combined_logits, dim=1, keepdim=True)
+    # combined_logits = combined_logits - combined_logits_max.detach()
+
+    neg_mask = torch.ones((batch_size, batch_size), device=device, dtype=torch.float32)
+    union_mask = (
+        target_union_label.unsqueeze(0) == target_union_label.unsqueeze(1)
+    ).float()
+    valid_mask = (target_union_label >= 0).float()
+    # remove -1 labels from all the union_mask
+    union_mask = union_mask * valid_mask.unsqueeze(0) * valid_mask.unsqueeze(1)
+    combined_mask = torch.block_diag(neg_mask, union_mask)
+    # zero out diagoals
+    combined_mask.fill_diagonal_(0.0)
+
+    loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
+
+    embedding_optimizer.zero_grad()
+    loss.backward()
+    clip_grad_norm_(embedding_model.parameters(), config["max_grad_norm"])
+    embedding_optimizer.step()
+
+    return loss
+
+
+def index_fn(pred_vec):
+    device = pred_vec.device
+    new_label = 4.0 * torch.ones_like(pred_vec, dtype=torch.float32, device=device)
+    new_label[pred_vec < 0.8] = 3.0
+    new_label[pred_vec < 0.6] = 2.0
+    new_label[pred_vec < 0.4] = 1.0
+    new_label[pred_vec < 0.2] = 0.0
+    return new_label
+
+
+def get_new_union_labels(
+    embedding_model,
+    target_neg_obs,
+    target_neg_act,
+    target_union_obs,
+    target_union_act,
+    target_neg_z,
+    config,
+):
+    # shape: Horizon X Batch X obs_act_dim
+    target_neg = torch.concat([target_neg_obs, target_neg_act], dim=-1)
+    target_union = torch.concat([target_union_obs, target_union_act], dim=-1)
+
+    # Batch X embd_dim
+    _, neg_z = embedding_model(target_neg, use_sigmoid=False)
+    _, union_z = embedding_model(target_union, use_sigmoid=False)
+
+    rep_neg_z = F.normalize(neg_z.sum(dim=0, keepdim=True), dim=-1, p=2.0)
+    target_neg_z.lerp_(rep_neg_z, config["update_tau"])
+
+    union_pred = torch.matmul(union_z, target_neg_z.T).squeeze()
+    new_label = index_fn(union_pred)
+    return target_neg_z, new_label
+
+
+def train_cost_and_policy_model(
+    cost_model,
+    bc_policy,
+    cost_optimizer,
+    bc_policy_optimizer,
+    target_neg_obs,
+    target_neg_act,
+    target_union_obs,
+    target_union_act,
+    config,
+):
+    cost_loss = bc_loss = torch.tensor(0.0)
+    return cost_loss, bc_loss
+
+
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
@@ -209,7 +317,6 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["bag_size"] = 1
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
 
@@ -254,24 +361,25 @@ def main(args, cfg_env=None):
         total_iters=config["total_iteration"],
     )
 
+    embd_dim = config["hidden_sizes"][0]
     embedding_model = SafeTransformerCritic(
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         horizon=config["train_horizon"],
-        latent_dim=config["hidden_sizes"][0],
+        latent_dim=embd_dim,
         num_attentions=2,
         device=device,
     ).to(device)
-    embedding_model_optimizer = torch.optim.AdamW(
+    embedding_optimizer = torch.optim.AdamW(
         embedding_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
     )
 
-    pref_model = ExpCostModel(
+    cost_model = ExpCostModel(
         obs_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_sizes=config["hidden_sizes"],
     ).to(device)
-    pref_model_optimizer = torch.optim.AdamW(
-        pref_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
+    cost_optimizer = torch.optim.AdamW(
+        cost_model.parameters(), lr=args.lr, weight_decay=config["weight_decay"]
     )
 
     # data
@@ -314,7 +422,7 @@ def main(args, cfg_env=None):
         neg_data_size=np.prod(neg_observations.shape[:-1]),
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
-        batch_size=batch_size * config["bag_size"],
+        batch_size=batch_size,
         device=device,
         ep_len=ep_len,
     )
@@ -337,10 +445,10 @@ def main(args, cfg_env=None):
         seed=str(args.seed),
     )
     logger.save_config(dict_args)
-    logger.log("Start embedding, preference and bc_policy model training.")
+    logger.log("Start embedding, cost and bc_policy model training.")
 
     steps = 0
-    target_neg_z = 0
+    target_neg_z = torch.zeros((1, embd_dim), dtype=torch.float32, device=device)
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
@@ -356,6 +464,7 @@ def main(args, cfg_env=None):
 
             embedding_loss = train_embedding_model(
                 embedding_model=embedding_model,
+                embedding_optimizer=embedding_optimizer,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
@@ -364,7 +473,9 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
-            if steps % config["update_label_freq"] == 0:
+            if (steps > config["warmup_steps"]) and (
+                steps % config["update_label_freq"] == 0
+            ):
                 target_neg_z, new_labels = get_new_union_labels(
                     embedding_model=embedding_model,
                     target_neg_obs=target_neg_obs,
@@ -375,17 +486,23 @@ def main(args, cfg_env=None):
                     config=config,
                 )
                 buffer.update_labels(target_union_idx, new_labels)
+                if steps % 200 == 0:
+                    print(new_labels, target_union_label)
 
-            if steps % config["update_pref_bc_freq"] == 0:
-                pref_loss, bc_loss = train_pref_and_policy_model(
-                    pref_model=pref_model,
+            cost_loss = bc_loss = torch.tensor(0.0)
+            if (steps > config["warmup_steps"]) and (
+                steps % config["update_cost_bc_freq"] == 0
+            ):
+                cost_loss, bc_loss = train_cost_and_policy_model(
+                    cost_model=cost_model,
                     bc_policy=bc_policy,
+                    cost_optimizer=cost_optimizer,
+                    bc_policy_optimizer=bc_policy_optimizer,
                     target_neg_obs=target_neg_obs,
                     target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     config=config,
-                    steps=steps,
                 )
 
             logger.logged = False
@@ -439,15 +556,15 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.mean().item())
-                logger.log_tabular("Loss/Loss_preference", pref_loss.mean().item())
+                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.mean().item())
                 logger.log_tabular(
                     "Norm/embedding_model",
                     get_params_norm(embedding_model.parameters(), grads=False),
                 )
                 logger.log_tabular(
-                    "Norm/preference_model",
-                    get_params_norm(pref_model.parameters(), grads=False),
+                    "Norm/cost_model",
+                    get_params_norm(cost_model.parameters(), grads=False),
                 )
                 logger.log_tabular(
                     "Norm/bc_policy",
@@ -470,8 +587,8 @@ def main(args, cfg_env=None):
                 )
                 logger.torch_save(
                     itr=steps,
-                    torch_saver_elements=pref_model,
-                    prefix="preference",
+                    torch_saver_elements=cost_model,
+                    prefix="cost",
                 )
 
             if steps >= config["total_iteration"]:
@@ -481,7 +598,7 @@ def main(args, cfg_env=None):
     logger.torch_save(
         itr=steps, torch_saver_elements=embedding_model, prefix="embedding"
     )
-    logger.torch_save(itr=steps, torch_saver_elements=pref_model, prefix="preference")
+    logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost")
     if config["normalize_observation"]:
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"

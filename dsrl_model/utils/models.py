@@ -753,7 +753,9 @@ class SafeTransformerCritic(nn.Module):
         )
         self.cost_pred = nn.Linear(latent_dim, 1)
 
-    def forward(self, x, use_sigmoid=True):  # shape x: horizon X batch X obs_act_dim
+    def forward(
+        self, x, use_sigmoid=True, normalize_z=True
+    ):  # shape x: horizon X batch X obs_act_dim
         x = self.encoder(x)
         x += self.pos_encoding
         for attn in self.transformers:
@@ -762,6 +764,8 @@ class SafeTransformerCritic(nn.Module):
         c = torch.squeeze(self.cost_pred(x), -1)
         if use_sigmoid:
             return torch.sigmoid(c)
+        if normalize_z:
+            x = F.normalize(x, dim=-1, p=2.0)
         return c, x
 
 
