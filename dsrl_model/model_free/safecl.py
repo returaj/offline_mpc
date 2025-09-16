@@ -51,7 +51,7 @@ default_cfg = {
     "update_label_freq": 5,
     "update_cost_bc_freq": 10,
     "decay": 0.85,
-    "max_label": 4,
+    "max_label": 4.0,
     "warmup_steps": int(1e4),
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -214,16 +214,13 @@ def train_embedding_model(
     return loss
 
 
-def index_fn(pred_vec, config):
-    device = pred_vec.device
-    new_label = config["max_label"] * torch.ones_like(
-        pred_vec, dtype=torch.float32, device=device
-    )
-    new_label[pred_vec < 0.8] = 3.0
-    new_label[pred_vec < 0.6] = 2.0
-    new_label[pred_vec < 0.4] = 1.0
-    new_label[pred_vec < 0.2] = 0.0
-    return new_label
+def index_fn(pred_vec, label, config):
+    label[pred_vec < 1.0] = config["max_label"]
+    label[pred_vec < 0.8] = 3.0
+    label[pred_vec < 0.6] = 2.0
+    label[pred_vec < 0.4] = 1.0
+    label[pred_vec < 0.2] = 0.0
+    return label
 
 
 def get_new_union_labels(
@@ -232,6 +229,7 @@ def get_new_union_labels(
     target_neg_act,
     target_union_obs,
     target_union_act,
+    target_union_label,
     target_neg_z,
     config,
 ):
@@ -247,7 +245,7 @@ def get_new_union_labels(
     target_neg_z.lerp_(rep_neg_z, config["update_tau"])
 
     union_pred = torch.matmul(union_z, target_neg_z.T).squeeze()
-    new_label = index_fn(union_pred, config)
+    new_label = index_fn(union_pred, target_union_label, config)
     return target_neg_z, new_label
 
 
@@ -525,6 +523,7 @@ def main(args, cfg_env=None):
                     target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
+                    target_union_label=target_union_label,
                     target_neg_z=target_neg_z,
                     config=config,
                 )
