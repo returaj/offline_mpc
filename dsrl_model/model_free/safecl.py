@@ -50,6 +50,8 @@ default_cfg = {
     "train_horizon": 5,  # 20
     "update_label_freq": 5,
     "update_cost_bc_freq": 10,
+    "decay": 0.85,
+    "max_label": 4,
     "warmup_steps": int(1e4),
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -153,51 +155,10 @@ def bc_policy_loss_fn(
     return torch.mean(loss)
 
 
-def cost_loss_fn(
-    cost_model,
-    target_neg_obs,
-    target_neg_act,
-    target_union_obs,
-    target_union_act,
-    config,
-):
-    gamma = config["gamma"]
-    discount, total_neg_cost, total_union_cost, total_mix_cost = 1.0, 0.0, 0.0, 0.0
-    device = target_neg_obs.device
-
-    # Horizon X Batch X obs/act_dim
-    horizon, batch_size, _ = target_neg_obs.shape
-
-    target_neg = torch.cat([target_neg_obs, target_neg_act], dim=-1)
-    target_union = torch.cat([target_union_obs, target_union_act], dim=-1)
-
-    unif_rand = torch.rand(size=(horizon, batch_size, 1)).to(device)
-    target_mixed = unif_rand * target_neg + (1 - unif_rand) * target_union
-    target_mixed_input = Variable(target_mixed, requires_grad=True).to(device=device)
-
-    for t in range(horizon):
-        tn, tu, tm = target_neg[t], target_union[t], target_mixed_input[t]
-        total_neg_cost += discount * reward_model(tn, use_sigmoid=True)
-        total_union_cost += discount * reward_model(tu, use_sigmoid=True)
-        total_mix_cost += discount * reward_model(tm, use_sigmoid=True)
-        discount *= gamma
-
-    exp_neg, exp_union = torch.exp(total_neg_cost), torch.exp(total_union_cost)
-    sum_exp = exp_neg + exp_union
-    p_neg, p_union = exp_neg / sum_exp, exp_union / sum_exp
-    target_ones = torch.ones_like(p_neg, device=device)
-    target_zeros = torch.zeros_like(p_union, device=device)
-    loss = F.binary_cross_entropy(p_union, target_zeros)
-    loss += F.binary_cross_entropy(p_neg, target_ones)
-
-    grad_loss = 0.0  # horizon_gradient_panelty(target_mixed_input, total_mix_cost)
-    return torch.mean(loss) + config["grad_reg_coeffs"] * grad_loss
-
-
-def compute_contrastive_ce_loss(p, q):
+def compute_contrastive_ce_loss(p, q, decay):
     q = F.log_softmax(q, dim=1)
     p = p / p.sum(dim=1, keepdim=True).clamp(min=1.0)
-    loss = torch.sum(p * q, dim=1)
+    loss = torch.sum(p * q, dim=1) * decay
     return -torch.mean(loss)
 
 
@@ -227,8 +188,6 @@ def train_embedding_model(
     combined_logits = torch.matmul(combined_z, combined_z.T) / temperature
     # remove the self instance from the logits
     combined_logits.fill_diagonal_(-1e9)
-    # combined_logits_max, _ = torch.max(combined_logits, dim=1, keepdim=True)
-    # combined_logits = combined_logits - combined_logits_max.detach()
 
     neg_mask = torch.ones((batch_size, batch_size), device=device, dtype=torch.float32)
     union_mask = (
@@ -241,7 +200,11 @@ def train_embedding_model(
     # zero out diagoals
     combined_mask.fill_diagonal_(0.0)
 
-    loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
+    neg_decay_rate = torch.ones((batch_size,), dtype=torch.float32, device=device)
+    union_decay_rate = config["decay"] ** (config["max_label"] - target_union_label)
+    decay_rate = torch.concat([neg_decay_rate, union_decay_rate])
+
+    loss = compute_contrastive_ce_loss(combined_mask, combined_logits, decay_rate)
 
     embedding_optimizer.zero_grad()
     loss.backward()
@@ -251,9 +214,11 @@ def train_embedding_model(
     return loss
 
 
-def index_fn(pred_vec):
+def index_fn(pred_vec, config):
     device = pred_vec.device
-    new_label = 4.0 * torch.ones_like(pred_vec, dtype=torch.float32, device=device)
+    new_label = config["max_label"] * torch.ones_like(
+        pred_vec, dtype=torch.float32, device=device
+    )
     new_label[pred_vec < 0.8] = 3.0
     new_label[pred_vec < 0.6] = 2.0
     new_label[pred_vec < 0.4] = 1.0
@@ -282,22 +247,100 @@ def get_new_union_labels(
     target_neg_z.lerp_(rep_neg_z, config["update_tau"])
 
     union_pred = torch.matmul(union_z, target_neg_z.T).squeeze()
-    new_label = index_fn(union_pred)
+    new_label = index_fn(union_pred, config)
     return target_neg_z, new_label
+
+
+def cost_loss_fn(
+    cost_model,
+    target_neg_obs,
+    target_neg_act,
+    target_union_obs,
+    target_union_act,
+    target_union_label,
+    config,
+):
+    decay, max_label = config["decay"], config["max_label"]
+    gamma, discount = config["gamma"], 1.0
+    total_neg_cost, total_union_cost = 0.0, 0.0
+    device = target_neg_obs.device
+
+    # Horizon X Batch X obs/act_dim
+    horizon, batch_size, _ = target_neg_obs.shape
+
+    target_neg = torch.cat([target_neg_obs, target_neg_act], dim=-1)
+    target_union = torch.cat([target_union_obs, target_union_act], dim=-1)
+    for t in range(horizon):
+        tn, tu = target_neg[t], target_union[t]
+        total_neg_cost += discount * cost_model(tn, use_sigmoid=True)
+        total_union_cost += discount * cost_model(tu, use_sigmoid=True)
+        discount *= gamma
+    exp_neg, exp_union = torch.exp(total_neg_cost), torch.exp(total_union_cost)
+
+    # neg and union loss
+    p_neg = exp_neg / (exp_neg + exp_union)
+    target_ones = torch.ones_like(p_neg, device=device)
+    neg_union_loss = F.binary_cross_entropy(p_neg, target_ones)
+
+    # union and union loss
+    # ensure batch size is of 2s multiple
+    uu_exp = exp_union.view((2, -1))
+    uu_label = target_union_label.view((2, -1))
+
+    p_uu = uu_exp[0] / uu_exp.sum(dim=0)
+    target_uu = (uu_label[0] > uu_label[1]).float()
+    target_uu[uu_label[0] == uu_label[1]] = 0.5
+
+    valid_compare = torch.logical_and(uu_label[0] > 0, uu_label[1] > 0).float()
+    decay_weight = decay ** (max_label - torch.abs(uu_label[0] - uu_label[1]))
+    weight = decay_weight * valid_compare
+
+    union_union_loss = F.binary_cross_entropy(p_uu, target_uu, weight=weight)
+
+    # final loss
+    loss = neg_union_loss + union_union_loss
+    return torch.mean(loss)
 
 
 def train_cost_and_policy_model(
     cost_model,
     bc_policy,
     cost_optimizer,
-    bc_policy_optimizer,
+    bc_optimizer,
     target_neg_obs,
     target_neg_act,
     target_union_obs,
     target_union_act,
+    target_union_label,
     config,
 ):
-    cost_loss = bc_loss = torch.tensor(0.0)
+    cost_loss = cost_loss_fn(
+        cost_model=cost_model,
+        target_neg_obs=target_neg_obs,
+        target_neg_act=target_neg_act,
+        target_union_obs=target_union_obs,
+        target_union_act=target_union_act,
+        target_union_label=target_union_label,
+        config=config,
+    )
+    cost_optimizer.zero_grad()
+    cost_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
+    cost_loss.backward()
+    clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
+    cost_optimizer.step()
+
+    bc_loss = bc_policy_loss_fn(
+        bc_policy=bc_policy,
+        cost_model=cost_model,
+        target_obs=target_union_obs,
+        target_act=target_union_act,
+        config=config,
+    )
+    bc_optimizer.zero_grad()
+    bc_loss.backward()
+    clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
+    bc_optimizer.step()
+
     return cost_loss, bc_loss
 
 
@@ -351,11 +394,11 @@ def main(args, cfg_env=None):
             act_dim=act_space.shape[0],
             hidden_size=config["hidden_sizes"][0],
         ).to(device)
-    bc_policy_optimizer = torch.optim.AdamW(
+    bc_optimizer = torch.optim.AdamW(
         bc_policy.parameters(), lr=config["bc_lr"], weight_decay=config["weight_decay"]
     )
     bc_scheduler = LinearLR(
-        bc_policy_optimizer,
+        bc_optimizer,
         start_factor=1.0,
         end_factor=0.0,
         total_iters=config["total_iteration"],
@@ -486,8 +529,6 @@ def main(args, cfg_env=None):
                     config=config,
                 )
                 buffer.update_labels(target_union_idx, new_labels)
-                if steps % 200 == 0:
-                    print(new_labels, target_union_label)
 
             cost_loss = bc_loss = torch.tensor(0.0)
             if (steps > config["warmup_steps"]) and (
@@ -497,11 +538,12 @@ def main(args, cfg_env=None):
                     cost_model=cost_model,
                     bc_policy=bc_policy,
                     cost_optimizer=cost_optimizer,
-                    bc_policy_optimizer=bc_policy_optimizer,
+                    bc_optimizer=bc_optimizer,
                     target_neg_obs=target_neg_obs,
                     target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
+                    target_union_label=target_union_label,
                     config=config,
                 )
 
@@ -599,6 +641,7 @@ def main(args, cfg_env=None):
         itr=steps, torch_saver_elements=embedding_model, prefix="embedding"
     )
     logger.torch_save(itr=steps, torch_saver_elements=cost_model, prefix="cost")
+    logger.save_state(state_dict={"target_neg_z": target_neg_z}, dirname="neg_z")
     if config["normalize_observation"]:
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
