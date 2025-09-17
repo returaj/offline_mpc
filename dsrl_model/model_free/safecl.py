@@ -345,6 +345,7 @@ def train_cost_and_policy_model(
         config=config,
     )
     bc_optimizer.zero_grad()
+    bc_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
     bc_loss.backward()
     clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
     bc_optimizer.step()
