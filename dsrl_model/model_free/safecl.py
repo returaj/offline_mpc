@@ -53,6 +53,7 @@ default_cfg = {
     "decay": 0.85,
     "max_label": 4.0,
     "warmup_steps": int(1e4),
+    "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
@@ -127,31 +128,37 @@ def bc_policy_loss_fn(
     target_act,
     config,
 ):
-    loss = 0.0
+    gamma = config["gamma"]
+    discount, loss = 1.0, 0.0
     # Horizon X Batch X obs/act_dim
-    horizon, batch_size, _ = target_obs.shape
+    horizon, *_ = target_obs.shape
 
-    target_obs = target_obs.view(horizon * batch_size, -1)
-    target_act = target_act.view(horizon * batch_size, -1)
+    for t in range(horizon):
+        to, ta = target_obs[t], target_act[t]
+        if config["policy_type"] == "vae":
+            pred_act, bc_mean, bc_std = bc_policy(to, ta)
+            recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+            kl_loss = -0.5 * (
+                1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
+            ).sum(dim=1)
+            # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+            loss += discount * (recon_loss + 0.5 * kl_loss)
+        else:
+            pred_act, *_ = bc_policy(to)
+            recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
+            loss += discount * recon_loss
+        discount *= gamma
 
     with torch.no_grad():
-        weight = 1.0 - cost_model(
-            torch.cat([target_obs, target_act], dim=1), use_sigmoid=True
+        cost_weight = cost_model(
+            torch.cat([target_obs, target_act], dim=-1), use_sigmoid=True
         )
+        weight = discounted_sum(cost_weight, gamma)
+        margin = 0.5 * torch.mean(weight)
+        weight = torch.exp((margin - weight) / config["cost_weight_temp"])
+        final_weight = weight / (torch.mean(weight) + EP)
 
-    if config["policy_type"] == "vae":
-        pred_act, bc_mean, bc_std = bc_policy(target_obs, target_act)
-        recon_loss = F.mse_loss(pred_act, target_act, reduction="none").sum(dim=1)
-        kl_loss = -0.5 * (
-            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
-        ).sum(dim=1)
-        loss = recon_loss + 0.5 * kl_loss
-    else:
-        pred_act, *_ = bc_policy(target_obs)
-        recon_loss = F.mse_loss(pred_act, target_act, reduction="none").sum(dim=1)
-        loss = recon_loss
-
-    loss = weight * loss
+    loss = final_weight * loss
     return torch.mean(loss)
 
 
@@ -363,6 +370,7 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
+    config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
 
     # evaluation environment
     eval_env = gym.make(args.task)
