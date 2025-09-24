@@ -196,10 +196,16 @@ def train_critic_and_actor(
         target_union = torch.concat([target_union_obs, target_union_act], dim=1)
         sigmoid_cost_union = torch.sigmoid(cost_model(target_union))
         reward_union = torch.log(
-            (1 - (1 + alpha) * sigmoid_cost_union)
-            / ((1 - alpha) * (1 - sigmoid_cost_union))
+            torch.clamp(
+                (1 - (1 + alpha) * sigmoid_cost_union)
+                / ((1 - alpha) * (1 - sigmoid_cost_union)),
+                min=EP,
+            )
         )
-        reward_union = (reward_union - reward_mean) / reward_std
+        reward_union = (reward_union - torch.mean(reward_union)) / (
+            torch.std(reward_union) + EP
+        )  # Normalize rewards
+        reward_union = reward_union.clamp(min=-5.0, max=5.0)
 
     init_nu = critic_model(target_init_obs)
     union_nu = critic_model(target_union_obs)
