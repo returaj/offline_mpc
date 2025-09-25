@@ -121,13 +121,22 @@ def discounted_sum(vector_x, gamma):
     return cumsum
 
 
-def bc_policy_loss_fn(
-    bc_policy,
-    cost_model,
-    target_obs,
-    target_act,
-    config,
-):
+@torch.no_grad
+def compute_bc_weight(cost_model, target_obs, target_act, margin, config):
+    gamma, tau = config["gamma"], config["update_tau"]
+
+    cost_weight = cost_model(
+        torch.cat([target_obs, target_act], dim=-1), use_sigmoid=True
+    )
+    weight = discounted_sum(cost_weight, gamma)
+    batch_margin = torch.mean(weight)
+    margin = (1 - tau) * margin + tau * batch_margin
+    weight = torch.exp((margin - weight) / config["cost_weight_temp"])
+    final_weight = weight / (torch.mean(weight) + EP)
+    return final_weight, margin
+
+
+def bc_policy_loss_fn(bc_policy, target_obs, target_act, weight, config):
     gamma = config["gamma"]
     discount, loss = 1.0, 0.0
     # Horizon X Batch X obs/act_dim
@@ -149,16 +158,7 @@ def bc_policy_loss_fn(
             loss += discount * recon_loss
         discount *= gamma
 
-    with torch.no_grad():
-        cost_weight = cost_model(
-            torch.cat([target_obs, target_act], dim=-1), use_sigmoid=True
-        )
-        weight = discounted_sum(cost_weight, gamma)
-        margin = 0.5 * torch.mean(weight)
-        weight = torch.exp((margin - weight) / config["cost_weight_temp"])
-        final_weight = weight / (torch.mean(weight) + EP)
-
-    loss = final_weight * loss
+    loss = weight * loss
     return torch.mean(loss)
 
 
@@ -320,6 +320,7 @@ def train_cost_and_policy_model(
     target_union_obs,
     target_union_act,
     target_union_label,
+    margin,
     config,
 ):
     cost_loss = cost_loss_fn(
@@ -337,11 +338,19 @@ def train_cost_and_policy_model(
     clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
     cost_optimizer.step()
 
-    bc_loss = bc_policy_loss_fn(
-        bc_policy=bc_policy,
+    bc_weight, margin = compute_bc_weight(
         cost_model=cost_model,
         target_obs=target_union_obs,
         target_act=target_union_act,
+        margin=margin,
+        config=config,
+    )
+
+    bc_loss = bc_policy_loss_fn(
+        bc_policy=bc_policy,
+        target_obs=target_union_obs,
+        target_act=target_union_act,
+        weight=bc_weight,
         config=config,
     )
     bc_optimizer.zero_grad()
@@ -350,7 +359,7 @@ def train_cost_and_policy_model(
     clip_grad_norm_(bc_policy.parameters(), config["max_grad_norm"])
     bc_optimizer.step()
 
-    return cost_loss, bc_loss
+    return cost_loss, bc_loss, margin
 
 
 def main(args, cfg_env=None):
@@ -502,6 +511,7 @@ def main(args, cfg_env=None):
 
     steps = 0
     target_neg_z = torch.zeros((1, embd_dim), dtype=torch.float32, device=device)
+    margin = 0.0
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
@@ -544,7 +554,7 @@ def main(args, cfg_env=None):
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_cost_bc_freq"] == 0
             ):
-                cost_loss, bc_loss = train_cost_and_policy_model(
+                cost_loss, bc_loss, margin = train_cost_and_policy_model(
                     cost_model=cost_model,
                     bc_policy=bc_policy,
                     cost_optimizer=cost_optimizer,
@@ -554,6 +564,7 @@ def main(args, cfg_env=None):
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_union_label=target_union_label,
+                    margin=margin,
                     config=config,
                 )
 
