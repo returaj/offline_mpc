@@ -48,11 +48,10 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 5,  # 20
-    "update_label_freq": 5,
-    "update_cost_bc_freq": 10,
+    "update_freq": 2,
     "decay": 0.85,
     "max_label": 4.0,
-    "warmup_steps": int(1e4),
+    "warmup_steps": int(1e2),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -536,10 +535,11 @@ def main(args, cfg_env=None):
                 config=config,
             )
 
+            cost_loss = bc_loss = torch.tensor(0.0)
             if (steps > config["warmup_steps"]) and (
-                steps % config["update_label_freq"] == 0
+                steps % config["update_freq"] == 0
             ):
-                target_neg_z, new_labels = get_new_union_labels(
+                target_neg_z, new_union_labels = get_new_union_labels(
                     embedding_model=embedding_model,
                     target_neg_obs=target_neg_obs,
                     target_neg_act=target_neg_act,
@@ -548,12 +548,8 @@ def main(args, cfg_env=None):
                     target_neg_z=target_neg_z,
                     config=config,
                 )
-                buffer.update_labels(target_union_idx, new_labels)
+                buffer.update_labels(target_union_idx, new_union_labels)
 
-            cost_loss = bc_loss = torch.tensor(0.0)
-            if (steps > config["warmup_steps"]) and (
-                steps % config["update_cost_bc_freq"] == 0
-            ):
                 cost_loss, bc_loss, margin = train_cost_and_policy_model(
                     cost_model=cost_model,
                     bc_policy=bc_policy,
@@ -563,7 +559,7 @@ def main(args, cfg_env=None):
                     target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
-                    target_union_label=target_union_label,
+                    target_union_label=new_union_labels,
                     margin=margin,
                     config=config,
                 )
@@ -618,6 +614,7 @@ def main(args, cfg_env=None):
                     logger.log_tabular("Metrics/EvalEpLen")
 
                 logger.log_tabular("Train/Steps", steps)
+                logger.log_tabular("Train/Margin", margin)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.mean().item())
                 logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.mean().item())
