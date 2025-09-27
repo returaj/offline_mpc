@@ -121,15 +121,17 @@ def discounted_sum(vector_x, gamma):
 
 
 @torch.no_grad
-def compute_bc_weight(cost_model, target_obs, target_act, margin, config):
+def compute_bc_weight(cost_model, target_obs, target_act, target_label, margin, config):
     gamma, tau = config["gamma"], config["update_tau"]
+    max_label = config["max_label"]
 
     cost_weight = cost_model(
         torch.cat([target_obs, target_act], dim=-1), use_sigmoid=True
     )
     weight = discounted_sum(cost_weight, gamma)
-    batch_margin = torch.mean(weight)
-    margin = (1 - tau) * margin + tau * batch_margin
+    mean_mask = (target_label == (max_label // 2)).float()
+    mean_margin = (mean_mask * weight).sum() / (mean_mask.sum() + EP)
+    margin = (1 - tau) * margin + tau * mean_margin
     weight = torch.exp((margin - weight) / config["cost_weight_temp"])
     final_weight = weight / (torch.mean(weight) + EP)
     return final_weight, margin
@@ -341,6 +343,7 @@ def train_cost_and_policy_model(
         cost_model=cost_model,
         target_obs=target_union_obs,
         target_act=target_union_act,
+        target_label=target_union_label,
         margin=margin,
         config=config,
     )
