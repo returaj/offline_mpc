@@ -137,7 +137,7 @@ def compute_bc_weight(cost_model, target_obs, target_act, target_label, margin, 
     return final_weight, margin
 
 
-def bc_policy_loss_fn(bc_policy, target_obs, target_act, weight, config):
+def bc_policy_trajectory_loss_fn(bc_policy, target_obs, target_act, weight, config):
     gamma = config["gamma"]
     discount, loss = 1.0, 0.0
     # Horizon X Batch X obs/act_dim
@@ -158,6 +158,36 @@ def bc_policy_loss_fn(bc_policy, target_obs, target_act, weight, config):
             recon_loss = F.mse_loss(pred_act, ta, reduction="none").sum(dim=1)
             loss += discount * recon_loss
         discount *= gamma
+
+    loss = weight * loss
+    return torch.mean(loss)
+
+
+def bc_policy_transition_loss_fn(bc_policy, cost_model, target_obs, target_act, config):
+    loss = 0.0
+    # Horizon X Batch X obs/act_dim
+    horizon, batch_size, _ = target_obs.shape
+
+    target_obs = target_obs.view(horizon * batch_size, -1)
+    target_act = target_act.view(horizon * batch_size, -1)
+
+    with torch.no_grad():
+        weight = 1 - cost_model(
+            torch.cat([target_obs, target_act], dim=1), use_sigmoid=True
+        )
+
+    if config["policy_type"] == "vae":
+        pred_act, bc_mean, bc_std = bc_policy(target_obs, target_act)
+        recon_loss = F.mse_loss(pred_act, target_act, reduction="none").sum(dim=1)
+        kl_loss = -0.5 * (
+            1 + torch.log(bc_std.pow(2)) - bc_mean.pow(2) - bc_std.pow(2)
+        ).sum(dim=1)
+        # 0.5 weight is from BCQ implementation See @aviralkumar implementation
+        loss = recon_loss + 0.5 * kl_loss
+    else:
+        pred_act, *_ = bc_policy(target_obs)
+        recon_loss = F.mse_loss(pred_act, target_act, reduction="none").sum(dim=1)
+        loss = recon_loss
 
     loss = weight * loss
     return torch.mean(loss)
@@ -339,22 +369,32 @@ def train_cost_and_policy_model(
     clip_grad_norm_(cost_model.parameters(), config["max_grad_norm"])
     cost_optimizer.step()
 
-    bc_weight, margin = compute_bc_weight(
-        cost_model=cost_model,
-        target_obs=target_union_obs,
-        target_act=target_union_act,
-        target_label=target_union_label,
-        margin=margin,
-        config=config,
-    )
+    if config["use_bc_trajectory"]:
+        bc_weight, margin = compute_bc_weight(
+            cost_model=cost_model,
+            target_obs=target_union_obs,
+            target_act=target_union_act,
+            target_label=target_union_label,
+            margin=margin,
+            config=config,
+        )
 
-    bc_loss = bc_policy_loss_fn(
-        bc_policy=bc_policy,
-        target_obs=target_union_obs,
-        target_act=target_union_act,
-        weight=bc_weight,
-        config=config,
-    )
+        bc_loss = bc_policy_trajectory_loss_fn(
+            bc_policy=bc_policy,
+            target_obs=target_union_obs,
+            target_act=target_union_act,
+            weight=bc_weight,
+            config=config,
+        )
+    else:
+        bc_loss = bc_policy_transition_loss_fn(
+            bc_policy=bc_policy,
+            cost_model=cost_model,
+            target_obs=target_union_obs,
+            target_act=target_union_act,
+            config=config,
+        )
+
     bc_optimizer.zero_grad()
     bc_loss.register_hook(lambda grad: grad * (1 / config["train_horizon"]))
     bc_loss.backward()
@@ -383,6 +423,7 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
+    config["use_bc_trajectory"] = args.use_bc_trajectory
 
     # evaluation environment
     eval_env = gym.make(args.task)

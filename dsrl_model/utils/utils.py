@@ -264,6 +264,12 @@ def single_agent_args():
             "default": 0.0,
             "help": "fraction of noisy label in the non-preferred dataset",
         },
+        {
+            "name": "--use-bc-trajectory",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "use trajectory weighted bc policy",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
