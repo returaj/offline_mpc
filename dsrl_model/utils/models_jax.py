@@ -1,6 +1,7 @@
 import distrax
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 EPS = 1e-7
@@ -133,13 +134,13 @@ def positionalencoding1d(d_model, length):
             "Cannot use sin/cos positional encoding with "
             "odd dim (got dim={:d})".format(d_model)
         )
-    pe = jnp.zeros(length, d_model)
-    position = jnp.arange(0, length).unsqueeze(1)
-    div_term = jnp.exp((jnp.arange(0, d_model, 2) * -(jnp.log(10000.0) / d_model)))
-    pe[:, 0::2] = jnp.sin(position * div_term)
-    pe[:, 1::2] = jnp.cos(position * div_term)
-    pe = jnp.expand_dims(pe, axis=0)
-    return pe
+    pe = np.zeros((length, d_model), dtype=np.float32)
+    position = np.expand_dims(np.arange(0, length), axis=1)
+    div_term = np.exp((np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model)))
+    pe[:, 0::2] = np.sin(position * div_term)
+    pe[:, 1::2] = np.cos(position * div_term)
+    pe = np.expand_dims(pe, axis=0)
+    return jnp.array(pe)
 
 
 class TransformerBlock(nnx.Module):
@@ -180,25 +181,25 @@ class TransformerEmbedding(nnx.Module):
         obs_dim,
         act_dim,
         horizon,
-        emb_dim=128,
+        embd_dim=128,
         num_heads=4,
         num_attentions=1,
     ):
-        self.encoder = nnx.Linear(obs_dim + act_dim, emb_dim, rngs=rngs)
-        self.pos_encoding = positionalencoding1d(emb_dim, horizon)
-        self.mask = jnp.tril(jnp.ones(horizon, horizon))  # causal mask
-        linear_features = 4 * emb_dim
+        self.encoder = nnx.Linear(obs_dim + act_dim, embd_dim, rngs=rngs)
+        self.pos_encoding = positionalencoding1d(embd_dim, horizon)
+        self.mask = jnp.tril(jnp.ones((horizon, horizon)))  # causal mask
+        linear_features = 4 * embd_dim
         self.transformer_blocks = [
             TransformerBlock(
                 rngs=rngs,
-                d_model=emb_dim,
+                d_model=embd_dim,
                 liner_features=linear_features,
                 num_heads=num_heads,
             )
             for _ in range(num_attentions)
         ]
 
-    def __call__(self, x, horizon_axis=1, normalize_z=True, training=False):
+    def __call__(self, x, horizon_axis=1, normalize_z=True, training=True):
         if horizon_axis != 1:
             # shape of given x: horizon X batch X obs_act_dim
             # after permuting x: batch X horizon X obs_act_dim
