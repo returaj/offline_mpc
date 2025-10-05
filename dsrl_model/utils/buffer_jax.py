@@ -1,3 +1,5 @@
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,18 +26,16 @@ class OnPolicyBuffer:
         self.ep_len = ep_len
         self._priorities_alpha = priorities_alpha
 
-        self.dtype = jnp.float32
-        self._neg_obs = jnp.empty((self.neg_capacity + 1, obs_dim), dtype=self.dtype)
-        self._neg_act = jnp.empty((self.neg_capacity, act_dim), dtype=self.dtype)
-        self._neg_cost = jnp.empty((self.neg_capacity,), dtype=self.dtype)
-        self._neg_priorities = jnp.ones((self.neg_capacity,), dtype=self.dtype)
+        self.dtype = np.float32
+        self._neg_obs = np.empty((self.neg_capacity + 1, obs_dim), dtype=self.dtype)
+        self._neg_act = np.empty((self.neg_capacity, act_dim), dtype=self.dtype)
+        self._neg_cost = np.empty((self.neg_capacity,), dtype=self.dtype)
+        self._neg_priorities = np.ones((self.neg_capacity,), dtype=self.dtype)
+        self._union_obs = np.empty((self.union_capacity + 1, obs_dim), dtype=self.dtype)
+        self._union_act = np.empty((self.union_capacity, act_dim), dtype=self.dtype)
+        self._union_cost = np.empty((self.union_capacity,), dtype=self.dtype)
+        self._union_priorities = np.ones((self.union_capacity,), dtype=self.dtype)
 
-        self._union_obs = jnp.empty(
-            (self.union_capacity + 1, obs_dim), dtype=self.dtype
-        )
-        self._union_act = jnp.empty((self.union_capacity, act_dim), dtype=self.dtype)
-        self._union_cost = jnp.empty((self.union_capacity,), dtype=self.dtype)
-        self._union_priorities = jnp.ones((self.union_capacity,), dtype=self.dtype)
         self._eps = 1e-6
         self._neg_idx = 0
         self._union_idx = 0
@@ -53,10 +53,10 @@ class OnPolicyBuffer:
         cost,
         capacity,
     ):
-        obs_store[idx : idx + self.ep_len] = jnp.array(obs)
-        act_store[idx : idx + self.ep_len] = jnp.array(act)
-        priority_store[idx : idx + self.ep_len] = jnp.array(priority)
-        cost_store[idx : idx + self.ep_len] = jnp.array(cost)
+        obs_store[idx : idx + self.ep_len] = np.array(obs)
+        act_store[idx : idx + self.ep_len] = np.array(act)
+        priority_store[idx : idx + self.ep_len] = np.array(priority)
+        cost_store[idx : idx + self.ep_len] = np.array(cost)
         return (idx + self.ep_len) % capacity
 
     def add(self, obs, act, done, cost=None, is_negative=False):
@@ -64,8 +64,8 @@ class OnPolicyBuffer:
         max_priority = 1.0
         done_sum = np.sum(done) or 1.0
         true_ep_len = self.ep_len - done_sum + 1
-        mask = jnp.arange(self.ep_len) >= true_ep_len - self.horizon
-        new_priorities = jnp.full((self.ep_len,), max_priority)
+        mask = np.arange(self.ep_len) >= true_ep_len - self.horizon
+        new_priorities = np.full((self.ep_len,), max_priority)
         new_priorities[mask] = 0.0
 
         if is_negative:
@@ -95,9 +95,21 @@ class OnPolicyBuffer:
                 capacity=self.union_capacity,
             )
 
-    def update_priorities(self, idxs, priorities, union=True):
-        p = self._union_priorities if union else self._neg_priorities
-        p[idxs] = jnp.array(priorities) + self._eps
+    def to_jax_ndarray(self):
+        self.dtype = jnp.float32
+        self._neg_obs = jnp.array(self._neg_obs, dtype=self.dtype)
+        self._neg_act = jnp.array(self._neg_act, dtype=self.dtype)
+        self._neg_cost = jnp.array(self._neg_cost, dtype=self.dtype)
+        self._neg_priorities = jnp.array(self._neg_priorities, dtype=self.dtype)
+        self._union_obs = jnp.array(self._union_obs, dtype=self.dtype)
+        self._union_act = jnp.array(self._union_act, dtype=self.dtype)
+        self._union_cost = jnp.array(self._union_cost, dtype=self.dtype)
+        self._union_priorities = jnp.array(self._union_priorities, dtype=self.dtype)
+
+    @functools.partial(jax.jit, static_argnums=0)
+    def update_priorities(self, idxs, priorities):
+        priorities = jnp.array(priorities) + self._eps
+        self._union_priorities = self._union_priorities.at[idxs].set(priorities)
 
     def sample(self):
         batch_size = self.batch_size
@@ -125,43 +137,28 @@ class OnPolicyBuffer:
             replace=True,
         )
 
-        @jax.jit
-        def sample_step(nidx, uidx):
-            h_neg_obs = jnp.empty(
-                (self.horizon, batch_size, *self._neg_obs.shape[1:]), dtype=self.dtype
+        for n_idx, u_idx in zip(neg_idxs, union_idxs):
+            h_neg_obs, h_neg_act, h_neg_cost = [], [], []
+            h_union_obs, h_union_act, h_union_cost = [], [], []
+
+            for t in range(self.horizon):
+                _nidx, _uidx = n_idx + t, u_idx + t
+                h_neg_obs.append(self._neg_obs[_nidx])
+                h_neg_act.append(self._neg_act[_nidx])
+                h_neg_cost.append(self._neg_cost[_nidx])
+                h_union_obs.append(self._union_obs[_uidx])
+                h_union_act.append(self._union_act[_uidx])
+                h_union_cost.append(self._union_cost[_uidx])
+
+            yield (
+                jnp.array(h_neg_obs),
+                jnp.array(h_neg_act),
+                jnp.array(h_neg_cost),
+                jnp.array(h_union_obs),
+                jnp.array(h_union_act),
+                jnp.array(h_union_cost),
+                jnp.array(u_idx),
             )
-            h_neg_act = jnp.empty(
-                (self.horizon, batch_size, *self._neg_act.shape[1:]), dtype=self.dtype
-            )
-            h_neg_cost = jnp.empty((self.horizon, batch_size), dtype=self.dtype)
-            h_union_obs = jnp.empty_like(h_neg_obs)
-            h_union_act = jnp.empty_like(h_neg_act)
-            h_union_cost = jnp.empty_like(h_neg_cost)
-
-            def body_fun(t):
-                _nidx, _uidx = nidx + t, uidx + t
-                h_neg_obs[t] = self._neg_obs[_nidx]
-                h_neg_act[t] = self._neg_act[_nidx]
-                h_neg_cost[t] = self._neg_cost[_nidx]
-                h_union_obs[t] = self._union_obs[_uidx]
-                h_union_act[t] = self._union_act[_uidx]
-                h_union_cost[t] = self._union_cost[_uidx]
-                return t + 1
-
-            _ = jax.lax.while_loop(lambda t: t < self.horizon, body_fun, 0)
-
-            return (
-                h_neg_obs,
-                h_neg_act,
-                h_neg_cost,
-                h_union_obs,
-                h_union_act,
-                h_union_cost,
-                uidx,
-            )
-
-        for nidx, uidx in zip(neg_idxs, union_idxs):
-            yield sample_step(nidx, uidx)
 
 
 class SafeCLBuffer(OnPolicyBuffer):
@@ -188,13 +185,19 @@ class SafeCLBuffer(OnPolicyBuffer):
             ep_len,
             priorities_alpha,
         )
-        self._union_labels = -jnp.ones((self.union_capacity,), dtype=self.dtype)
+        self._union_labels = -np.ones((self.union_capacity,), dtype=self.dtype)
 
+    def to_jax_ndarray(self):
+        super().to_jax_ndarray()
+        self._union_labels = jnp.array(self._union_labels, dtype=self.dtype)
+
+    @functools.partial(jax.jit, static_argnums=0)
     def update_labels(self, idxs, labels):
-        self._union_labels[idxs] = jnp.array(labels)
-        
+        labels = jnp.array(labels)
+        self._union_labels = self._union_labels.at[idxs].set(labels)
+
     def sample(self):
         for buffer in super().sample():
             uidx = buffer[-1]
-            sample_label = self._union_labels[uidx]
+            sample_label = jnp.array(self._union_labels[uidx])
             yield (*buffer, sample_label)

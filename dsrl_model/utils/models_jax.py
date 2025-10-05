@@ -149,7 +149,7 @@ class TransformerBlock(nnx.Module):
     """
 
     def __init__(self, rngs, d_model, liner_features, num_heads, rate=0.1):
-        self.attn = nnx.MultiHeadAttention(num_heads, d_model, rngs=rngs)
+        self.attn = nnx.MultiHeadAttention(num_heads, d_model, decode=False, rngs=rngs)
         self.dp1 = nnx.Dropout(rate=rate, rngs=rngs)
         self.ln1 = nnx.LayerNorm(d_model, rngs=rngs)
         self.ff = nnx.Sequential(
@@ -203,7 +203,7 @@ class TransformerEmbedding(nnx.Module):
         if horizon_axis != 1:
             # shape of given x: horizon X batch X obs_act_dim
             # after permuting x: batch X horizon X obs_act_dim
-            x = x.permute(1, 0, 2)
+            x = jnp.permute_dims(x, axes=(1, 0, 2))
 
         x = self.encoder(x)
         x += self.pos_encoding
