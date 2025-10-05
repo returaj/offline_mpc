@@ -108,7 +108,7 @@ class OnPolicyBuffer:
 
     @functools.partial(jax.jit, static_argnums=0)
     def update_priorities(self, idxs, priorities):
-        priorities = jnp.array(priorities) + self._eps
+        priorities = jnp.array(priorities, dtype=self.dtype) + self._eps
         self._union_priorities = self._union_priorities.at[idxs].set(priorities)
 
     def sample(self):
@@ -193,7 +193,7 @@ class SafeCLBuffer(OnPolicyBuffer):
 
     @functools.partial(jax.jit, static_argnums=0)
     def update_labels(self, idxs, labels):
-        labels = jnp.array(labels)
+        labels = jnp.array(labels, dtype=self.dtype)
         self._union_labels = self._union_labels.at[idxs].set(labels)
 
     def sample(self):

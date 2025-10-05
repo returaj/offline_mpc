@@ -27,6 +27,7 @@ from dsrl_model.utils.models_jax import (
     ExpCostModel,
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
+    bce_loss,
     l2_normalize,
 )
 from dsrl_model.utils.utils import get_params_norm, single_agent_args
@@ -209,6 +210,63 @@ def get_new_union_labels(
     return target_neg_z, new_label
 
 
+@nnx.jit
+def cost_loss_fun(
+    cost_model,
+    target_neg_obs,
+    target_neg_act,
+    target_union_obs,
+    target_union_act,
+    target_union_label,
+    gamma,
+    decay,
+    max_label,
+):
+    discount = 1.0
+    total_neg_cost, total_union_cost = 0.0, 0.0
+
+    # Horizon X Batch X obs/act_dim
+    horizon, *_ = target_neg_obs.shape
+
+    target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
+    target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
+
+    def estimate_loss(t, val):
+        discount, total_neg_cost, total_union_cost = val
+        tn, tu = target_neg[t], target_union[t]
+        total_neg_cost += discount * cost_model(tn)
+        total_union_cost += discount * cost_model(tu)
+        discount *= gamma
+        return (discount, total_neg_cost, total_union_cost)
+
+    _, total_neg_cost, total_union_cost = jax.lax.fori_loop(
+        0, horizon, estimate_loss, (discount, total_neg_cost, total_union_cost)
+    )
+
+    # compare neg and union trajectory
+    logit_neg = total_neg_cost - total_union_cost
+    target_ones = jnp.ones_like(logit_neg, dtype=jnp.float32)
+    neg_union_loss = bce_loss(logit_neg, target_ones)
+
+    # compare union and union trajectory
+    # ensure batch size is of 2s multiple
+    part_uu_cost = total_union_cost.reshape((2, -1))
+    part_uu_label = target_union_label.reshape((2, -1))
+
+    logit_uu = part_uu_cost[0] - part_uu_cost[1]
+    target_uu = (part_uu_label[0] > part_uu_label[1]).astype(jnp.float32)
+    target_uu = target_uu.at[part_uu_label[0] == part_uu_label[1]].set(0.5)
+
+    valid_compare = (part_uu_label[0] > 0 & part_uu_label[1] > 0).astype(jnp.float32)
+    decay_weight = decay ** (max_label - jnp.abs(part_uu_label[0] - part_uu_label[1]))
+    weight = decay_weight * valid_compare
+
+    union_union_loss = bce_loss(logit_uu, target_uu, weight)
+
+    loss = neg_union_loss + union_union_loss
+    return jnp.mean(loss)
+
+
 def train_cost_and_policy_model(
     cost_model,
     bc_policy,
@@ -306,15 +364,15 @@ def main(args, cfg_env=None):
             neg_data, union_data
         )
 
-    neg_observations = jnp.array(neg_data["observations"], dtype=jnp.float32)
-    neg_actions = jnp.array(neg_data["actions"], dtype=jnp.float32)
+    neg_observations = neg_data["observations"]
+    neg_actions = neg_data["actions"]
     neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_costs = jnp.array(neg_data["costs"], dtype=jnp.float32)
+    neg_costs = neg_data["costs"]
 
-    union_observations = jnp.array(union_data["observations"], dtype=jnp.float32)
-    union_actions = jnp.array(union_data["actions"], dtype=jnp.float32)
+    union_observations = union_data["observations"]
+    union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
-    union_costs = jnp.array(union_data["costs"], dtype=jnp.float32)
+    union_costs = union_data["costs"]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (

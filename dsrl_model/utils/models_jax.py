@@ -23,6 +23,17 @@ def l2_normalize(x, axis=None, eps=EPS):
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
+def bce_loss(logits, labels, weights=1.0):
+    """
+    Numerically Stable BCE loss
+    Doc: https://medium.com/@sahilcarterr/why-nn-bcewithlogitsloss-numerically-stable-6a04f3052967
+    """
+    tn = jnp.clip(-logits, min=0.0)
+    loss = (1 - labels) * logits + tn + jnp.logaddexp(-tn, -logits - tn)
+    loss = weights * loss
+    return jnp.mean(loss)
+
+
 class SafeDiceTanhMixtureActor(nnx.Module):
     def __init__(
         self,
