@@ -143,6 +143,10 @@ def positionalencoding1d(d_model, length):
 
 
 class TransformerBlock(nnx.Module):
+    """
+    Code: https://docs.jaxstack.ai/en/latest/JAX_for_LLM_pretraining.html
+    """
+
     def __init__(self, rngs, d_model, liner_features, num_heads, rate=0.1):
         self.attn = nnx.MultiHeadAttention(num_heads, d_model, rngs=rngs)
         self.dp1 = nnx.Dropout(rate=rate, rngs=rngs)

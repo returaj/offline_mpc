@@ -162,3 +162,39 @@ class OnPolicyBuffer:
 
         for nidx, uidx in zip(neg_idxs, union_idxs):
             yield sample_step(nidx, uidx)
+
+
+class SafeCLBuffer(OnPolicyBuffer):
+    def __init__(
+        self,
+        rngs,
+        obs_dim,
+        act_dim,
+        neg_data_size,
+        union_data_size,
+        horizon,
+        batch_size,
+        ep_len=1000,
+        priorities_alpha=1,
+    ):
+        super().__init__(
+            rngs,
+            obs_dim,
+            act_dim,
+            neg_data_size,
+            union_data_size,
+            horizon,
+            batch_size,
+            ep_len,
+            priorities_alpha,
+        )
+        self._union_labels = -jnp.ones((self.union_capacity,), dtype=self.dtype)
+
+    def update_labels(self, idxs, labels):
+        self._union_labels[idxs] = jnp.array(labels)
+        
+    def sample(self):
+        for buffer in super().sample():
+            uidx = buffer[-1]
+            sample_label = self._union_labels[uidx]
+            yield (*buffer, sample_label)
