@@ -47,12 +47,12 @@ default_cfg = {
     "update_freq": 2,
     "decay": 0.85,
     "max_label": 4.0,
-    "warmup_steps": int(1e2),
+    "warmup_steps": int(1e1),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e2),
 }
 
 trajectory_cfg = {
@@ -210,7 +210,6 @@ def get_new_union_labels(
     return target_neg_z, new_label
 
 
-@nnx.jit
 def cost_loss_fun(
     cost_model,
     target_neg_obs,
@@ -223,10 +222,12 @@ def cost_loss_fun(
     max_label,
 ):
     discount = 1.0
-    total_neg_cost, total_union_cost = 0.0, 0.0
-
     # Horizon X Batch X obs/act_dim
-    horizon, *_ = target_neg_obs.shape
+    horizon, batch_size, *_ = target_neg_obs.shape
+    dtype = target_neg_obs.dtype
+
+    total_neg_cost = jnp.zeros((batch_size,), dtype=dtype)
+    total_union_cost = jnp.zeros((batch_size,), dtype=dtype)
 
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
@@ -245,7 +246,7 @@ def cost_loss_fun(
 
     # compare neg and union trajectory
     logit_neg = total_neg_cost - total_union_cost
-    target_ones = jnp.ones_like(logit_neg, dtype=jnp.float32)
+    target_ones = jnp.ones_like(logit_neg, dtype=dtype)
     neg_union_loss = bce_loss(logit_neg, target_ones)
 
     # compare union and union trajectory
@@ -254,10 +255,10 @@ def cost_loss_fun(
     part_uu_label = target_union_label.reshape((2, -1))
 
     logit_uu = part_uu_cost[0] - part_uu_cost[1]
-    target_uu = (part_uu_label[0] > part_uu_label[1]).astype(jnp.float32)
-    target_uu = target_uu.at[part_uu_label[0] == part_uu_label[1]].set(0.5)
+    target_uu = (part_uu_label[0] > part_uu_label[1]).astype(dtype)
+    target_uu = jnp.where(part_uu_label[0] == part_uu_label[1], 0.5, target_uu)
 
-    valid_compare = (part_uu_label[0] > 0 & part_uu_label[1] > 0).astype(jnp.float32)
+    valid_compare = ((part_uu_label[0] > 0) & (part_uu_label[1] > 0)).astype(dtype)
     decay_weight = decay ** (max_label - jnp.abs(part_uu_label[0] - part_uu_label[1]))
     weight = decay_weight * valid_compare
 
@@ -267,6 +268,21 @@ def cost_loss_fun(
     return jnp.mean(loss)
 
 
+def bc_policy_transition_loss_fun(bc_policy, cost_model, target_obs, target_act):
+    horizon, batch_size, _ = target_obs.shape
+
+    target_obs = target_obs.reshape((horizon * batch_size, -1))
+    target_act = target_act.reshape((horizon * batch_size, -1))
+
+    weight = 1 - cost_model(jnp.concat([target_obs, target_act], axis=-1))
+
+    pred_act, *_ = bc_policy(target_obs)
+    loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
+    loss = jnp.mean(weight * loss)
+    return loss
+
+
+@nnx.jit
 def train_cost_and_policy_model(
     cost_model,
     bc_policy,
@@ -277,10 +293,34 @@ def train_cost_and_policy_model(
     target_union_obs,
     target_union_act,
     target_union_label,
-    margin,
-    config,
+    gamma,
+    decay,
+    max_label,
 ):
-    pass
+    horizon = target_neg_obs.shape[0]
+
+    cost_grad_fun = nnx.value_and_grad(cost_loss_fun)
+    cost_loss, cost_grad = cost_grad_fun(
+        cost_model,
+        target_neg_obs,
+        target_neg_act,
+        target_union_obs,
+        target_union_act,
+        target_union_label,
+        gamma,
+        decay,
+        max_label,
+    )
+    cost_grad = jax.tree.map(lambda g: g / horizon, cost_grad)
+    cost_optimizer.update(cost_grad)
+
+    bc_grad_fun = nnx.value_and_grad(bc_policy_transition_loss_fun)
+    bc_loss, bc_grad = bc_grad_fun(
+        bc_policy, cost_model, target_union_obs, target_union_act
+    )
+    bc_optimizer.update(bc_grad)
+
+    return cost_loss, bc_loss
 
 
 def main(args, cfg_env=None):
@@ -322,8 +362,11 @@ def main(args, cfg_env=None):
     )
     bc_optimizer = nnx.Optimizer(
         model=bc_policy,
-        tx=optax.adamw(
-            learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+            ),
         ),
     )
 
@@ -338,7 +381,12 @@ def main(args, cfg_env=None):
     )
     embedding_optimizer = nnx.Optimizer(
         model=embedding_model,
-        tx=optax.adamw(learning_rate=args.lr, weight_decay=config["weight_decay"]),
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
     )
 
     cost_model = ExpCostModel(
@@ -348,7 +396,12 @@ def main(args, cfg_env=None):
     )
     cost_optimizer = nnx.Optimizer(
         model=cost_model,
-        tx=optax.adamw(learning_rate=args.lr, weight_decay=config["weight_decay"]),
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
     )
 
     # data
@@ -409,7 +462,6 @@ def main(args, cfg_env=None):
 
     steps = 0
     target_neg_z = jnp.zeros((1, embd_size), dtype=jnp.float32)
-    margin = 0.0
     while steps < config["total_iteration"]:
         # shape: Horizon X Batch X obs/act_dim
         for (
@@ -453,7 +505,7 @@ def main(args, cfg_env=None):
                 )
                 buffer.update_labels(target_union_idx, new_union_labels)
 
-                cost_loss, bc_loss, margin = train_cost_and_policy_model(
+                cost_loss, bc_loss = train_cost_and_policy_model(
                     cost_model=cost_model,
                     bc_policy=bc_policy,
                     cost_optimizer=cost_optimizer,
@@ -463,9 +515,14 @@ def main(args, cfg_env=None):
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_union_label=new_union_labels,
-                    margin=margin,
-                    config=config,
+                    gamma=config["gamma"],
+                    decay=config["decay"],
+                    max_label=config["max_label"],
                 )
+
+            print(
+                f"embd_loss: {embedding_loss:.2f}, cost_loss: {cost_loss:.2f}, bc_loss: {bc_loss:.2f}"
+            )
 
 
 if __name__ == "__main__":

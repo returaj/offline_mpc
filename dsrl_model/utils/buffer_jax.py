@@ -191,9 +191,9 @@ class SafeCLBuffer(OnPolicyBuffer):
         super().to_jax_ndarray()
         self._union_labels = jnp.array(self._union_labels, dtype=self.dtype)
 
-    @functools.partial(jax.jit, static_argnums=0)
     def update_labels(self, idxs, labels):
         labels = jnp.array(labels, dtype=self.dtype)
+        # check if this has memory leak as it will create a new array
         self._union_labels = self._union_labels.at[idxs].set(labels)
 
     def sample(self):
