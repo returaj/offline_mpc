@@ -23,6 +23,13 @@ def l2_normalize(x, axis=None, eps=EPS):
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
+def get_tree_norm(tree):
+    square_tree = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), tree)
+    total_square = jax.tree_util.tree_reduce(lambda acc, x: acc + x, square_tree)
+    l2_norm = jnp.sqrt(total_square)
+    return l2_norm
+
+
 def bce_loss(logits, labels, weights=1.0):
     """
     Numerically Stable BCE loss

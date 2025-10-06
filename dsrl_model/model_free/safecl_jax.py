@@ -28,15 +28,17 @@ from dsrl_model.utils.models_jax import (
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     bce_loss,
+    get_tree_norm,
     l2_normalize,
 )
-from dsrl_model.utils.utils import get_params_norm, single_agent_args
+from dsrl_model.utils.native_logger import EpochLogger
+from dsrl_model.utils.utils import single_agent_args
 
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
-    "save_freq": int(2e4),
+    "log_freq": int(1e1),
+    "save_freq": int(2e1),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
     "embd_size": 128,
@@ -65,11 +67,11 @@ trajectory_cfg = {
 }
 
 
-def evaluate_bc_policy(eval_env, bc_policy):
+def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
     eval_done = False
     eval_obs, _ = eval_env.reset()
-    # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
-    eval_obs = jnp.array(eval_obs, dtype=jnp.float32).unsqueeze(0)
+    eval_obs = (eval_obs - mu_obs) / (std_obs + EPS)
+    eval_obs = jnp.expand_dims(jnp.array(eval_obs, dtype=jnp.float32), axis=0)
     eval_reward, eval_cost, eval_len = 0.0, 0.0, 0.0
     while not eval_done:
         act = bc_policy(eval_obs)
@@ -77,8 +79,8 @@ def evaluate_bc_policy(eval_env, bc_policy):
             np.array(act[0].squeeze())
         )
         cost = info["cost"]
-        # next_obs = (next_obs - mu_obs) / (std_obs + EP)
-        next_obs = jnp.array(next_obs, dtype=jnp.float32).unsqueeze(0)
+        next_obs = (next_obs - mu_obs) / (std_obs + EPS)
+        next_obs = jnp.expand_dims(jnp.array(next_obs, dtype=jnp.float32), axis=0)
         eval_obs = next_obs
         eval_reward += reward
         eval_cost += cost
@@ -411,7 +413,7 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
     neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
-    mu_obs, std_obs = None, None
+    mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         neg_data, union_data, mu_obs, std_obs = get_normalized_data(
             neg_data, union_data
@@ -460,6 +462,10 @@ def main(args, cfg_env=None):
     dict_args = config
     dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
 
+    logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
+    logger.save_config(dict_args)
+    logger.log("Start embedding, cost and bc_policy model training.")
+
     steps = 0
     target_neg_z = jnp.zeros((1, embd_size), dtype=jnp.float32)
     while steps < config["total_iteration"]:
@@ -489,7 +495,7 @@ def main(args, cfg_env=None):
                 max_label=config["max_label"],
             )
 
-            cost_loss = bc_loss = 0.0
+            cost_loss = bc_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_freq"] == 0
             ):
@@ -520,9 +526,77 @@ def main(args, cfg_env=None):
                     max_label=config["max_label"],
                 )
 
-            print(
-                f"embd_loss: {embedding_loss:.2f}, cost_loss: {cost_loss:.2f}, bc_loss: {bc_loss:.2f}"
-            )
+            logger.logged = False
+
+            if (steps % config["log_freq"] == 0) and (not logger.logged):
+                eval_episodes = config["eval_episode_freq"]
+                if args.use_eval:
+                    eval_start_time = time.time()
+                    for id in range(eval_episodes):
+                        (eval_reward, eval_cost, eval_len) = evaluate_bc_policy(
+                            eval_env, bc_policy.action, mu_obs, std_obs
+                        )
+                        eval_rew_deque.append(eval_reward)
+                        eval_cost_deque.append(eval_cost)
+                        eval_len_deque.append(eval_len)
+                    eval_end_time = time.time()
+
+                    logger.log_tabular("Metrics/EvalEpRet", np.mean(eval_rew_deque))
+                    logger.log_tabular("Metrics/EvalEpCost", np.mean(eval_cost_deque))
+                    logger.log_tabular("Metrics/EvalEpLen", np.mean(eval_len_deque))
+                    logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
+
+                logger.log_tabular("Train/Steps", steps)
+                logger.log_tabular("Loss/Loss_embedding", embedding_loss.mean().item())
+                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
+                logger.log_tabular("Loss/Loss_bc_policy", bc_loss.mean().item())
+                logger.log_tabular(
+                    "Norm/embedding_model",
+                    get_tree_norm(nnx.state(embedding_model, nnx.Param)),
+                )
+                logger.log_tabular(
+                    "Norm/cost_model",
+                    get_tree_norm(nnx.state(cost_model, nnx.Param)),
+                )
+                logger.log_tabular(
+                    "Norm/bc_policy",
+                    get_tree_norm(nnx.state(bc_policy, nnx.Param)),
+                )
+                logger.dump_tabular()
+
+            if steps % config["save_freq"] == 0:
+                logger.nn_model_save(
+                    itr=steps,
+                    nn_model_saver_element=embedding_model,
+                    prefix="embedding",
+                )
+                logger.nn_model_save(
+                    itr=steps,
+                    nn_model_saver_element=cost_model,
+                    prefix="cost",
+                )
+                logger.nn_model_save(
+                    itr=steps,
+                    nn_model_saver_element=bc_policy,
+                    prefix="bc_policy",
+                )
+
+            if steps >= config["total_iteration"]:
+                break
+
+    logger.nn_model_save(
+        itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
+    )
+    logger.nn_model_save(itr=steps, nn_model_saver_element=cost_model, prefix="cost")
+    logger.nn_model_save(
+        itr=steps, nn_model_saver_element=bc_policy, prefix="bc_policy"
+    )
+    logger.save_state(state_dict={"target_neg_z": target_neg_z}, dirname="neg_z")
+    if config["normalize_observation"]:
+        logger.save_state(
+            state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
+        )
+    logger.close()
 
 
 if __name__ == "__main__":
