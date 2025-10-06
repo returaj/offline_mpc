@@ -5,6 +5,11 @@ import jax.numpy as jnp
 import numpy as np
 
 
+@jax.jit
+def update_arr_jit(arr, idxs, val):
+    return arr.at[idxs].set(val)
+
+
 class OnPolicyBuffer:
     def __init__(
         self,
@@ -106,10 +111,34 @@ class OnPolicyBuffer:
         self._union_cost = jnp.array(self._union_cost, dtype=self.dtype)
         self._union_priorities = jnp.array(self._union_priorities, dtype=self.dtype)
 
-    @functools.partial(jax.jit, static_argnums=0)
     def update_priorities(self, idxs, priorities):
         priorities = jnp.array(priorities, dtype=self.dtype) + self._eps
-        self._union_priorities = self._union_priorities.at[idxs].set(priorities)
+        self._union_priorities = update_arr_jit(
+            self._union_priorities, idxs, priorities
+        )
+
+    @functools.partial(jax.jit, static_argnums=0)
+    def sample_batch(self, n_idx, u_idx):
+        horizon_offsets = jnp.arange(self.horizon)
+        n_h_idx = n_idx[..., None] + horizon_offsets
+        u_h_idx = u_idx[..., None] + horizon_offsets
+
+        h_neg_obs = self._neg_obs[n_h_idx]
+        h_neg_act = self._neg_act[n_h_idx]
+        h_neg_cost = self._neg_cost[n_h_idx]
+        h_union_obs = self._union_obs[u_h_idx]
+        h_union_act = self._union_act[u_h_idx]
+        h_union_cost = self._union_cost[u_h_idx]
+
+        return (
+            h_neg_obs,
+            h_neg_act,
+            h_neg_cost,
+            h_union_obs,
+            h_union_act,
+            h_union_cost,
+            u_idx,
+        )
 
     def sample(self):
         batch_size = self.batch_size
@@ -138,27 +167,7 @@ class OnPolicyBuffer:
         )
 
         for n_idx, u_idx in zip(neg_idxs, union_idxs):
-            h_neg_obs, h_neg_act, h_neg_cost = [], [], []
-            h_union_obs, h_union_act, h_union_cost = [], [], []
-
-            for t in range(self.horizon):
-                _nidx, _uidx = n_idx + t, u_idx + t
-                h_neg_obs.append(self._neg_obs[_nidx])
-                h_neg_act.append(self._neg_act[_nidx])
-                h_neg_cost.append(self._neg_cost[_nidx])
-                h_union_obs.append(self._union_obs[_uidx])
-                h_union_act.append(self._union_act[_uidx])
-                h_union_cost.append(self._union_cost[_uidx])
-
-            yield (
-                jnp.array(h_neg_obs),
-                jnp.array(h_neg_act),
-                jnp.array(h_neg_cost),
-                jnp.array(h_union_obs),
-                jnp.array(h_union_act),
-                jnp.array(h_union_cost),
-                jnp.array(u_idx),
-            )
+            yield self.sample_batch(n_idx, u_idx)
 
 
 class SafeCLBuffer(OnPolicyBuffer):
@@ -193,11 +202,10 @@ class SafeCLBuffer(OnPolicyBuffer):
 
     def update_labels(self, idxs, labels):
         labels = jnp.array(labels, dtype=self.dtype)
-        # check if this has memory leak as it will create a new array
-        self._union_labels = self._union_labels.at[idxs].set(labels)
+        self._union_labels = update_arr_jit(self._union_labels, idxs, labels)
 
-    def sample(self):
-        for buffer in super().sample():
-            uidx = buffer[-1]
-            sample_label = jnp.array(self._union_labels[uidx])
-            yield (*buffer, sample_label)
+    @functools.partial(jax.jit, static_argnums=0)
+    def sample_batch(self, n_idx, u_idx):
+        batch = super().sample_batch(n_idx, u_idx)
+        label = self._union_labels[u_idx]
+        return (*batch, label)

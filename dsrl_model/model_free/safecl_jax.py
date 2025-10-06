@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import nnx
+from jax import debug
 
 from dsrl_model.utils.buffer_jax import SafeCLBuffer
 from dsrl_model.utils.dsrl_dataset import (
@@ -91,14 +92,15 @@ def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
 
 @jax.jit
 def discounted_sum(vector_x, gamma):
+    dtype = vector_x.dtype
     horizon = vector_x.shape[0]
-    cumsum = 0
 
     def body_fun(t, cumsum):
         cumsum = vector_x[horizon - 1 - t] + gamma * cumsum
         return cumsum
 
-    cumsum = jax.lax.fori_loop(0, horizon, body_fun, cumsum)
+    init_cumsum = jnp.zeros_like(vector_x[0], dtype=dtype)
+    cumsum = jax.lax.fori_loop(0, horizon, body_fun, init_cumsum)
     return cumsum
 
 
@@ -122,16 +124,17 @@ def train_embedding_model(
     decay,
     max_label,
 ):
-    _, batch_size, _ = target_neg_obs.shape
+    dtype = target_neg_obs.dtype
+    batch_size, *_ = target_neg_obs.shape
 
-    # shape: Horizon X Batch X obs_act_dim
+    # shape: Batch X Horizon X obs_act_dim
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     def loss_fun(embedding_model):
         # Batch X embd_dim
-        neg_z = embedding_model(target_neg, horizon_axis=0, normalize_z=True)
-        union_z = embedding_model(target_union, horizon_axis=0, normalize_z=True)
+        neg_z = embedding_model(target_neg, normalize_z=True)
+        union_z = embedding_model(target_union, normalize_z=True)
 
         temperature = 0.1  # value from SupContrast
         combined_z = jnp.concat([neg_z, union_z], axis=0)
@@ -139,12 +142,12 @@ def train_embedding_model(
         # remove the self instance from the logits
         combined_logits = jnp.fill_diagonal(combined_logits, -1e9, inplace=False)
 
-        neg_mask = jnp.ones((batch_size, batch_size), dtype=jnp.float32)
+        neg_mask = jnp.ones((batch_size, batch_size), dtype=dtype)
         union_mask = (
             jnp.expand_dims(target_union_label, axis=0)
             == jnp.expand_dims(target_union_label, axis=1)
-        ).astype(jnp.float32)
-        valid_mask = (target_union_label >= 0).astype(jnp.float32)
+        ).astype(dtype)
+        valid_mask = (target_union_label >= 0).astype(dtype)
         # remove -1 labels from all the union_mask
         union_mask = (
             union_mask
@@ -155,7 +158,7 @@ def train_embedding_model(
         # zero out diagoals
         combined_mask = jnp.fill_diagonal(combined_mask, 0.0, inplace=False)
 
-        neg_decay_rate = jnp.ones((batch_size,), dtype=jnp.float32)
+        neg_decay_rate = jnp.ones((batch_size,), dtype=dtype)
         union_decay_rate = decay ** (max_label - target_union_label)
         decay_rate = jnp.concat([neg_decay_rate, union_decay_rate])
 
@@ -197,12 +200,8 @@ def get_new_union_labels(
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     # Batch X embd_dim
-    neg_z = embedding_model(
-        target_neg, horizon_axis=0, normalize_z=True, training=False
-    )
-    union_z = embedding_model(
-        target_union, horizon_axis=0, normalize_z=True, training=False
-    )
+    neg_z = embedding_model(target_neg, normalize_z=True, training=False)
+    union_z = embedding_model(target_union, normalize_z=True, training=False)
 
     rep_neg_z = l2_normalize(neg_z.sum(axis=0, keepdims=True), axis=-1)
     target_neg_z = (1 - tau) * target_neg_z + tau * rep_neg_z
@@ -223,28 +222,15 @@ def cost_loss_fun(
     decay,
     max_label,
 ):
-    discount = 1.0
-    # Horizon X Batch X obs/act_dim
-    horizon, batch_size, *_ = target_neg_obs.shape
     dtype = target_neg_obs.dtype
-
-    total_neg_cost = jnp.zeros((batch_size,), dtype=dtype)
-    total_union_cost = jnp.zeros((batch_size,), dtype=dtype)
 
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
+    cost_neg = cost_model(target_neg)
+    cost_union = cost_model(target_union)
 
-    def estimate_loss(t, val):
-        discount, total_neg_cost, total_union_cost = val
-        tn, tu = target_neg[t], target_union[t]
-        total_neg_cost += discount * cost_model(tn)
-        total_union_cost += discount * cost_model(tu)
-        discount *= gamma
-        return (discount, total_neg_cost, total_union_cost)
-
-    _, total_neg_cost, total_union_cost = jax.lax.fori_loop(
-        0, horizon, estimate_loss, (discount, total_neg_cost, total_union_cost)
-    )
+    total_neg_cost = jax.vmap(discounted_sum, in_axes=(0, None))(cost_neg, gamma)
+    total_union_cost = jax.vmap(discounted_sum, in_axes=(0, None))(cost_union, gamma)
 
     # compare neg and union trajectory
     logit_neg = total_neg_cost - total_union_cost
@@ -271,7 +257,7 @@ def cost_loss_fun(
 
 
 def bc_policy_transition_loss_fun(bc_policy, cost_model, target_obs, target_act):
-    horizon, batch_size, _ = target_obs.shape
+    batch_size, horizon, _ = target_obs.shape
 
     target_obs = target_obs.reshape((horizon * batch_size, -1))
     target_act = target_act.reshape((horizon * batch_size, -1))
@@ -299,7 +285,7 @@ def train_cost_and_policy_model(
     decay,
     max_label,
 ):
-    horizon = target_neg_obs.shape[0]
+    horizon = target_neg_obs.shape[1]
 
     cost_grad_fun = nnx.value_and_grad(cost_loss_fun)
     cost_loss, cost_grad = cost_grad_fun(
@@ -469,7 +455,7 @@ def main(args, cfg_env=None):
     steps = 0
     target_neg_z = jnp.zeros((1, embd_size), dtype=jnp.float32)
     while steps < config["total_iteration"]:
-        # shape: Horizon X Batch X obs/act_dim
+        # shape: Batch X Horizon X obs/act_dim
         for (
             target_neg_obs,
             target_neg_act,

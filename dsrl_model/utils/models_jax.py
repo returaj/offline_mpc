@@ -217,12 +217,8 @@ class TransformerEmbedding(nnx.Module):
             for _ in range(num_attentions)
         ]
 
-    def __call__(self, x, horizon_axis=1, normalize_z=True, training=True):
-        if horizon_axis != 1:
-            # shape of given x: horizon X batch X obs_act_dim
-            # after permuting x: batch X horizon X obs_act_dim
-            x = jnp.permute_dims(x, axes=(1, 0, 2))
-
+    def __call__(self, x, normalize_z=True, training=True):
+        # ensure x: batch X horizon X obs_act_dim
         x = self.encoder(x)
         x += self.pos_encoding
         for transformer in self.transformer_blocks:
