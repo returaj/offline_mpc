@@ -1,5 +1,8 @@
-import argparse
 import os
+
+os.environ["JAX_PLATFORMS"] = "cpu"
+
+import argparse
 import os.path as osp
 import re
 import time
@@ -303,8 +306,6 @@ if __name__ == "__main__":
         from flax import nnx
 
         from dsrl_model.utils.models_jax import SafeDiceTanhMixtureActor
-
-        jax.default_device = jax.devices(args.device)[args.device_id]
     else:
         import torch
 
