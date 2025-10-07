@@ -1,8 +1,5 @@
-import os
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-
 import argparse
+import os
 import os.path as osp
 import re
 import time

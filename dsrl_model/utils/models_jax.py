@@ -1,3 +1,5 @@
+import functools
+
 import distrax
 import jax
 import jax.numpy as jnp
@@ -97,7 +99,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         return actions, pretanh_actions, pretanh_action_dist
 
-    def action(self, obs, deterministic=False):
+    @functools.partial(jax.jit, static_argnums=0)
+    def action_w_key(self, key, obs, deterministic=False):
         x = self.pre_encoder(obs)
 
         mixture_logits = self.logits(x) / self.mdn_temp
@@ -109,18 +112,26 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         mixture_dist = distrax.Categorical(logits=mixture_logits)
 
-        if deterministic:
-            mixture_id = mixture_dist.sample(seed=self.rngs())
+        def deterministic_fun():
+            mixture_id = mixture_dist.sample(seed=key)
             pretanh_action = jax.vmap(lambda x, y: x[y])(means, mixture_id)
-        else:
+            return pretanh_action
+
+        def stochastic_fun():
             component_dist = distrax.Normal(loc=means, scale=stds)
             component_dist = distrax.Independent(component_dist, 1)
             pretanh_action_dist = distrax.MixtureSameFamily(
                 mixture_dist, component_dist
             )
-            pretanh_action = pretanh_action_dist.sample(seed=self.rngs())
+            pretanh_action = pretanh_action_dist.sample(seed=key)
+            return pretanh_action
+
+        pretanh_action = jnp.where(deterministic, deterministic_fun(), stochastic_fun())
 
         return jax.nn.tanh(pretanh_action)
+
+    def action(self, obs, deterministic=False):
+        return self.action_w_key(self.rngs(), obs, deterministic)
 
 
 class ExpCostModel(nnx.Module):
