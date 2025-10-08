@@ -46,11 +46,11 @@ default_cfg = {
     "max_grad_norm": 1.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "train_horizon": 5,  # 20
+    "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
     "max_label": 4.0,
-    "warmup_steps": int(1e2),
+    "warmup_steps": int(1e3),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -172,6 +172,7 @@ def train_embedding_model(
     return loss
 
 
+@jax.jit
 def index_fun(v, max_label):
     return jnp.select(
         condlist=[
@@ -203,10 +204,11 @@ def get_new_union_labels(
     neg_z = embedding_model(target_neg, normalize_z=True, training=False)
     union_z = embedding_model(target_union, normalize_z=True, training=False)
 
-    rep_neg_z = l2_normalize(neg_z.sum(axis=0, keepdims=True), axis=-1)
+    rep_neg_z = neg_z.mean(axis=0, keepdims=True)
     target_neg_z = (1 - tau) * target_neg_z + tau * rep_neg_z
+    norm_target_neg_z = l2_normalize(target_neg_z, axis=-1)
 
-    union_pred = (union_z @ target_neg_z.T).squeeze()
+    union_pred = (union_z @ norm_target_neg_z.T).squeeze()
     new_label = index_fun(union_pred, max_label)
     return target_neg_z, new_label
 
