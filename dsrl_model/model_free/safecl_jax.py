@@ -49,7 +49,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "warmup_steps": int(1e3),
+    "warmup_steps": int(1e4),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -236,11 +236,12 @@ def get_new_union_labels(
     # Batch X embd_dim
     union_z = embedding_model(target_union, normalize_z=True, training=False)
 
-    union_score = jnp.max(union_z @ target_neg_z, axis=-1)
-    # noise = 0.1 * jax.random.normal(key, shape=true_union_score.shape)
-    # union_score = jnp.clip(true_union_score + noise, min=-1.0, max=1.0)
+    true_union_score = jnp.max(union_z @ target_neg_z, axis=-1)
+    noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
+    union_score = jnp.clip(true_union_score + noise, min=-1.0, max=1.0)
     new_label = index_fun(union_score, all_labels, label_range)
-    return new_label, union_score
+    new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
+    return new_label, new_label_count, union_score
 
 
 @nnx.jit
@@ -463,17 +464,20 @@ def main(args, cfg_env=None):
             )
 
             bc_loss = jnp.array(0.0)
+            new_union_label_count = jnp.zeros_like(all_labels, dtype=jnp.float32)
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_freq"] == 0
             ):
-                new_union_labels, new_union_score = get_new_union_labels(
-                    embedding_model=embedding_model,
-                    target_union_obs=target_union_obs,
-                    target_union_act=target_union_act,
-                    target_neg_z=target_neg_z,
-                    all_labels=all_labels,
-                    label_range=label_range,
-                    key=rngs.new_labels(),
+                new_union_labels, new_union_label_count, new_union_score = (
+                    get_new_union_labels(
+                        embedding_model=embedding_model,
+                        target_union_obs=target_union_obs,
+                        target_union_act=target_union_act,
+                        target_neg_z=target_neg_z,
+                        all_labels=all_labels,
+                        label_range=label_range,
+                        key=rngs.new_labels(),
+                    )
                 )
                 buffer.update_labels(target_union_idx, new_union_labels)
 
