@@ -194,7 +194,7 @@ class SafeCLBuffer(OnPolicyBuffer):
             ep_len,
             priorities_alpha,
         )
-        self._union_labels = -np.ones((self.union_capacity,), dtype=self.dtype)
+        self._union_labels = np.zeros((self.union_capacity,), dtype=self.dtype)
 
     def to_jax_ndarray(self):
         super().to_jax_ndarray()
