@@ -221,7 +221,7 @@ def index_fun(arr, all_labels, label_range):
     return all_labels[idx]
 
 
-@functools.partial(jax.jit, static_argnums=0)
+@nnx.jit
 def get_new_union_labels(
     embedding_model,
     target_union_obs,
@@ -236,12 +236,13 @@ def get_new_union_labels(
     # Batch X embd_dim
     union_z = embedding_model(target_union, normalize_z=True, training=False)
 
-    true_union_score = jnp.max(union_z @ target_neg_z, axis=-1)
-    noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
-    union_score = jnp.clip(true_union_score + noise, min=-1.0, max=1.0)
+    union_score = jnp.max(union_z @ target_neg_z, axis=-1)
+    # noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
+    # union_score = jnp.clip(true_union_score + noise, min=-1.0, max=1.0)
     new_label = index_fun(union_score, all_labels, label_range)
     new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
-    return new_label, new_label_count, union_score
+    new_label_percent = new_label_count / jnp.sum(new_label_count)
+    return new_label, new_label_percent, union_score
 
 
 @nnx.jit
@@ -464,11 +465,11 @@ def main(args, cfg_env=None):
             )
 
             bc_loss = jnp.array(0.0)
-            new_union_label_count = jnp.zeros_like(all_labels, dtype=jnp.float32)
+            new_union_labels_percent = jnp.zeros_like(all_labels, dtype=jnp.float32)
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_freq"] == 0
             ):
-                new_union_labels, new_union_label_count, new_union_score = (
+                new_union_labels, new_union_labels_percent, new_union_score = (
                     get_new_union_labels(
                         embedding_model=embedding_model,
                         target_union_obs=target_union_obs,
@@ -512,18 +513,23 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
-                logger.log_tabular("Loss/Loss_mode_entropy", mode_entropy.item())
+                logger.log_tabular("Loss/Loss_embd_mode_entropy", mode_entropy.item())
                 logger.log_tabular(
-                    "Loss/Loss_union_entropy", union_score_entropy.item()
+                    "Loss/Loss_embd_union_entropy", union_score_entropy.item()
                 )
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
                 for i in range(labels_cfg["num_modes"]):
-                    logger.log_tabular(f"Percentage/mode_{i}", mode_percent[i].item())
+                    logger.log_tabular(
+                        f"Percentage/embd_mode_{i}", mode_percent[i].item()
+                    )
 
-                logger.log_tabular("Mean/neg_score", neg_mean_score.mean().item())
+                logger.log_tabular("Mean/embd_neg_score", neg_mean_score.mean().item())
                 for l, lms in zip(all_labels, union_mean_score):
-                    logger.log_tabular(f"Mean/union_score_label_{l}", lms.item())
+                    logger.log_tabular(f"Mean/embd_union_score_label_{l}", lms.item())
+
+                for l, nul in zip(all_labels, new_union_labels_percent):
+                    logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
 
                 logger.log_tabular(
                     "Norm/embedding_model",
