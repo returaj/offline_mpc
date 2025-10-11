@@ -112,7 +112,6 @@ def discounted_sum(vector_x, gamma):
 
 @jax.jit
 def kernel_density_entropy(samples, mask, sigma=0.2):
-    n = samples.shape[0]
     diffs = samples[:, None] - samples[None, :]
     kernel = jnp.exp(-0.5 * (diffs / sigma) ** 2)
     mask2d = mask[:, None] * mask[None, :]
@@ -180,19 +179,19 @@ def train_embedding_model(
         mode_count = neg_mode_count + union_mode_count
         mode_percent = mode_count / jnp.sum(mode_count)
 
-        neg_mode_psum = jax.nn.softmax(multimode_neg_score / temp2, axis=-1).sum(axis=0)
-        union_mode_psum = (
+        neg_mode_pmean = jax.nn.softmax(multimode_neg_score / temp2, axis=-1).mean(
+            axis=0
+        )
+        union_mode_pmean = (
             valid_weight[:, None]
             * jax.nn.softmax(multimode_union_score / temp2, axis=-1)
-        ).sum(axis=0)
-        mode_psum = neg_mode_psum + union_mode_psum
-        mode_p = mode_psum / jnp.sum(mode_psum)
+        ).mean(axis=0)
+        mode_p = 0.5 * (neg_mode_pmean + union_mode_pmean)
         mode_entropy = -jnp.sum(mode_p * jnp.log(mode_p + EPS))
 
-        union_score_entropy = 0.0
-        # union_score_entropy = kernel_density_entropy(
-        #     union_score.squeeze(), valid_weight
-        # )
+        union_score_entropy = kernel_density_entropy(
+            union_score.squeeze(), valid_weight
+        )
 
         entropy = mode_entropy + union_score_entropy
 
