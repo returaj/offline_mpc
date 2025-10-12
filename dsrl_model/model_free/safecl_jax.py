@@ -237,7 +237,7 @@ def get_new_union_labels(
 
     union_score = jnp.max(union_z @ target_neg_z, axis=-1)
     # noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
-    # union_score = jnp.clip(true_union_score + noise, min=-1.0, max=1.0)
+    # union_score = jnp.clip(true_union_score + noise, min=-0.99, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
     new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
     new_label_percent = new_label_count / jnp.sum(new_label_count)
