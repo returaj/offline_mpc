@@ -172,6 +172,7 @@ def train_embedding_model(
         valid_weight = (target_union_label >= 0).astype(dtype)
         union_mean_loss = jnp.mean(valid_weight * union_loss)
 
+        # mode count
         neg_mode_count = (neg_score == multimode_neg_score).sum(axis=0)
         union_mode_count = (
             valid_weight[:, None] * (union_score == multimode_union_score)
@@ -179,30 +180,17 @@ def train_embedding_model(
         mode_count = neg_mode_count + union_mode_count
         mode_percent = mode_count / jnp.sum(mode_count)
 
-        neg_mode_pmean = jax.nn.softmax(multimode_neg_score / temp2, axis=-1).mean(
-            axis=0
-        )
-        union_mode_pmean = (
-            valid_weight[:, None]
-            * jax.nn.softmax(multimode_union_score / temp2, axis=-1)
-        ).mean(axis=0)
-        mode_p = 0.5 * (neg_mode_pmean + union_mode_pmean)
-        mode_entropy = -jnp.sum(mode_p * jnp.log(mode_p + EPS))
+        # entropy loss
+        neg_mode_p = jax.nn.softmax(multimode_neg_score / temp2, axis=-1).mean(axis=0)
+        mode_entropy = -jnp.sum(neg_mode_p * jnp.log(neg_mode_p + EPS))
 
-        union_score_entropy = kernel_density_entropy(
-            union_score.squeeze(), valid_weight
-        )
-
-        entropy = mode_entropy + union_score_entropy
-
-        loss = neg_mean_loss + lambda1 * union_mean_loss - lambda2 * entropy
+        loss = neg_mean_loss + lambda1 * union_mean_loss - lambda2 * mode_entropy
 
         return loss, (
             neg_mean_score,
             union_mean_score,
             mode_percent,
             mode_entropy,
-            union_score_entropy,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -235,9 +223,9 @@ def get_new_union_labels(
     # Batch X embd_dim
     union_z = embedding_model(target_union, normalize_z=True, training=False)
 
-    union_score = jnp.max(union_z @ target_neg_z, axis=-1)
-    # noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
-    # union_score = jnp.clip(true_union_score + noise, min=-0.99, max=0.99)
+    true_union_score = jnp.max(union_z @ target_neg_z, axis=-1)
+    noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
+    union_score = jnp.clip(true_union_score + noise, min=-0.99, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
     new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
     new_label_percent = new_label_count / jnp.sum(new_label_count)
@@ -266,7 +254,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp(-target_score), max=3.0)
+        weight = jnp.clip(jnp.exp((-0.5 - target_score) / 0.1), max=5.0)
         loss = jnp.mean(weight * batch_loss)
         return loss
 
@@ -448,7 +436,6 @@ def main(args, cfg_env=None):
                 union_mean_score,
                 mode_percent,
                 mode_entropy,
-                union_score_entropy,
             ) = train_embedding_model(
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
@@ -513,9 +500,6 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
                 logger.log_tabular("Loss/Loss_embd_mode_entropy", mode_entropy.item())
-                logger.log_tabular(
-                    "Loss/Loss_embd_union_entropy", union_score_entropy.item()
-                )
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
                 for i in range(labels_cfg["num_modes"]):
