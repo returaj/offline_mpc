@@ -1,3 +1,4 @@
+import functools
 import os
 import os.path as osp
 import random
@@ -72,6 +73,28 @@ trajectory_cfg = {
 }
 
 
+def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
+    eval_done = False
+    eval_obs, _ = eval_env.reset()
+    eval_obs = (eval_obs - mu_obs) / (std_obs + EPS)
+    eval_obs = jnp.expand_dims(jnp.array(eval_obs, dtype=jnp.float32), axis=0)
+    eval_reward, eval_cost, eval_len = 0.0, 0.0, 0.0
+    while not eval_done:
+        act = bc_policy(eval_obs)
+        next_obs, reward, terminated, truncated, info = eval_env.step(
+            np.array(act[0].squeeze())
+        )
+        cost = info["cost"]
+        next_obs = (next_obs - mu_obs) / (std_obs + EPS)
+        next_obs = jnp.expand_dims(jnp.array(next_obs, dtype=jnp.float32), axis=0)
+        eval_obs = next_obs
+        eval_reward += reward
+        eval_cost += cost
+        eval_len += 1
+        eval_done = terminated or truncated
+    return eval_reward, eval_cost, eval_len
+
+
 @jax.jit
 def discounted_sum(vector_x, gamma):
     dtype = vector_x.dtype
@@ -98,32 +121,37 @@ def train_policy_model(
     temp,
 ):
 
+    batch_bag, horizon, _ = target_obs.shape
+
+    target_obs = target_obs.reshape(batch_bag * horizon, -1)
+    target_act = target_act.reshape(batch_bag * horizon, -1)
+
     def loss_fun(bc_policy):
+        pred_act, *_ = bc_policy(target_obs)
+        flat_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
+        batch_bag_horizon_loss = flat_loss.reshape(batch_bag, horizon)
+        batch_bag_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
+            batch_bag_horizon_loss, gamma
+        )
 
-        def trajectory_bcloss_cost(obs, act):
-            pred_act, *_ = bc_policy(obs)
-            bcloss = jnp.sum((pred_act - act) ** 2, axis=1)
-            trajectory_bcloss = discounted_sum(bcloss, gamma)
+        pred_cost = cost_model(jnp.concat([target_obs, target_act], axis=-1))
+        batch_bag_horizon_cost = pred_cost.reshape(batch_bag, horizon)
+        batch_bag_cost = jax.vmap(discounted_sum, in_axes=(0, None))(
+            batch_bag_horizon_cost, gamma
+        )
 
-            cost = cost_model(jnp.concat([obs, act], axis=1))
-            trajectory_cost = discounted_sum(cost, gamma)
-            return trajectory_bcloss, trajectory_cost
-
-        trajectory_bcloss, trajectory_cost = jax.vmap(
-            trajectory_bcloss_cost, in_axes=(0, 0)
-        )(target_obs, target_act)
-
-        weight = jnp.clip(jnp.exp((beta - trajectory_cost) / temp), max=5.0)
-        loss = jnp.mean(weight * trajectory_bcloss)
+        weight = jnp.clip(jnp.exp((beta - batch_bag_cost) / temp), max=5.0)
+        loss = jnp.mean(weight * batch_bag_loss)
         return loss
 
     grad_fun = nnx.value_and_grad(loss_fun)
     loss, grads = grad_fun(bc_policy)
+    grads = jax.tree.map(lambda g: g / horizon, grads)
     bc_optimizer.update(grads)
     return loss
 
 
-@nnx.jit
+@functools.partial(nnx.jit, static_argnames=["bag_size"])
 def train_cost_model(
     cost_model,
     cost_optimizer,
@@ -135,7 +163,7 @@ def train_cost_model(
     bag_size,
 ):
     # Batch_Bag x Horizon x obs/act_dim
-    batch_bag_size, *_ = target_neg_obs.shape
+    batch_bag_size, horizon, _ = target_neg_obs.shape
     batch_size = batch_bag_size // bag_size
 
     def loss_fun(cost_model):
@@ -157,10 +185,11 @@ def train_cost_model(
         exp_union = jnp.exp(union_bag_cost - max_bag_cost)
         p_neg = exp_neg / (exp_neg + exp_union)
         loss = -jnp.mean(jnp.log(p_neg))
-        return loss, jnp.mean(neg_bag_cost), jnp.mean(union_bag_cost)
+        return loss, (jnp.mean(neg_bag_cost), jnp.mean(union_bag_cost))
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(cost_model)
+    grads = jax.tree.map(lambda g: g / horizon, grads)
     cost_optimizer.update(grads)
     return loss, *aux_values
 
@@ -344,25 +373,14 @@ def main(args, cfg_env=None):
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
 
                 logger.log_tabular("Train/Steps", steps)
-                logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
-                logger.log_tabular("Loss/Loss_embd_mode_entropy", mode_entropy.item())
+                logger.log_tabular("Loss/Loss_cost_model", cost_loss.item())
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
-
-                for i in range(labels_cfg["num_modes"]):
-                    logger.log_tabular(
-                        f"Percentage/embd_mode_{i}", mode_percent[i].item()
-                    )
-
-                logger.log_tabular("Mean/embd_neg_score", neg_mean_score.mean().item())
-                for l, lms in zip(all_labels, union_mean_score):
-                    logger.log_tabular(f"Mean/embd_union_score_label_{l}", lms.item())
-
-                for l, nul in zip(all_labels, new_union_labels_percent):
-                    logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
+                logger.log_tabular("Mean/neg_bag_cost", mean_neg_cost.item())
+                logger.log_tabular("Mean/union_bag_cost", mean_union_cost.item())
 
                 logger.log_tabular(
-                    "Norm/embedding_model",
-                    get_tree_norm(nnx.state(embedding_model, nnx.Param)),
+                    "Norm/cost_model",
+                    get_tree_norm(nnx.state(cost_model, nnx.Param)),
                 )
                 logger.log_tabular(
                     "Norm/bc_policy",
@@ -373,8 +391,8 @@ def main(args, cfg_env=None):
             if steps % config["save_freq"] == 0:
                 logger.nn_model_save(
                     itr=steps,
-                    nn_model_saver_element=embedding_model,
-                    prefix="embedding",
+                    nn_model_saver_element=cost_model,
+                    prefix="cost",
                 )
                 logger.nn_model_save(
                     itr=steps,
@@ -385,13 +403,10 @@ def main(args, cfg_env=None):
             if steps >= config["total_iteration"]:
                 break
 
-    logger.nn_model_save(
-        itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
-    )
+    logger.nn_model_save(itr=steps, nn_model_saver_element=cost_model, prefix="cost")
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=bc_policy, prefix="bc_policy"
     )
-    logger.save_state(state_dict={"target_neg_z": target_neg_z}, dirname="neg_z")
     if config["normalize_observation"]:
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
