@@ -136,9 +136,9 @@ def train_embedding_model(
     label_distance,
     decay,
 ):
-    del decay
-
     dtype = target_neg_obs.dtype
+
+    max_label = all_labels[0]
 
     # shape: Batch X Horizon X obs_act_dim
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
@@ -170,7 +170,9 @@ def train_embedding_model(
         union_loss = ((target_union_score - union_score.squeeze()) / temp1) ** 2
         # remove invalid labels
         valid_weight = (target_union_label >= 0).astype(dtype)
-        union_mean_loss = jnp.mean(valid_weight * union_loss)
+        # high decay factor for lower labels
+        decay_weight = decay ** (max_label - target_union_label)
+        union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
 
         # mode count
         neg_mode_count = (neg_score == multimode_neg_score).sum(axis=0)
