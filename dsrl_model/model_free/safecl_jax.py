@@ -38,7 +38,7 @@ from dsrl_model.utils.utils import single_agent_args
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e2),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -54,7 +54,7 @@ default_cfg = {
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e3),
 }
 
 trajectory_cfg = {
@@ -175,14 +175,10 @@ def distance_loss(
     max_label = all_labels[0] + 1
 
     neg_score = neg_z @ target_neg_z.T
-    neg_mean_score = jnp.mean(neg_score)
     neg_mean_loss = jnp.mean(((1 - neg_score) / temp1) ** 2)
+    neg_mean_score = jnp.mean(neg_score)
 
     union_score = union_z @ target_neg_z.T
-    union_mean_score = jnp.mean(
-        union_score * (target_union_label[:, None] == all_labels),
-        axis=0,
-    )
     target_union_score = jnp.take(
         label_distance,
         jnp.argmax(target_union_label[:, None] == all_labels, axis=-1),
@@ -193,6 +189,12 @@ def distance_loss(
     # high decay factor for lower labels
     decay_weight = decay ** (max_label - target_union_label)
     union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
+
+    union_label_onehot = (target_union_label[:, None] == all_labels).astype(dtype)
+    union_label_count = jnp.clip(jnp.sum(union_label_onehot, axis=0), min=1.0)
+    union_mean_score = (
+        jnp.sum(union_score * union_label_onehot, axis=0) / union_label_count
+    )
 
     loss = neg_mean_loss + lambda1 * union_mean_loss
     return loss, (neg_mean_score, union_mean_score)
