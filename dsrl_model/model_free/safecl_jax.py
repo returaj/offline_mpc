@@ -43,14 +43,13 @@ default_cfg = {
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
     "embd_size": 128,
-    "max_grad_norm": 1.0,
+    "max_grad_norm": 5.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "max_label": 4.0,
-    "warmup_steps": int(1e3),
+    "warmup_steps": int(1e2),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -65,6 +64,12 @@ trajectory_cfg = {
     "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
     "num_negative_trajectories": 50,
     "num_union_trajectories": -1,
+}
+
+labels_cfg = {
+    "labels": [3.0, 2.0, 1.0, 0.0] + [-1.0],  # -1 denotes invalid label
+    "range": [1.0, 0.5, 0.0, -0.5, -1.0] + [-2.0],  # -2 denotes invalid range
+    "distance": [1.0, 0.5, -0.5, -1.0] + [-2.0],  # -2 denotes invalid distance
 }
 
 
@@ -112,6 +117,87 @@ def compute_contrastive_ce_loss(p, q, decay):
     return -jnp.mean(loss)
 
 
+@jax.jit
+def supervised_contrastive_loss(
+    neg_z,
+    union_z,
+    target_union_label,
+    all_labels,
+    decay,
+):
+    dtype = neg_z.dtype
+    batch_size, *_ = neg_z.shape
+    max_label = all_labels[0] + 1
+
+    temperature = 0.1  # value from SupContrast
+    combined_z = jnp.concat([neg_z, union_z], axis=0)
+    combined_logits = (combined_z @ combined_z.T) / temperature
+    # remove the self instance from the logits
+    combined_logits = jnp.fill_diagonal(combined_logits, -1e9, inplace=False)
+
+    neg_mask = jnp.ones((batch_size, batch_size), dtype=dtype)
+    union_mask = (
+        jnp.expand_dims(target_union_label, axis=0)
+        == jnp.expand_dims(target_union_label, axis=1)
+    ).astype(dtype)
+    valid_mask = (target_union_label >= 0).astype(dtype)
+    # remove -1 labels from all the union_mask
+    union_mask = (
+        union_mask
+        * jnp.expand_dims(valid_mask, axis=0)
+        * jnp.expand_dims(valid_mask, axis=1)
+    )
+    combined_mask = jax.scipy.linalg.block_diag(neg_mask, union_mask)
+    # zero out diagoals
+    combined_mask = jnp.fill_diagonal(combined_mask, 0.0, inplace=False)
+
+    neg_decay_rate = jnp.ones((batch_size,), dtype=dtype)
+    union_decay_rate = decay ** (max_label - target_union_label)
+    decay_rate = jnp.concat([neg_decay_rate, union_decay_rate])
+
+    loss = compute_contrastive_ce_loss(combined_mask, combined_logits, decay_rate)
+    return loss
+
+
+@jax.jit
+def distance_loss(
+    neg_z,
+    union_z,
+    target_union_label,
+    target_neg_z,
+    all_labels,
+    label_distance,
+    decay,
+):
+    temp1, lambda1 = 1.0, 0.5
+
+    dtype = neg_z.dtype
+    max_label = all_labels[0] + 1
+
+    neg_score = neg_z @ target_neg_z.T
+    neg_mean_score = jnp.mean(neg_score)
+    neg_mean_loss = jnp.mean(((1 - neg_score) / temp1) ** 2)
+
+    union_score = union_z @ target_neg_z.T
+    union_mean_score = jnp.mean(
+        union_score * (target_union_label[:, None] == all_labels),
+        axis=0,
+    )
+    target_union_score = jnp.take(
+        label_distance,
+        jnp.argmax(target_union_label[:, None] == all_labels, axis=-1),
+    )
+    union_loss = ((target_union_score - union_score.squeeze()) / temp1) ** 2
+    # remove invalid labels
+    valid_weight = (target_union_label >= 0).astype(dtype)
+    # high decay factor for lower labels
+    decay_weight = decay ** (max_label - target_union_label)
+    union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
+
+    loss = neg_mean_loss + lambda1 * union_mean_loss
+    return loss, (neg_mean_score, union_mean_score)
+
+
 @nnx.jit
 def train_embedding_model(
     embedding_model,
@@ -121,11 +207,12 @@ def train_embedding_model(
     target_union_obs,
     target_union_act,
     target_union_label,
+    target_neg_z,
+    all_labels,
+    label_distance,
     decay,
-    max_label,
 ):
-    dtype = target_neg_obs.dtype
-    batch_size, *_ = target_neg_obs.shape
+    horizon = target_neg_obs.shape[1]
 
     # shape: Batch X Horizon X obs_act_dim
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
@@ -136,57 +223,45 @@ def train_embedding_model(
         neg_z = embedding_model(target_neg, normalize_z=True)
         union_z = embedding_model(target_union, normalize_z=True)
 
-        temperature = 0.1  # value from SupContrast
-        combined_z = jnp.concat([neg_z, union_z], axis=0)
-        combined_logits = (combined_z @ combined_z.T) / temperature
-        # remove the self instance from the logits
-        combined_logits = jnp.fill_diagonal(combined_logits, -1e9, inplace=False)
-
-        neg_mask = jnp.ones((batch_size, batch_size), dtype=dtype)
-        union_mask = (
-            jnp.expand_dims(target_union_label, axis=0)
-            == jnp.expand_dims(target_union_label, axis=1)
-        ).astype(dtype)
-        valid_mask = (target_union_label >= 0).astype(dtype)
-        # remove -1 labels from all the union_mask
-        union_mask = (
-            union_mask
-            * jnp.expand_dims(valid_mask, axis=0)
-            * jnp.expand_dims(valid_mask, axis=1)
+        supcon_loss = supervised_contrastive_loss(
+            neg_z=neg_z,
+            union_z=union_z,
+            target_union_label=target_union_label,
+            all_labels=all_labels,
+            decay=decay,
         )
-        combined_mask = jax.scipy.linalg.block_diag(neg_mask, union_mask)
-        # zero out diagoals
-        combined_mask = jnp.fill_diagonal(combined_mask, 0.0, inplace=False)
 
-        neg_decay_rate = jnp.ones((batch_size,), dtype=dtype)
-        union_decay_rate = decay ** (max_label - target_union_label)
-        decay_rate = jnp.concat([neg_decay_rate, union_decay_rate])
+        dist_loss, aux_values = distance_loss(
+            neg_z=neg_z,
+            union_z=union_z,
+            target_union_label=target_union_label,
+            target_neg_z=target_neg_z,
+            all_labels=all_labels,
+            label_distance=label_distance,
+            decay=decay,
+        )
 
-        loss = compute_contrastive_ce_loss(combined_mask, combined_logits, decay_rate)
-        return loss
+        loss = supcon_loss + dist_loss
 
-    grad_fun = nnx.value_and_grad(loss_fun)
-    loss, grads = grad_fun(embedding_model)
+        return loss, aux_values
+
+    grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
+    (loss, aux_values), grads = grad_fun(embedding_model)
+    grads = jax.tree.map(lambda g: g / horizon, grads)
     embedding_optimizer.update(grads)
 
-    return loss
+    return loss, *aux_values
 
 
 @jax.jit
-def index_fun(v, max_label):
-    return jnp.select(
-        condlist=[
-            v >= 0.8,
-            (v >= 0.6) & (v < 0.8),
-            (v >= 0.4) & (v < 0.6),
-            (v >= 0.2) & (v < 0.4),
-        ],
-        choicelist=[max_label, 3.0, 2.0, 1.0],
-        default=0.0,
-    )
+def index_fun(arr, all_labels, label_range):
+    # For each value in arr, find which interval of `ranges` it falls into
+    # range[i] >= x > range[i+1] → assign labels[i]
+    idx = jnp.sum(arr[:, None] <= label_range[1:], axis=-1)
+    return all_labels[idx]
 
 
-@functools.partial(jax.jit, static_argnums=0)
+@nnx.jit
 def get_new_union_labels(
     embedding_model,
     target_neg_obs,
@@ -194,8 +269,9 @@ def get_new_union_labels(
     target_union_obs,
     target_union_act,
     target_neg_z,
+    all_labels,
+    label_range,
     tau,
-    max_label,
 ):
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
@@ -206,11 +282,13 @@ def get_new_union_labels(
 
     rep_neg_z = neg_z.mean(axis=0, keepdims=True)
     target_neg_z = (1 - tau) * target_neg_z + tau * rep_neg_z
-    norm_target_neg_z = l2_normalize(target_neg_z, axis=-1)
+    target_neg_z = l2_normalize(target_neg_z, axis=1)
 
-    union_pred = (union_z @ norm_target_neg_z.T).squeeze()
-    new_label = index_fun(union_pred, max_label)
-    return target_neg_z, new_label
+    union_score = (union_z @ target_neg_z.T).squeeze()
+    new_label = index_fun(union_score, all_labels, label_range)
+    new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
+    new_label_percent = new_label_count / jnp.sum(new_label_count)
+    return target_neg_z, union_score, new_label, new_label_percent
 
 
 def cost_loss_fun(
@@ -258,59 +336,48 @@ def cost_loss_fun(
     return jnp.mean(loss)
 
 
-def bc_policy_transition_loss_fun(bc_policy, cost_model, target_obs, target_act):
+@nnx.jit
+def bc_policy_trajectory_loss_fun(
+    bc_policy,
+    target_obs,
+    target_act,
+    target_score,
+    gamma,
+):
     batch_size, horizon, _ = target_obs.shape
 
-    target_obs = target_obs.reshape((horizon * batch_size, -1))
-    target_act = target_act.reshape((horizon * batch_size, -1))
-
-    weight = 1 - cost_model(jnp.concat([target_obs, target_act], axis=-1))
+    target_obs = target_obs.reshape((batch_size * horizon, -1))
+    target_act = target_act.reshape((batch_size * horizon, -1))
 
     pred_act, *_ = bc_policy(target_obs)
     loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
-    loss = jnp.mean(weight * loss)
-    return loss
+    loss = loss.reshape(batch_size, horizon)
+    traj_loss = jax.vmap(discounted_sum, in_axes=(0, None))(loss, gamma)
+
+    weight = jnp.clip(jnp.exp((-0.5 - target_score) / 0.1), max=5.0)
+
+    return jnp.mean(weight * traj_loss)
 
 
 @nnx.jit
-def train_cost_and_policy_model(
-    cost_model,
+def train_policy_model(
     bc_policy,
-    cost_optimizer,
     bc_optimizer,
-    target_neg_obs,
-    target_neg_act,
-    target_union_obs,
-    target_union_act,
-    target_union_label,
+    target_obs,
+    target_act,
+    target_score,
     gamma,
-    decay,
-    max_label,
 ):
-    horizon = target_neg_obs.shape[1]
+    horizon = target_obs.shape[1]
 
-    cost_grad_fun = nnx.value_and_grad(cost_loss_fun)
-    cost_loss, cost_grad = cost_grad_fun(
-        cost_model,
-        target_neg_obs,
-        target_neg_act,
-        target_union_obs,
-        target_union_act,
-        target_union_label,
-        gamma,
-        decay,
-        max_label,
-    )
-    cost_grad = jax.tree.map(lambda g: g / horizon, cost_grad)
-    cost_optimizer.update(cost_grad)
-
-    bc_grad_fun = nnx.value_and_grad(bc_policy_transition_loss_fun)
+    bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun)
     bc_loss, bc_grad = bc_grad_fun(
-        bc_policy, cost_model, target_union_obs, target_union_act
+        bc_policy, target_obs, target_act, target_score, gamma
     )
+    bc_grad = jax.tree.map(lambda g: g / horizon, bc_grad)
     bc_optimizer.update(bc_grad)
 
-    return cost_loss, bc_loss
+    return bc_loss
 
 
 def main(args, cfg_env=None):
@@ -321,6 +388,11 @@ def main(args, cfg_env=None):
 
     # set default device id
     jax.default_device = jax.devices(args.device)[args.device_id]
+
+    # label configs:
+    all_labels = jnp.array(labels_cfg["labels"], dtype=jnp.float32)
+    label_distance = jnp.array(labels_cfg["distance"], dtype=jnp.float32)
+    label_range = jnp.array(labels_cfg["range"], dtype=jnp.float32)
 
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -471,7 +543,11 @@ def main(args, cfg_env=None):
 
             steps += 1
 
-            embedding_loss = train_embedding_model(
+            (
+                embedding_loss,
+                neg_mean_score,
+                union_mean_score,
+            ) = train_embedding_model(
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
                 target_neg_obs=target_neg_obs,
@@ -479,39 +555,42 @@ def main(args, cfg_env=None):
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 target_union_label=target_union_label,
+                target_neg_z=target_neg_z,
+                all_labels=all_labels,
+                label_distance=label_distance,
                 decay=config["decay"],
-                max_label=config["max_label"],
             )
 
-            cost_loss = bc_loss = jnp.array(0.0)
+            bc_loss = jnp.array(0.0)
+            new_union_labels_percent = jnp.zeros_like(all_labels, dtype=jnp.float32)
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_freq"] == 0
             ):
-                target_neg_z, new_union_labels = get_new_union_labels(
+                (
+                    target_neg_z,
+                    new_union_score,
+                    new_union_labels,
+                    new_union_labels_percent,
+                ) = get_new_union_labels(
                     embedding_model=embedding_model,
                     target_neg_obs=target_neg_obs,
                     target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_neg_z=target_neg_z,
+                    all_labels=all_labels,
+                    label_range=label_range,
                     tau=config["update_tau"],
-                    max_label=config["max_label"],
                 )
                 buffer.update_labels(target_union_idx, new_union_labels)
 
-                cost_loss, bc_loss = train_cost_and_policy_model(
-                    cost_model=cost_model,
+                bc_loss = train_policy_model(
                     bc_policy=bc_policy,
-                    cost_optimizer=cost_optimizer,
                     bc_optimizer=bc_optimizer,
-                    target_neg_obs=target_neg_obs,
-                    target_neg_act=target_neg_act,
-                    target_union_obs=target_union_obs,
-                    target_union_act=target_union_act,
-                    target_union_label=new_union_labels,
+                    target_obs=target_union_obs,
+                    target_act=target_union_act,
+                    target_score=new_union_score,
                     gamma=config["gamma"],
-                    decay=config["decay"],
-                    max_label=config["max_label"],
                 )
 
             logger.logged = False
@@ -535,9 +614,15 @@ def main(args, cfg_env=None):
                     logger.log_tabular("Time/Eval", eval_end_time - eval_start_time)
 
                 logger.log_tabular("Train/Steps", steps)
-                logger.log_tabular("Loss/Loss_embedding", embedding_loss.mean().item())
-                logger.log_tabular("Loss/Loss_cost", cost_loss.mean().item())
-                logger.log_tabular("Loss/Loss_bc_policy", bc_loss.mean().item())
+                logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
+                logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
+
+                logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
+                for l, lms in zip(all_labels, union_mean_score):
+                    logger.log_tabular(f"Mean/embd_union_score_label_{l}", lms.item())
+                for l, nul in zip(all_labels, new_union_labels_percent):
+                    logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
+
                 logger.log_tabular(
                     "Norm/embedding_model",
                     get_tree_norm(nnx.state(embedding_model, nnx.Param)),
@@ -560,11 +645,6 @@ def main(args, cfg_env=None):
                 )
                 logger.nn_model_save(
                     itr=steps,
-                    nn_model_saver_element=cost_model,
-                    prefix="cost",
-                )
-                logger.nn_model_save(
-                    itr=steps,
                     nn_model_saver_element=bc_policy,
                     prefix="bc_policy",
                 )
@@ -575,7 +655,6 @@ def main(args, cfg_env=None):
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
     )
-    logger.nn_model_save(itr=steps, nn_model_saver_element=cost_model, prefix="cost")
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=bc_policy, prefix="bc_policy"
     )

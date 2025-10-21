@@ -10,6 +10,45 @@ def update_arr_jit(arr, idxs, val):
     return arr.at[idxs].set(val)
 
 
+@functools.partial(jax.jit, static_argnames=["horizon"])
+def batched_data(
+    neg_obs,
+    neg_act,
+    neg_cost,
+    union_obs,
+    union_act,
+    union_cost,
+    horizon,
+    n_idx,
+    u_idx,
+):
+    horizon_offsets = jnp.arange(horizon)
+    n_h_idx = n_idx[..., None] + horizon_offsets
+    u_h_idx = u_idx[..., None] + horizon_offsets
+
+    h_neg_obs = neg_obs[n_h_idx]
+    h_neg_act = neg_act[n_h_idx]
+    h_neg_cost = neg_cost[n_h_idx]
+    h_union_obs = union_obs[u_h_idx]
+    h_union_act = union_act[u_h_idx]
+    h_union_cost = union_cost[u_h_idx]
+
+    return (
+        h_neg_obs,
+        h_neg_act,
+        h_neg_cost,
+        h_union_obs,
+        h_union_act,
+        h_union_cost,
+        u_idx,
+    )
+
+
+@jax.jit
+def sample_label(labels, idx):
+    return labels[idx]
+
+
 class OnPolicyBuffer:
     def __init__(
         self,
@@ -117,27 +156,17 @@ class OnPolicyBuffer:
             self._union_priorities, idxs, priorities
         )
 
-    @functools.partial(jax.jit, static_argnums=0)
     def sample_batch(self, n_idx, u_idx):
-        horizon_offsets = jnp.arange(self.horizon)
-        n_h_idx = n_idx[..., None] + horizon_offsets
-        u_h_idx = u_idx[..., None] + horizon_offsets
-
-        h_neg_obs = self._neg_obs[n_h_idx]
-        h_neg_act = self._neg_act[n_h_idx]
-        h_neg_cost = self._neg_cost[n_h_idx]
-        h_union_obs = self._union_obs[u_h_idx]
-        h_union_act = self._union_act[u_h_idx]
-        h_union_cost = self._union_cost[u_h_idx]
-
-        return (
-            h_neg_obs,
-            h_neg_act,
-            h_neg_cost,
-            h_union_obs,
-            h_union_act,
-            h_union_cost,
-            u_idx,
+        return batched_data(
+            neg_obs=self._neg_obs,
+            neg_act=self._neg_act,
+            neg_cost=self._neg_cost,
+            union_obs=self._union_obs,
+            union_act=self._union_act,
+            union_cost=self._union_cost,
+            horizon=self.horizon,
+            n_idx=n_idx,
+            u_idx=u_idx,
         )
 
     def sample(self):
@@ -194,7 +223,7 @@ class SafeCLBuffer(OnPolicyBuffer):
             ep_len,
             priorities_alpha,
         )
-        self._union_labels = -np.ones((self.union_capacity,), dtype=self.dtype)
+        self._union_labels = np.zeros((self.union_capacity,), dtype=self.dtype)
 
     def to_jax_ndarray(self):
         super().to_jax_ndarray()
@@ -204,8 +233,7 @@ class SafeCLBuffer(OnPolicyBuffer):
         labels = jnp.array(labels, dtype=self.dtype)
         self._union_labels = update_arr_jit(self._union_labels, idxs, labels)
 
-    @functools.partial(jax.jit, static_argnums=0)
     def sample_batch(self, n_idx, u_idx):
         batch = super().sample_batch(n_idx, u_idx)
-        label = self._union_labels[u_idx]
+        label = sample_label(self._union_labels, u_idx)
         return (*batch, label)
