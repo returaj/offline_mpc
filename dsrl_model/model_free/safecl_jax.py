@@ -38,7 +38,7 @@ from dsrl_model.utils.utils import single_agent_args
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e2),
+    "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -54,7 +54,7 @@ default_cfg = {
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
-    "total_iteration": int(1e3),
+    "total_iteration": int(1e6),
 }
 
 trajectory_cfg = {
