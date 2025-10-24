@@ -49,7 +49,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "warmup_steps": int(1e4),
+    "warmup_steps": int(1e3),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -170,7 +170,7 @@ def train_embedding_model(
         decay_weight = decay ** (max_label - target_union_label)
         union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
 
-        union_label_count = jnp.sum(union_label_onehot, axis=0)
+        union_label_count = jnp.clip(jnp.sum(union_label_onehot, axis=0), min=1.0)
         union_mean_score = (
             jnp.sum(union_score * union_label_onehot, axis=0) / union_label_count
         )
@@ -227,7 +227,7 @@ def get_new_union_labels(
     union_z = embedding_model(target_union, normalize_z=True, training=False)
 
     true_union_score = jnp.max(union_z @ target_neg_z, axis=-1)
-    noise = 0.2 * jax.random.normal(key, shape=true_union_score.shape)
+    noise = 0.1 * jax.random.normal(key, shape=true_union_score.shape)
     union_score = jnp.clip(true_union_score + noise, min=-0.99, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
     new_label_count = (new_label[:, None] == all_labels).sum(axis=0)
