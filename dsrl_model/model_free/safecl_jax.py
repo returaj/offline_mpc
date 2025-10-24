@@ -192,10 +192,12 @@ def train_embedding_model(
         loss = neg_mean_loss + lambda1 * union_mean_loss - lambda2 * mode_entropy
 
         return loss, (
+            neg_mean_loss,
+            union_mean_loss,
+            mode_entropy,
             neg_mean_score,
             union_mean_score,
             mode_percent,
-            mode_entropy,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -451,10 +453,12 @@ def main(args, cfg_env=None):
 
             (
                 embedding_loss,
+                neg_mean_loss,
+                union_mean_loss,
+                mode_entropy,
                 neg_mean_score,
                 union_mean_score,
                 mode_percent,
-                mode_entropy,
             ) = train_embedding_model(
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
@@ -518,6 +522,10 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
+                logger.log_tabular("Loss/Loss_embd_neg_mean_loss", neg_mean_loss.item())
+                logger.log_tabular(
+                    "Loss/Loss_embd_union_mean_loss", union_mean_loss.item()
+                )
                 logger.log_tabular("Loss/Loss_embd_mode_entropy", mode_entropy.item())
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
