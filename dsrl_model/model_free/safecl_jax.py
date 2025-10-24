@@ -154,18 +154,14 @@ def train_embedding_model(
         # Batch
         multimode_neg_score = neg_z @ target_neg_z
         neg_score = jnp.max(multimode_neg_score, axis=-1, keepdims=True)
-        neg_mean_score = jnp.mean(neg_score)
         neg_mean_loss = jnp.mean(((1 - neg_score) / temp1) ** 2)
+        neg_mean_score = jnp.mean(neg_score)
 
         multimode_union_score = union_z @ target_neg_z
         union_score = jnp.max(multimode_union_score, axis=-1, keepdims=True)
-        union_mean_score = jnp.mean(
-            union_score * (target_union_label[:, None] == all_labels),
-            axis=0,
-        )
+        union_label_onehot = (target_union_label[:, None] == all_labels).astype(dtype)
         target_union_score = jnp.take(
-            label_distance,
-            jnp.argmax(target_union_label[:, None] == all_labels, axis=-1),
+            label_distance, jnp.argmax(union_label_onehot, axis=-1)
         )
         union_loss = ((target_union_score - union_score.squeeze()) / temp1) ** 2
         # remove invalid labels
@@ -173,6 +169,11 @@ def train_embedding_model(
         # high decay factor for lower labels
         decay_weight = decay ** (max_label - target_union_label)
         union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
+
+        union_label_count = jnp.sum(union_label_onehot, axis=0)
+        union_mean_score = (
+            jnp.sum(union_score * union_label_onehot, axis=0) / union_label_count
+        )
 
         # mode count
         neg_mode_count = (neg_score == multimode_neg_score).sum(axis=0)
