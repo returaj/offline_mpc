@@ -179,9 +179,9 @@ def distance_loss(
     neg_mean_score = jnp.mean(neg_score)
 
     union_score = union_z @ target_neg_z.T
+    union_label_onehot = (target_union_label[:, None] == all_labels).astype(dtype)
     target_union_score = jnp.take(
-        label_distance,
-        jnp.argmax(target_union_label[:, None] == all_labels, axis=-1),
+        label_distance, jnp.argmax(union_label_onehot, axis=-1)
     )
     union_loss = ((target_union_score - union_score.squeeze()) / temp1) ** 2
     # remove invalid labels
@@ -190,7 +190,6 @@ def distance_loss(
     decay_weight = decay ** (max_label - target_union_label)
     union_mean_loss = jnp.mean(valid_weight * decay_weight * union_loss)
 
-    union_label_onehot = (target_union_label[:, None] == all_labels).astype(dtype)
     union_label_count = jnp.clip(jnp.sum(union_label_onehot, axis=0), min=1.0)
     union_mean_score = (
         jnp.sum(union_score * union_label_onehot, axis=0) / union_label_count
@@ -245,7 +244,7 @@ def train_embedding_model(
 
         loss = supcon_loss + dist_loss
 
-        return loss, aux_values
+        return loss, (supcon_loss, dist_loss, *aux_values)
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(embedding_model)
@@ -547,6 +546,8 @@ def main(args, cfg_env=None):
 
             (
                 embedding_loss,
+                supcon_loss,
+                dist_loss,
                 neg_mean_score,
                 union_mean_score,
             ) = train_embedding_model(
@@ -617,6 +618,8 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Train/Steps", steps)
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
+                logger.log_tabular("Loss/Loss_embd_supcon_loss", supcon_loss.item())
+                logger.log_tabular("Loss/Loss_embd_dist_loss", dist_loss.item())
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
                 logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
