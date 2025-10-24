@@ -31,6 +31,7 @@ from dsrl_model.utils.models_jax import (
     bce_loss,
     get_tree_norm,
     l2_normalize,
+    sample_von_mises_fisher_samples,
 )
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import single_agent_args
@@ -67,7 +68,8 @@ trajectory_cfg = {
 }
 
 labels_cfg = {
-    "num_modes": 2,
+    "num_modes": 3,
+    "concentration_factor": 3.0,
     "labels": [3.0, 2.0, 1.0, 0.0] + [-1.0],  # -1 denotes invalid label
     "range": [1.0, 0.5, 0.0, -0.5, -1.0] + [-2.0],  # -2 denotes invalid range
     "distance": [1.0, 0.5, -0.5, -1.0] + [-2.0],  # -2 denotes invalid distance
@@ -292,6 +294,7 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
     config["use_bc_trajectory"] = args.use_bc_trajectory
+    config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -415,9 +418,22 @@ def main(args, cfg_env=None):
     logger.log("Start embedding, cost and bc_policy model training.")
 
     steps = 0
-    target_neg_z = jax.random.orthogonal(
-        key=rngs.labels(), n=embd_size, m=labels_cfg["num_modes"], dtype=jnp.float32
-    )
+    if config["use_vonmisesfisher_mode"]:
+        mean_direction = l2_normalize(
+            jax.random.normal(key=rngs.neg_z(), shape=(embd_size,), dtype=jnp.float32),
+            axis=0,
+        )
+        concentration = labels_cfg["concentration_factor"] * embd_size
+        target_neg_z = sample_von_mises_fisher_samples(
+            key=rngs.neg_z(),
+            mean_direction=mean_direction,
+            concentration=concentration,
+            num_samples=labels_cfg["num_modes"],
+        )
+    else:
+        target_neg_z = jax.random.orthogonal(
+            key=rngs.neg_z(), n=embd_size, m=labels_cfg["num_modes"], dtype=jnp.float32
+        )
     while steps < config["total_iteration"]:
         # shape: Batch X Horizon X obs/act_dim
         for (

@@ -5,8 +5,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
+from tensorflow_probability.substrates import jax as tfp_jax
 
 EPS = 1e-7
+
+
+def sample_von_mises_fisher_samples(key, mean_direction, concentration, num_samples):
+    tfd_jax = tfp_jax.distributions
+    dist = tfd_jax.VonMisesFisher(
+        mean_direction=mean_direction, concentration=concentration
+    )
+    samples = dist.sample(seed=key, sample_shape=(num_samples,)).T
+    return samples
 
 
 def gumbel_softmax(key, logits, tau, hard=False):

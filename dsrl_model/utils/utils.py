@@ -270,6 +270,12 @@ def single_agent_args():
             "default": True,
             "help": "use trajectory weighted bc policy",
         },
+        {
+            "name": "--use-vonmisesfisher-mode",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "use von Mises Fisher hypershere samples for multimode representation",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")
