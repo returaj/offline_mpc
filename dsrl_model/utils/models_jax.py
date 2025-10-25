@@ -228,15 +228,17 @@ class TransformerEmbedding(nnx.Module):
         self.pos_encoding = positionalencoding1d(embd_dim, horizon)
         self.mask = jnp.tril(jnp.ones((horizon, horizon)))  # causal mask
         linear_features = 4 * embd_dim
-        self.transformer_blocks = [
-            TransformerBlock(
-                rngs=rngs,
-                d_model=embd_dim,
-                liner_features=linear_features,
-                num_heads=num_heads,
-            )
-            for _ in range(num_attentions)
-        ]
+        self.transformer_blocks = tuple(
+            [
+                TransformerBlock(
+                    rngs=rngs,
+                    d_model=embd_dim,
+                    liner_features=linear_features,
+                    num_heads=num_heads,
+                )
+                for _ in range(num_attentions)
+            ]
+        )
 
     def __call__(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
