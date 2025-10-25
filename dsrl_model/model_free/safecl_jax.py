@@ -589,6 +589,9 @@ def main(args, cfg_env=None):
                 logger.log_tabular(
                     "Cost/neg_cost", jnp.sum(target_neg_cost, axis=-1).mean().item()
                 )
+                logger.log_tabular(
+                    "Cost/union_cost", jnp.sum(target_union_cost, axis=-1).mean().item()
+                )
                 for l, nuc in zip(all_labels, new_union_labels_cost):
                     logger.log_tabular(f"Cost/new_union_label_{l}", nuc.item())
 
