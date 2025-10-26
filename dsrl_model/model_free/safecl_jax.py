@@ -50,7 +50,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "warmup_steps": int(1e4),
+    "warmup_steps": int(0),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -127,10 +127,10 @@ def kernel_density_entropy(samples, mask, sigma=0.2):
 @jax.jit
 def range_loss(score_arr, max_arr, min_arr, scale):
     # loss_min_limit = (score_arr - min_arr) ** 2
-    loss_max_limit = jax.nn.relu(-(max_arr - score_arr)) ** 2
+    # loss_max_limit = jax.nn.relu(-(max_arr - score_arr)) ** 2
     mid_arr = (max_arr + min_arr) / 2
     loss_mid = (score_arr - mid_arr) ** 2
-    return scale * (loss_max_limit + loss_mid)
+    return loss_mid
 
 
 @nnx.jit
@@ -158,8 +158,8 @@ def train_embedding_model(
 
     def loss_fun(embedding_model):
         # temp1, temp2 = 1.0, 0.1
-        scale = 100.0
-        lambda1, lambda2 = 0.5, 0.1
+        scale = 10.0
+        lambda1, lambda2 = 1.0, 0.1
 
         # Batch X embd_dim
         neg_z = embedding_model(target_neg, normalize_z=True)
@@ -239,9 +239,11 @@ def get_new_union_labels(
     target_union_obs,
     target_union_act,
     target_union_cost,
+    target_union_label,
     target_neg_z,
     all_labels,
     label_range,
+    epsilon,
     key,
 ):
     num_models = 5
@@ -265,6 +267,9 @@ def get_new_union_labels(
     confidence = std_union_score
     union_score = jnp.clip(mean_union_score - confidence, min=0.01, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
+
+    exploration = jax.random.uniform(key=key, shape=new_label.shape) < epsilon
+    new_label = jnp.where(exploration, target_union_label, new_label)
 
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
     new_label_count = new_label_onehot.sum(axis=0)
@@ -459,6 +464,9 @@ def main(args, cfg_env=None):
     logger.log("Start embedding, cost and bc_policy model training.")
 
     steps = 0
+    epsilon_schedule = optax.linear_schedule(
+        init_value=1.0, end_value=0.01, transition_steps=int(1e4)
+    )
     if config["use_vonmisesfisher_mode"]:
         mean_direction = l2_normalize(
             jax.random.normal(key=rngs.neg_z(), shape=(embd_size,), dtype=jnp.float32),
@@ -494,6 +502,7 @@ def main(args, cfg_env=None):
             new_union_labels_cost = jnp.zeros_like(all_labels, dtype=jnp.float32)
             new_union_labels = jnp.zeros_like(target_union_label)
             if steps > config["warmup_steps"]:
+                epsilon = epsilon_schedule(steps)
                 (
                     new_union_labels,
                     new_union_labels_percent,
@@ -504,9 +513,11 @@ def main(args, cfg_env=None):
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_union_cost=target_union_cost,
+                    target_union_label=target_union_label,
                     target_neg_z=target_neg_z,
                     all_labels=all_labels,
                     label_range=label_range,
+                    epsilon=epsilon,
                     key=rngs.new_labels(),
                 )
 
