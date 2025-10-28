@@ -98,6 +98,18 @@ def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
     return eval_reward, eval_cost, eval_len
 
 
+@nnx.jit
+def polyak_update(target_model, curr_model, tau):
+    target_param = nnx.state(target_model, nnx.Param)
+    curr_param = nnx.state(curr_model, nnx.Param)
+
+    new_target_param = jax.tree_util.tree_map(
+        lambda t, c: (1 - tau) * t + tau * c, target_param, curr_param
+    )
+    nnx.update(target_model, new_target_param)
+    return target_model
+
+
 @jax.jit
 def discounted_sum(vector_x, gamma):
     dtype = vector_x.dtype
@@ -246,6 +258,8 @@ def get_new_union_labels(
     epsilon,
     key,
 ):
+    del target_union_label
+    
     num_models = 5
     dtype = target_union_obs.dtype
 
@@ -268,8 +282,10 @@ def get_new_union_labels(
     union_score = jnp.clip(mean_union_score - confidence, min=0.01, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
 
-    exploration = jax.random.uniform(key=key, shape=new_label.shape) < epsilon
-    new_label = jnp.where(exploration, target_union_label, new_label)
+    key1, key2 = jax.random.split(key, 2)
+    exploration = jax.random.uniform(key=key1, shape=new_label.shape) < epsilon
+    exploration_label = jax.random.choice(key=key2, a=all_labels, shape=new_label.shape)
+    new_label = jnp.where(exploration, exploration_label, new_label)
 
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
     new_label_count = new_label_onehot.sum(axis=0)
@@ -387,6 +403,7 @@ def main(args, cfg_env=None):
             ),
         ),
     )
+    target_embedding_model = deepcopy(embedding_model)
 
     cost_model = ExpCostModel(
         rngs=rngs,
@@ -509,7 +526,7 @@ def main(args, cfg_env=None):
                     new_union_score,
                     new_union_labels_cost,
                 ) = get_new_union_labels(
-                    embedding_model=embedding_model,
+                    embedding_model=target_embedding_model,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_union_cost=target_union_cost,
@@ -542,6 +559,11 @@ def main(args, cfg_env=None):
                 label_range=label_range,
                 decay=config["decay"],
             )
+
+            if (steps % 100) == 0:
+                target_embedding_model = polyak_update(
+                    target_embedding_model, embedding_model, 1.0
+                )
 
             bc_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
