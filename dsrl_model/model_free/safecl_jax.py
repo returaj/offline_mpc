@@ -248,6 +248,8 @@ def index_fun(arr, all_labels, label_range):
 @nnx.jit
 def get_new_union_labels(
     embedding_model,
+    target_neg_obs,
+    target_neg_act,
     target_union_obs,
     target_union_act,
     target_union_cost,
@@ -259,11 +261,12 @@ def get_new_union_labels(
     key,
 ):
     del target_union_label
-    
+
     num_models = 5
     dtype = target_union_obs.dtype
 
     # Batch X Horizon X obs_act_dim
+    target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
@@ -275,11 +278,15 @@ def get_new_union_labels(
         return carry, score
 
     # num_models X Batch X embd_dim
+    _, neg_scores = multimodel((target_neg, target_neg_z, embedding_model))
+    std_neg_score = jnp.std(neg_scores, axis=0)
+
     _, union_scores = multimodel((target_union, target_neg_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
-    confidence = std_union_score
-    union_score = jnp.clip(mean_union_score - confidence, min=0.01, max=0.99)
+
+    confidence = jnp.clip(std_union_score - std_neg_score, min=0.0)
+    union_score = jnp.clip(mean_union_score - 0.5 * confidence, min=0.01, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
 
     key1, key2 = jax.random.split(key, 2)
@@ -296,7 +303,15 @@ def get_new_union_labels(
     total_labels_cost = (batch_horizon_cost[:, None] * new_label_onehot).sum(axis=0)
     mean_labels_cost = total_labels_cost / (new_label_count + EPS)
 
-    return new_label, new_label_percent, union_score, mean_labels_cost
+    return (
+        new_label,
+        new_label_percent,
+        union_score,
+        mean_labels_cost,
+        std_neg_score.mean() + std_neg_score.std(),
+        std_union_score.mean() + std_union_score.std(),
+        confidence.mean() + confidence.std(),
+    )
 
 
 @nnx.jit
@@ -482,7 +497,7 @@ def main(args, cfg_env=None):
 
     steps = 0
     epsilon_schedule = optax.linear_schedule(
-        init_value=1.0, end_value=0.01, transition_steps=int(1e4)
+        init_value=0.5, end_value=0.1, transition_steps=int(1e4)
     )
     if config["use_vonmisesfisher_mode"]:
         mean_direction = l2_normalize(
@@ -525,8 +540,13 @@ def main(args, cfg_env=None):
                     new_union_labels_percent,
                     new_union_score,
                     new_union_labels_cost,
+                    upper_mean_std_neg_score,
+                    upper_mean_std_union_score,
+                    upper_mean_union_confidence,
                 ) = get_new_union_labels(
                     embedding_model=target_embedding_model,
+                    target_neg_obs=target_neg_obs,
+                    target_neg_act=target_neg_act,
                     target_union_obs=target_union_obs,
                     target_union_act=target_union_act,
                     target_union_cost=target_union_cost,
@@ -618,6 +638,17 @@ def main(args, cfg_env=None):
 
                 for l, nul in zip(all_labels, new_union_labels_percent):
                     logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
+
+                logger.log_tabular(
+                    "Mean/new_label_std_neg", upper_mean_std_neg_score.item()
+                )
+                logger.log_tabular(
+                    "Mean/new_label_std_union", upper_mean_std_union_score.item()
+                )
+                logger.log_tabular(
+                    "Mean/new_label_confidence_union",
+                    upper_mean_union_confidence.item(),
+                )
 
                 logger.log_tabular(
                     "Cost/neg_cost", jnp.sum(target_neg_cost, axis=-1).mean().item()
