@@ -260,13 +260,12 @@ def get_new_union_labels(
     epsilon,
     key,
 ):
-    del target_union_label, epsilon
+    del target_neg_obs, target_neg_act, target_union_label
 
     num_models = 5
     dtype = target_union_obs.dtype
 
     # Batch X Horizon X obs_act_dim
-    target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
@@ -277,25 +276,23 @@ def get_new_union_labels(
         score = jnp.min(z @ mode_z, axis=-1)
         return carry, score
 
-    # num_models X Batch X embd_dim
-    _, neg_scores = multimodel((target_neg, target_neg_z, embedding_model))
-    std_neg_score = jnp.std(neg_scores, axis=0).mean()
-
     _, union_scores = multimodel((target_union, target_neg_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
 
-    uncertainty_prob = jax.nn.sigmoid((std_union_score / std_neg_score - 1.5) / 0.3)
+    baseline_score = std_union_score.mean() - std_union_score.std()
+    uncertainty_prob = jax.nn.sigmoid((std_union_score / baseline_score - 1.0) / 0.3)
     uncertainty_score = std_union_score * (uncertainty_prob > 0.5)
     union_score = jnp.clip(mean_union_score - uncertainty_score, min=0.01, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
 
-    key1, key2 = jax.random.split(key, 2)
-    # exploration = jax.random.uniform(key=key1, shape=new_label.shape) < epsilon
-    exploration = jax.random.bernoulli(
-        key=key1, p=uncertainty_prob, shape=new_label.shape
+    key1, key2, key3 = jax.random.split(key, 3)
+    exploration_epsilon = jax.random.uniform(key=key1, shape=new_label.shape) < epsilon
+    exploration_uncertainty = jax.random.bernoulli(
+        key=key2, p=uncertainty_prob, shape=new_label.shape
     )
-    exploration_label = jax.random.choice(key=key2, a=all_labels, shape=new_label.shape)
+    exploration = exploration_epsilon * exploration_uncertainty
+    exploration_label = jax.random.choice(key=key3, a=all_labels, shape=new_label.shape)
     new_label = jnp.where(exploration, exploration_label, new_label)
 
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
@@ -312,7 +309,7 @@ def get_new_union_labels(
         new_label_percent,
         union_score,
         mean_labels_cost,
-        std_neg_score,
+        baseline_score,
         std_union_score.mean() + std_union_score.std(),
         uncertainty_prob.mean(),
     )
@@ -501,7 +498,7 @@ def main(args, cfg_env=None):
 
     steps = 0
     epsilon_schedule = optax.linear_schedule(
-        init_value=0.5, end_value=0.1, transition_steps=int(1e4)
+        init_value=1.0, end_value=0.1, transition_steps=int(1e5)
     )
     if config["use_vonmisesfisher_mode"]:
         mean_direction = l2_normalize(
@@ -544,7 +541,7 @@ def main(args, cfg_env=None):
                     new_union_labels_percent,
                     new_union_score,
                     new_union_labels_cost,
-                    std_neg_score,
+                    std_baseline_score,
                     upper_mean_std_union_score,
                     mean_uncertainty_prob,
                 ) = get_new_union_labels(
@@ -643,7 +640,9 @@ def main(args, cfg_env=None):
                 for l, nul in zip(all_labels, new_union_labels_percent):
                     logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
 
-                logger.log_tabular("Mean/new_label_std_neg", std_neg_score.item())
+                logger.log_tabular(
+                    "Mean/new_label_std_baseline", std_baseline_score.item()
+                )
                 logger.log_tabular(
                     "Mean/new_label_std_union", upper_mean_std_union_score.item()
                 )
