@@ -245,6 +245,34 @@ def index_fun(arr, all_labels, label_range):
     return all_labels[idx]
 
 
+@jax.jit
+def get_exploration_label(scores, all_labels, key):
+    dtype = scores.dtype
+    mean, std = scores.mean(), scores.std()
+
+    importance_indx = jnp.select(
+        condlist=[
+            scores <= mean,
+            (mean < scores) & (scores <= mean + std),
+            (mean + std < scores) & (scores < mean + 2 * std),
+        ],
+        choicelist=[0, 1, 2],
+        default=0,
+    )
+
+    def get_sample(indx, key):
+        # indx is preferred 3X more
+        mask = jnp.arange(all_labels.shape[0]) >= indx
+        logits = 1.0 + 2 * mask.astype(dtype)
+        p = jax.nn.softmax(logits)
+        label = jax.random.choice(key=key, a=all_labels, p=p)
+        return label
+
+    keys = jax.random.split(key, num=scores.shape[0])
+    exploration_label = jax.vmap(get_sample, in_axes=(0, 0))(importance_indx, keys)
+    return exploration_label
+
+
 @nnx.jit
 def get_new_union_labels(
     embedding_model,
@@ -292,7 +320,7 @@ def get_new_union_labels(
         key=key2, p=uncertainty_prob, shape=new_label.shape
     )
     exploration = exploration_epsilon * exploration_uncertainty
-    exploration_label = jax.random.choice(key=key3, a=all_labels, shape=new_label.shape)
+    exploration_label = get_exploration_label(std_union_score, all_labels, key3)
     new_label = jnp.where(exploration, exploration_label, new_label)
 
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
@@ -312,6 +340,7 @@ def get_new_union_labels(
         baseline_score,
         std_union_score.mean() + std_union_score.std(),
         uncertainty_prob.mean(),
+        exploration.mean(),
     )
 
 
@@ -498,7 +527,7 @@ def main(args, cfg_env=None):
 
     steps = 0
     epsilon_schedule = optax.linear_schedule(
-        init_value=1.0, end_value=0.1, transition_steps=int(1e5)
+        init_value=1.0, end_value=0.0, transition_steps=config["total_iteration"]
     )
     if config["use_vonmisesfisher_mode"]:
         mean_direction = l2_normalize(
@@ -544,6 +573,7 @@ def main(args, cfg_env=None):
                     std_baseline_score,
                     upper_mean_std_union_score,
                     mean_uncertainty_prob,
+                    mean_exploration_prob,
                 ) = get_new_union_labels(
                     embedding_model=target_embedding_model,
                     target_neg_obs=target_neg_obs,
@@ -649,6 +679,10 @@ def main(args, cfg_env=None):
                 logger.log_tabular(
                     "Mean/new_label_uncertainty_prob",
                     mean_uncertainty_prob.item(),
+                )
+                logger.log_tabular(
+                    "Mean/new_label_exploration_prob",
+                    mean_exploration_prob.item(),
                 )
 
                 logger.log_tabular(
