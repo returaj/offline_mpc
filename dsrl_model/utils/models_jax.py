@@ -187,7 +187,7 @@ class TransformerBlock(nnx.Module):
     Code: https://docs.jaxstack.ai/en/latest/JAX_for_LLM_pretraining.html
     """
 
-    def __init__(self, rngs, d_model, liner_features, num_heads, rate=0.1):
+    def __init__(self, rngs, d_model, liner_features, num_heads, rate=0.3):
         self.attn = nnx.MultiHeadAttention(num_heads, d_model, decode=False, rngs=rngs)
         self.dp1 = nnx.Dropout(rate=rate, rngs=rngs)
         self.ln1 = nnx.LayerNorm(d_model, rngs=rngs)
@@ -228,15 +228,17 @@ class TransformerEmbedding(nnx.Module):
         self.pos_encoding = positionalencoding1d(embd_dim, horizon)
         self.mask = jnp.tril(jnp.ones((horizon, horizon)))  # causal mask
         linear_features = 4 * embd_dim
-        self.transformer_blocks = [
-            TransformerBlock(
-                rngs=rngs,
-                d_model=embd_dim,
-                liner_features=linear_features,
-                num_heads=num_heads,
-            )
-            for _ in range(num_attentions)
-        ]
+        self.transformer_blocks = tuple(
+            [
+                TransformerBlock(
+                    rngs=rngs,
+                    d_model=embd_dim,
+                    liner_features=linear_features,
+                    num_heads=num_heads,
+                )
+                for _ in range(num_attentions)
+            ]
+        )
 
     def __call__(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
