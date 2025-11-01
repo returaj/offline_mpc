@@ -254,10 +254,10 @@ def get_exploration_label(scores, all_labels, key):
         condlist=[
             scores <= mean,
             (mean < scores) & (scores <= mean + std),
-            (mean + std < scores) & (scores < mean + 2 * std),
+            (mean + std < scores) & (scores <= mean + 2 * std),
         ],
         choicelist=[0, 1, 2],
-        default=0,
+        default=3,
     )
 
     def get_sample(indx, key):
@@ -340,7 +340,7 @@ def get_new_union_labels(
         baseline_score,
         std_union_score.mean() + std_union_score.std(),
         uncertainty_prob.mean(),
-        exploration.mean(),
+        exploration.sum(),
     )
 
 
@@ -573,7 +573,7 @@ def main(args, cfg_env=None):
                     std_baseline_score,
                     upper_mean_std_union_score,
                     mean_uncertainty_prob,
-                    mean_exploration_prob,
+                    total_exploration,
                 ) = get_new_union_labels(
                     embedding_model=target_embedding_model,
                     target_neg_obs=target_neg_obs,
@@ -681,8 +681,8 @@ def main(args, cfg_env=None):
                     mean_uncertainty_prob.item(),
                 )
                 logger.log_tabular(
-                    "Mean/new_label_exploration_prob",
-                    mean_exploration_prob.item(),
+                    "Total/new_label_exploration",
+                    total_exploration.item(),
                 )
 
                 logger.log_tabular(
