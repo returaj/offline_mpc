@@ -308,8 +308,8 @@ def get_new_union_labels(
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
 
-    baseline_score = std_union_score.mean()
-    uncertainty_prob = jax.nn.sigmoid((std_union_score / baseline_score - 1.0) / 0.3)
+    baseline_score = std_union_score.mean() + std_union_score.std()
+    uncertainty_prob = jax.nn.sigmoid((std_union_score / baseline_score - 1.0) / 0.2)
     uncertainty_score = std_union_score * (uncertainty_prob > 0.5)
     union_score = jnp.clip(mean_union_score - uncertainty_score, min=0.01, max=0.99)
     new_label = index_fun(union_score, all_labels, label_range)
