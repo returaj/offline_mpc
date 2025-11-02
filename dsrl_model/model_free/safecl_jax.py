@@ -235,9 +235,12 @@ def get_union_score(
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
 
-    baseline_score = std_union_score.mean()
-    uncertainty_score = std_union_score * (std_union_score > baseline_score)
-    union_score = mean_union_score - uncertainty_score
+    non_outlier_score = mean_union_score - std_union_score
+    baseline_std_score = std_union_score.mean() + std_union_score.std()
+    outlier_mask = (std_union_score > baseline_std_score).astype(dtype)
+    outlier_percent = outlier_mask.sum() / outlier_mask.shape[0]
+    outlier_score = -1 * jnp.ones_like(non_outlier_score, dtype=dtype)
+    union_score = (1 - outlier_mask) * non_outlier_score + outlier_mask * outlier_score
 
     new_label = index_fun(jnp.clip(union_score, min=0.0), all_labels, label_range)
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
@@ -254,7 +257,8 @@ def get_union_score(
 
     return (
         union_score,
-        baseline_score,
+        baseline_std_score,
+        outlier_percent,
         new_label,
         new_label_percent,
         mean_label_score,
@@ -478,6 +482,7 @@ def main(args, cfg_env=None):
             (
                 new_union_score,
                 std_baseline_score,
+                outlier_percent,
                 new_union_labels,
                 new_union_labels_percent,
                 new_union_label_score,
@@ -568,6 +573,9 @@ def main(args, cfg_env=None):
                     "Mean/new_label_std_baseline", std_baseline_score.item()
                 )
 
+                logger.log_tabular(
+                    f"Percentage/new_union_outlier", outlier_percent.item()
+                )
                 for l, nul in zip(all_labels, new_union_labels_percent):
                     logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
 
