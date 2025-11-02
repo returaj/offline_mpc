@@ -50,7 +50,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "warmup_steps": int(0),
+    "warmup_steps": int(1e3),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -152,6 +152,7 @@ def train_embedding_model(
     target_union_act,
     target_union_score,
     target_neg_z,
+    union_scale,
 ):
     dtype = target_neg_obs.dtype
 
@@ -161,7 +162,7 @@ def train_embedding_model(
 
     def loss_fun(embedding_model):
         # temp1, temp2 = 1.0, 0.1
-        scale, lambda1 = 1.0, 1.0
+        neg_scale = 1.0
 
         # Batch X embd_dim
         neg_z = embedding_model(target_neg, normalize_z=True)
@@ -171,15 +172,17 @@ def train_embedding_model(
         multimode_neg_score = neg_z @ target_neg_z
         neg_score = jnp.min(multimode_neg_score, axis=-1)
         target_neg_score = jnp.ones_like(neg_score, dtype=dtype)
-        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, scale))
+        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
         neg_mean_score = jnp.mean(neg_score)
 
         multimode_union_score = union_z @ target_neg_z
         union_score = jnp.min(multimode_union_score, axis=-1)
-        union_mean_loss = jnp.mean(range_loss(union_score, target_union_score, scale))
+        union_mean_loss = jnp.mean(
+            range_loss(union_score, target_union_score, union_scale)
+        )
         union_mean_score = jnp.mean(union_score)
 
-        loss = neg_mean_loss + lambda1 * union_mean_loss
+        loss = neg_mean_loss + union_mean_loss
 
         return loss, (
             neg_mean_loss,
@@ -235,11 +238,11 @@ def get_union_score(
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
 
-    non_outlier_score = mean_union_score - std_union_score
-    baseline_std_score = std_union_score.mean() + std_union_score.std()
+    non_outlier_score = mean_union_score
+    baseline_std_score = std_union_score.mean() + 2 * std_union_score.std()
     outlier_mask = (std_union_score > baseline_std_score).astype(dtype)
     outlier_percent = outlier_mask.sum() / outlier_mask.shape[0]
-    outlier_score = -1 * jnp.ones_like(non_outlier_score, dtype=dtype)
+    outlier_score = 0 * jnp.ones_like(non_outlier_score, dtype=dtype)
     union_score = (1 - outlier_mask) * non_outlier_score + outlier_mask * outlier_score
 
     new_label = index_fun(jnp.clip(union_score, min=0.0), all_labels, label_range)
@@ -288,7 +291,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp((target_score.mean() - target_score) / 0.1), max=5.0)
+        weight = jnp.clip(jnp.exp(-target_score / 0.1), max=5.0)
         loss = jnp.mean(weight * batch_loss)
         return loss
 
@@ -436,18 +439,6 @@ def main(args, cfg_env=None):
 
     buffer.to_jax_ndarray()
 
-    # set logger
-    eval_rew_deque = deque(maxlen=config["eval_episode_freq"])
-    eval_cost_deque = deque(maxlen=config["eval_episode_freq"])
-    eval_len_deque = deque(maxlen=config["eval_episode_freq"])
-    dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
-
-    logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
-    logger.save_config(dict_args)
-    logger.log("Start embedding, cost and bc_policy model training.")
-
-    steps = 0
     if config["use_vonmisesfisher_mode"]:
         mean_direction = l2_normalize(
             jax.random.normal(key=rngs.neg_z(), shape=(embd_size,), dtype=jnp.float32),
@@ -464,6 +455,19 @@ def main(args, cfg_env=None):
         target_neg_z = jax.random.orthogonal(
             key=rngs.neg_z(), n=embd_size, m=labels_cfg["num_modes"], dtype=jnp.float32
         )
+
+    # set logger
+    eval_rew_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_cost_deque = deque(maxlen=config["eval_episode_freq"])
+    eval_len_deque = deque(maxlen=config["eval_episode_freq"])
+    dict_args = config
+    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+
+    logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
+    logger.save_config(dict_args)
+    logger.log("Start embedding, cost and bc_policy model training.")
+
+    steps, union_scale = 0, 0.0
     while steps < config["total_iteration"]:
         # shape: Batch X Horizon X obs/act_dim
         for (
@@ -514,6 +518,7 @@ def main(args, cfg_env=None):
                 target_union_act=target_union_act,
                 target_union_score=new_union_score,
                 target_neg_z=target_neg_z,
+                union_scale=union_scale,
             )
 
             if (steps % 100) == 0:
@@ -525,6 +530,8 @@ def main(args, cfg_env=None):
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_freq"] == 0
             ):
+                union_scale = 1.0
+
                 bc_loss = train_policy_model(
                     bc_policy=bc_policy,
                     bc_optimizer=bc_optimizer,
