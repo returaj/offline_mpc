@@ -237,12 +237,25 @@ def get_union_score(
     _, union_scores = multimodel((target_union, target_neg_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
     std_union_score = jnp.std(union_scores, axis=0)
+    std_union_mean, std_union_std = std_union_score.mean(), std_union_score.std()
 
     non_outlier_score = mean_union_score
-    baseline_std_score = std_union_score.mean() + 2 * std_union_score.std()
-    outlier_mask = (std_union_score > baseline_std_score).astype(dtype)
-    outlier_percent = outlier_mask.sum() / outlier_mask.shape[0]
-    outlier_score = 0 * jnp.ones_like(non_outlier_score, dtype=dtype)
+
+    baseline_std_neg = std_union_mean - std_union_std
+    outlier_neg_mask = std_union_score < baseline_std_neg
+    outlier_neg_percent = outlier_neg_mask.sum() / outlier_neg_mask.shape[0]
+    outlier_neg_score = 1 * jnp.ones_like(non_outlier_score, dtype=dtype)
+    outlier_neg_score = outlier_neg_score * outlier_neg_mask
+
+    baseline_std_pos = std_union_mean + std_union_std
+    outlier_pos_mask = std_union_score > baseline_std_pos
+    outlier_pos_percent = outlier_pos_mask.sum() / outlier_pos_mask.shape[0]
+    outlier_pos_score = 0 * jnp.ones_like(non_outlier_score, dtype=dtype)
+    outlier_pos_score = outlier_pos_score * outlier_pos_mask
+
+    outlier_mask = outlier_neg_mask + outlier_pos_mask
+    outlier_score = outlier_neg_score + outlier_pos_score
+
     union_score = (1 - outlier_mask) * non_outlier_score + outlier_mask * outlier_score
 
     new_label = index_fun(jnp.clip(union_score, min=0.0), all_labels, label_range)
@@ -260,8 +273,10 @@ def get_union_score(
 
     return (
         union_score,
-        baseline_std_score,
-        outlier_percent,
+        baseline_std_neg,
+        outlier_neg_percent,
+        baseline_std_pos,
+        outlier_pos_percent,
         new_label,
         new_label_percent,
         mean_label_score,
@@ -485,8 +500,10 @@ def main(args, cfg_env=None):
 
             (
                 new_union_score,
-                std_baseline_score,
-                outlier_percent,
+                baseline_std_neg,
+                outlier_neg_percent,
+                baseline_std_pos,
+                outlier_pos_percent,
                 new_union_labels,
                 new_union_labels_percent,
                 new_union_label_score,
@@ -570,18 +587,22 @@ def main(args, cfg_env=None):
                 )
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
-                logger.log_tabular("Mean/embd_neg_score", neg_mean_score.mean().item())
-                logger.log_tabular(
-                    "Mean/embd_union_score", union_mean_score.mean().item()
-                )
+                logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
+                logger.log_tabular("Mean/embd_union_score", union_mean_score.item())
                 for l, lms in zip(all_labels, new_union_label_score):
                     logger.log_tabular(f"Mean/new_union_score_label_{l}", lms.item())
                 logger.log_tabular(
-                    "Mean/new_label_std_baseline", std_baseline_score.item()
+                    "Mean/new_label_baseline_std_neg", baseline_std_neg.item()
+                )
+                logger.log_tabular(
+                    "Mean/new_label_baseline_std_pos", baseline_std_pos.item()
                 )
 
                 logger.log_tabular(
-                    f"Percentage/new_union_outlier", outlier_percent.item()
+                    f"Percentage/new_union_outlier_neg", outlier_neg_percent.item()
+                )
+                logger.log_tabular(
+                    f"Percentage/new_union_outlier_pos", outlier_pos_percent.item()
                 )
                 for l, nul in zip(all_labels, new_union_labels_percent):
                     logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
