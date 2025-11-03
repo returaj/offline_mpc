@@ -250,9 +250,9 @@ def get_union_trainable(
 
     _, union_scores = multimodel((target_union, target_union_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
-    mean, std = mean_union_score.mean(), mean_union_score.std()
+    baseline_mean, baseline_std = mean_union_score.mean(), mean_union_score.std()
 
-    baseline = jnp.maximum(mean + 2 * std, 0.7)
+    baseline = jnp.maximum(baseline_mean + 2 * baseline_std, 0.7)
     trainable_mask = (mean_union_score > baseline).astype(dtype)
     trainable_count = trainable_mask.sum()
     trainable_percent = trainable_count / batch
@@ -267,6 +267,8 @@ def get_union_trainable(
     return (
         trainable_mask,
         mean_union_score,
+        baseline_mean,
+        baseline_std,
         baseline,
         trainable_percent,
         mean_trainable_cost,
@@ -462,6 +464,8 @@ def main(args, cfg_env=None):
             (
                 union_trainable,
                 union_score,
+                baseline_mean,
+                baseline_std,
                 baseline_score,
                 union_trainable_percent,
                 mean_trainable_cost,
@@ -540,6 +544,8 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
                 logger.log_tabular("Mean/embd_union_score", union_mean_score.item())
+                logger.log_tabular("Mean/union_baseline_mean", baseline_mean.item())
+                logger.log_tabular("Mean/union_baseline_std", baseline_std.item())
                 logger.log_tabular("Mean/union_baseline_score", baseline_score.item())
 
                 logger.log_tabular(
