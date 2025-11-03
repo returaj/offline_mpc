@@ -252,7 +252,7 @@ def get_union_trainable(
     mean_union_score = jnp.mean(union_scores, axis=0)
     mean, std = mean_union_score.mean(), mean_union_score.std()
 
-    baseline = jnp.maximum(mean + std, 0.7)
+    baseline = jnp.maximum(mean + 2 * std, 0.7)
     trainable_mask = (mean_union_score > baseline).astype(dtype)
     trainable_count = trainable_mask.sum()
     trainable_percent = trainable_count / batch
@@ -380,7 +380,7 @@ def main(args, cfg_env=None):
         act_dim=act_space.shape[0],
         horizon=config["train_horizon"],
         embd_dim=embd_size,
-        num_attentions=2,
+        num_attentions=3,
     )
 
     # data
