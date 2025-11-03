@@ -241,22 +241,15 @@ def get_union_score(
 
     non_outlier_score = mean_union_score
 
-    baseline_std_neg = std_union_mean - std_union_std
-    outlier_neg_mask = std_union_score < baseline_std_neg
-    outlier_neg_percent = outlier_neg_mask.sum() / outlier_neg_mask.shape[0]
-    outlier_neg_score = 1 * jnp.ones_like(non_outlier_score, dtype=dtype)
-    outlier_neg_score = outlier_neg_score * outlier_neg_mask
-
     baseline_std_pos = std_union_mean + std_union_std
     outlier_pos_mask = std_union_score > baseline_std_pos
     outlier_pos_percent = outlier_pos_mask.sum() / outlier_pos_mask.shape[0]
     outlier_pos_score = 0 * jnp.ones_like(non_outlier_score, dtype=dtype)
     outlier_pos_score = outlier_pos_score * outlier_pos_mask
 
-    outlier_mask = outlier_neg_mask + outlier_pos_mask
-    outlier_score = outlier_neg_score + outlier_pos_score
-
-    union_score = (1 - outlier_mask) * non_outlier_score + outlier_mask * outlier_score
+    union_score = (
+        1 - outlier_pos_mask
+    ) * non_outlier_score + outlier_pos_mask * outlier_pos_score
 
     new_label = index_fun(jnp.clip(union_score, min=0.0), all_labels, label_range)
     new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
@@ -273,8 +266,6 @@ def get_union_score(
 
     return (
         union_score,
-        baseline_std_neg,
-        outlier_neg_percent,
         baseline_std_pos,
         outlier_pos_percent,
         new_label,
@@ -500,8 +491,6 @@ def main(args, cfg_env=None):
 
             (
                 new_union_score,
-                baseline_std_neg,
-                outlier_neg_percent,
                 baseline_std_pos,
                 outlier_pos_percent,
                 new_union_labels,
@@ -592,15 +581,9 @@ def main(args, cfg_env=None):
                 for l, lms in zip(all_labels, new_union_label_score):
                     logger.log_tabular(f"Mean/new_union_score_label_{l}", lms.item())
                 logger.log_tabular(
-                    "Mean/new_label_baseline_std_neg", baseline_std_neg.item()
-                )
-                logger.log_tabular(
                     "Mean/new_label_baseline_std_pos", baseline_std_pos.item()
                 )
 
-                logger.log_tabular(
-                    f"Percentage/new_union_outlier_neg", outlier_neg_percent.item()
-                )
                 logger.log_tabular(
                     f"Percentage/new_union_outlier_pos", outlier_pos_percent.item()
                 )
