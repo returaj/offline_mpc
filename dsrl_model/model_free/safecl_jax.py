@@ -50,7 +50,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_freq": 2,
     "decay": 0.85,
-    "warmup_steps": int(1e3),
+    "warmup_steps": int(3e4),
     "cost_weight_temp": 0.6,
     "update_tau": 0.01,
     "weight_decay": 0.01,
@@ -144,43 +144,51 @@ def range_loss(scores, target_scores, scale):
 
 @nnx.jit
 def train_embedding_model(
+    target_embedding_model,
     embedding_model,
     embedding_optimizer,
     target_neg_obs,
     target_neg_act,
     target_union_obs,
     target_union_act,
-    target_union_score,
-    target_neg_z,
+    target_union_trainable,
     union_scale,
 ):
     dtype = target_neg_obs.dtype
+    batch = target_neg_obs.shape[0]
 
     # shape: Batch X Horizon X obs_act_dim
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     def loss_fun(embedding_model):
-        # temp1, temp2 = 1.0, 0.1
         neg_scale = 1.0
 
+        # Batch
+        target_score = jnp.ones(shape=(batch,), dtype=dtype)
+
         # Batch X embd_dim
-        neg_z = embedding_model(target_neg, normalize_z=True)
-        union_z = embedding_model(target_union, normalize_z=True)
+        target_neg_z = target_embedding_model(target_neg, training=False)
+        target_union_z = target_embedding_model(target_union, training=False)
+
+        neg_z = embedding_model(target_neg)
+        union_z = embedding_model(target_union)
 
         # Batch
-        multimode_neg_score = neg_z @ target_neg_z
-        neg_score = jnp.min(multimode_neg_score, axis=-1)
-        target_neg_score = jnp.ones_like(neg_score, dtype=dtype)
-        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
+        neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
+        neg_mean_loss = jnp.mean(range_loss(neg_score, target_score, neg_scale))
         neg_mean_score = jnp.mean(neg_score)
 
-        multimode_union_score = union_z @ target_neg_z
-        union_score = jnp.min(multimode_union_score, axis=-1)
-        union_mean_loss = jnp.mean(
-            range_loss(union_score, target_union_score, union_scale)
+        union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
+        union_loss = range_loss(union_score, target_score, union_scale)
+        trainable_scores = (target_union_trainable > 0).astype(dtype)
+        trainable_count = trainable_scores.sum() + EPS
+        union_mean_loss = (
+            jnp.einsum("i,i->", trainable_scores, union_loss) / trainable_count
         )
-        union_mean_score = jnp.mean(union_score)
+        union_mean_score = (
+            jnp.einsum("i,i->", trainable_scores, union_score) / trainable_count
+        )
 
         loss = neg_mean_loss + union_mean_loss
 
@@ -207,71 +215,62 @@ def index_fun(arr, all_labels, label_range):
 
 
 @nnx.jit
-def get_union_score(
+def get_union_trainable(
+    target_embedding_model,
     embedding_model,
     target_neg_obs,
     target_neg_act,
     target_union_obs,
     target_union_act,
     target_union_cost,
-    target_neg_z,
-    all_labels,
-    label_range,
 ):
-    del target_neg_obs, target_neg_act
-
     num_models = 5
+    batch = target_union_obs.shape[0]
     dtype = target_union_obs.dtype
 
     # Batch X Horizon X obs_act_dim
+    target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
+
+    # Batch X embd_dim
+    target_neg_z = target_embedding_model(target_neg, training=False)
+    target_union_z = target_embedding_model(target_union, training=False)
 
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
     def multimodel(carry):
-        x, mode_z, model = carry
+        x, target_z, model = carry
         # Batch X embd_dim
-        z = model(x, normalize_z=True)
-        score = jnp.min(z @ mode_z, axis=-1)
+        z = model(x)
+        # Batch
+        score = jnp.einsum("ij,ij->i", z, target_z)
         return carry, score
 
-    _, union_scores = multimodel((target_union, target_neg_z, embedding_model))
+    _, neg_scores = multimodel((target_neg, target_neg_z, embedding_model))
+    mean_neg_score = jnp.mean(neg_scores)
+
+    _, union_scores = multimodel((target_union, target_union_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
-    std_union_score = jnp.std(union_scores, axis=0)
-    std_union_mean, std_union_std = std_union_score.mean(), std_union_score.std()
+    mean, std = mean_union_score.mean(), mean_union_score.std()
 
-    non_outlier_score = mean_union_score
-
-    baseline_std_pos = std_union_mean + std_union_std
-    outlier_pos_mask = std_union_score > baseline_std_pos
-    outlier_pos_percent = outlier_pos_mask.sum() / outlier_pos_mask.shape[0]
-    outlier_pos_score = 0 * jnp.ones_like(non_outlier_score, dtype=dtype)
-    outlier_pos_score = outlier_pos_score * outlier_pos_mask
-
-    union_score = (
-        1 - outlier_pos_mask
-    ) * non_outlier_score + outlier_pos_mask * outlier_pos_score
-
-    new_label = index_fun(jnp.clip(union_score, min=0.0), all_labels, label_range)
-    new_label_onehot = (new_label[:, None] == all_labels).astype(dtype)
-    new_label_count = new_label_onehot.sum(axis=0)
-    new_label_percent = new_label_count / jnp.sum(new_label_count)
-
-    label_score = (union_score[:, None] * new_label_onehot).sum(axis=0)
-    mean_label_score = label_score / (new_label_count + EPS)
+    baseline = jnp.maximum(mean + std, 0.7)
+    trainable_mask = (mean_union_score > baseline).astype(dtype)
+    trainable_count = trainable_mask.sum()
+    trainable_percent = trainable_count / batch
 
     # Batch
     batch_horizon_cost = jnp.sum(target_union_cost, axis=-1)
-    total_labels_cost = (batch_horizon_cost[:, None] * new_label_onehot).sum(axis=0)
-    mean_labels_cost = total_labels_cost / (new_label_count + EPS)
+    total_trainable_cost = jnp.einsum("i,i->", batch_horizon_cost, trainable_mask)
+    mean_trainable_cost = total_trainable_cost / (trainable_count + EPS)
+    total_non_trainable_cost = batch_horizon_cost.sum() - total_trainable_cost
+    mean_non_trainable_cost = total_non_trainable_cost / (batch - trainable_count + EPS)
 
     return (
-        union_score,
-        baseline_std_pos,
-        outlier_pos_percent,
-        new_label,
-        new_label_percent,
-        mean_label_score,
-        mean_labels_cost,
+        trainable_mask,
+        mean_union_score,
+        baseline,
+        trainable_percent,
+        mean_trainable_cost,
+        mean_non_trainable_cost,
     )
 
 
@@ -313,14 +312,10 @@ def main(args, cfg_env=None):
     random.seed(args.seed)
     np.random.seed(args.seed)
     rngs = nnx.Rngs(args.seed)
+    target_rngs = nnx.Rngs(args.seed + 42)
 
     # set default device id
     jax.default_device = jax.devices(args.device)[args.device_id]
-
-    # label configs:
-    all_labels = jnp.array(labels_cfg["labels"], dtype=jnp.float32)
-    label_distance = jnp.array(labels_cfg["distance"], dtype=jnp.float32)
-    label_range = jnp.array(labels_cfg["range"], dtype=jnp.float32)
 
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -379,21 +374,13 @@ def main(args, cfg_env=None):
             ),
         ),
     )
-    target_embedding_model = deepcopy(embedding_model)
-
-    cost_model = ExpCostModel(
-        rngs=rngs,
-        x_dims=obs_space.shape[0] + act_space.shape[0],
-        hidden_size=config["hidden_size"],
-    )
-    cost_optimizer = nnx.Optimizer(
-        model=cost_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+    target_embedding_model = TransformerEmbedding(
+        rngs=target_rngs,
+        obs_dim=obs_space.shape[0],
+        act_dim=act_space.shape[0],
+        horizon=config["train_horizon"],
+        embd_dim=embd_size,
+        num_attentions=2,
     )
 
     # data
@@ -445,23 +432,6 @@ def main(args, cfg_env=None):
 
     buffer.to_jax_ndarray()
 
-    if config["use_vonmisesfisher_mode"]:
-        mean_direction = l2_normalize(
-            jax.random.normal(key=rngs.neg_z(), shape=(embd_size,), dtype=jnp.float32),
-            axis=0,
-        )
-        concentration = labels_cfg["concentration_factor"] * embd_size
-        target_neg_z = sample_von_mises_fisher_samples(
-            key=rngs.neg_z(),
-            mean_direction=mean_direction,
-            concentration=concentration,
-            num_samples=labels_cfg["num_modes"],
-        )
-    else:
-        target_neg_z = jax.random.orthogonal(
-            key=rngs.neg_z(), n=embd_size, m=labels_cfg["num_modes"], dtype=jnp.float32
-        )
-
     # set logger
     eval_rew_deque = deque(maxlen=config["eval_episode_freq"])
     eval_cost_deque = deque(maxlen=config["eval_episode_freq"])
@@ -490,23 +460,20 @@ def main(args, cfg_env=None):
             steps += 1
 
             (
-                new_union_score,
-                baseline_std_pos,
-                outlier_pos_percent,
-                new_union_labels,
-                new_union_labels_percent,
-                new_union_label_score,
-                new_union_labels_cost,
-            ) = get_union_score(
-                embedding_model=target_embedding_model,
+                union_trainable,
+                union_score,
+                baseline_score,
+                union_trainable_percent,
+                mean_trainable_cost,
+                mean_non_trainable_cost,
+            ) = get_union_trainable(
+                target_embedding_model=target_embedding_model,
+                embedding_model=embedding_model,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 target_union_cost=target_union_cost,
-                target_neg_z=target_neg_z,
-                all_labels=all_labels,
-                label_range=label_range,
             )
 
             (
@@ -516,21 +483,16 @@ def main(args, cfg_env=None):
                 neg_mean_score,
                 union_mean_score,
             ) = train_embedding_model(
+                target_embedding_model=target_embedding_model,
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
-                target_union_score=new_union_score,
-                target_neg_z=target_neg_z,
+                target_union_trainable=union_trainable,
                 union_scale=union_scale,
             )
-
-            if (steps % 100) == 0:
-                target_embedding_model = polyak_update(
-                    target_embedding_model, embedding_model, 1.0
-                )
 
             bc_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
@@ -543,7 +505,7 @@ def main(args, cfg_env=None):
                     bc_optimizer=bc_optimizer,
                     target_obs=target_union_obs,
                     target_act=target_union_act,
-                    target_score=new_union_score,
+                    target_score=union_score,
                     gamma=config["gamma"],
                 )
 
@@ -578,17 +540,11 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
                 logger.log_tabular("Mean/embd_union_score", union_mean_score.item())
-                for l, lms in zip(all_labels, new_union_label_score):
-                    logger.log_tabular(f"Mean/new_union_score_label_{l}", lms.item())
-                logger.log_tabular(
-                    "Mean/new_label_baseline_std_pos", baseline_std_pos.item()
-                )
+                logger.log_tabular("Mean/union_baseline_score", baseline_score.item())
 
                 logger.log_tabular(
-                    f"Percentage/new_union_outlier_pos", outlier_pos_percent.item()
+                    f"Percentage/new_union_trainable", union_trainable_percent.item()
                 )
-                for l, nul in zip(all_labels, new_union_labels_percent):
-                    logger.log_tabular(f"Percentage/new_union_label_{l}", nul.item())
 
                 logger.log_tabular(
                     "Cost/neg_cost", jnp.sum(target_neg_cost, axis=-1).mean().item()
@@ -596,8 +552,10 @@ def main(args, cfg_env=None):
                 logger.log_tabular(
                     "Cost/union_cost", jnp.sum(target_union_cost, axis=-1).mean().item()
                 )
-                for l, nuc in zip(all_labels, new_union_labels_cost):
-                    logger.log_tabular(f"Cost/new_union_label_{l}", nuc.item())
+                logger.log_tabular("Cost/union_trainable", mean_trainable_cost.item())
+                logger.log_tabular(
+                    "Cost/union_non_trainable", mean_non_trainable_cost.item()
+                )
 
                 logger.log_tabular(
                     "Norm/embedding_model",
@@ -625,12 +583,16 @@ def main(args, cfg_env=None):
                 break
 
     logger.nn_model_save(
+        itr=steps,
+        nn_model_saver_element=target_embedding_model,
+        prefix="target_embedding",
+    )
+    logger.nn_model_save(
         itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
     )
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=bc_policy, prefix="bc_policy"
     )
-    logger.save_state(state_dict={"target_neg_z": target_neg_z}, dirname="neg_z")
     if config["normalize_observation"]:
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
