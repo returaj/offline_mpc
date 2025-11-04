@@ -153,6 +153,7 @@ def train_embedding_model(
     target_union_act,
     target_union_trainable,
     union_scale,
+    key,
 ):
     dtype = target_neg_obs.dtype
     batch = target_neg_obs.shape[0]
@@ -161,26 +162,32 @@ def train_embedding_model(
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
+    mix_p = jax.random.uniform(key=key, shape=target_neg.shape)
+    target_random = mix_p * target_neg + (1 - mix_p) * target_union
+
+    # Batch
+    target_ones_score = jnp.ones(shape=(batch,), dtype=dtype)
+    target_zeros_score = jnp.zeros(shape=(batch,), dtype=dtype)
+
+    # Batch X embd_dim
+    target_neg_z = target_embedding_model(target_neg, training=False)
+    target_union_z = target_embedding_model(target_union, training=False)
+    target_random_z = target_embedding_model(target_random, training=False)
+
     def loss_fun(embedding_model):
-        neg_scale = 1.0
-
-        # Batch
-        target_score = jnp.ones(shape=(batch,), dtype=dtype)
-
-        # Batch X embd_dim
-        target_neg_z = target_embedding_model(target_neg, training=False)
-        target_union_z = target_embedding_model(target_union, training=False)
+        default_scale = 1.0
 
         neg_z = embedding_model(target_neg)
-        union_z = embedding_model(target_union)
-
         # Batch
         neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
-        neg_mean_loss = jnp.mean(range_loss(neg_score, target_score, neg_scale))
+        neg_mean_loss = jnp.mean(
+            range_loss(neg_score, target_ones_score, default_scale)
+        )
         neg_mean_score = jnp.mean(neg_score)
 
+        union_z = embedding_model(target_union)
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
-        union_loss = range_loss(union_score, target_score, union_scale)
+        union_loss = range_loss(union_score, target_ones_score, union_scale)
         trainable_scores = (target_union_trainable > 0).astype(dtype)
         trainable_count = trainable_scores.sum() + EPS
         union_mean_loss = (
@@ -190,13 +197,22 @@ def train_embedding_model(
             jnp.einsum("i,i->", trainable_scores, union_score) / trainable_count
         )
 
-        loss = neg_mean_loss + union_mean_loss
+        random_z = embedding_model(target_random)
+        random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
+        random_mean_loss = jnp.mean(
+            range_loss(random_score, target_zeros_score, default_scale)
+        )
+        random_mean_score = jnp.mean(random_score)
+
+        loss = neg_mean_loss + union_mean_loss + random_mean_loss
 
         return loss, (
             neg_mean_loss,
             union_mean_loss,
+            random_mean_loss,
             neg_mean_score,
             union_mean_score,
+            random_mean_score,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -484,8 +500,10 @@ def main(args, cfg_env=None):
                 embedding_loss,
                 neg_mean_loss,
                 union_mean_loss,
+                random_mean_loss,
                 neg_mean_score,
                 union_mean_score,
+                random_mean_score,
             ) = train_embedding_model(
                 target_embedding_model=target_embedding_model,
                 embedding_model=embedding_model,
@@ -496,6 +514,7 @@ def main(args, cfg_env=None):
                 target_union_act=target_union_act,
                 target_union_trainable=union_trainable,
                 union_scale=union_scale,
+                key=rngs.random_sample(),
             )
 
             bc_loss = jnp.array(0.0)
@@ -540,10 +559,14 @@ def main(args, cfg_env=None):
                 logger.log_tabular(
                     "Loss/Loss_embd_union_mean_loss", union_mean_loss.item()
                 )
+                logger.log_tabular(
+                    "Loss/Loss_embd_random_mean_loss", random_mean_loss.item()
+                )
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
 
                 logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
                 logger.log_tabular("Mean/embd_union_score", union_mean_score.item())
+                logger.log_tabular("Mean/embd_random_score", random_mean_score.item())
                 logger.log_tabular("Mean/union_baseline_mean", baseline_mean.item())
                 logger.log_tabular("Mean/union_baseline_std", baseline_std.item())
                 logger.log_tabular("Mean/union_baseline_score", baseline_score.item())
