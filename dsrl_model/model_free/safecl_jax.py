@@ -162,12 +162,16 @@ def train_embedding_model(
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
-    mix_p = jax.random.uniform(key=key, shape=target_neg.shape)
-    target_random = mix_p * target_neg + (1 - mix_p) * target_union
+    key1, key2 = jax.random.split(key, num=2)
+    mix_p1 = jax.random.uniform(key=key1, shape=target_neg.shape)
+    target_random1 = mix_p1 * target_neg + (1 - mix_p1) * target_union
+    mix_p2 = jax.random.uniform(key=key2, shape=target_union.shape)
+    target_random2 = mix_p2 * target_union + (1 - mix_p2) * target_union
+    target_random = jnp.concat([target_random1, target_random2], axis=0)
 
     # Batch
     target_ones_score = jnp.ones(shape=(batch,), dtype=dtype)
-    target_zeros_score = jnp.zeros(shape=(batch,), dtype=dtype)
+    target_zeros_score = jnp.zeros(shape=(2 * batch,), dtype=dtype)
 
     # Batch X embd_dim
     target_neg_z = target_embedding_model(target_neg, training=False)
