@@ -139,6 +139,12 @@ def single_agent_args():
             "help": "Use default value for value_weight_temp",
         },
         {
+            "name": "--value-weight-limit",
+            "type": float,
+            "default": None,
+            "help": "Use default value for value_weight_limit",
+        },
+        {
             "name": "--update-priority-buffer",
             "type": lambda x: bool(strtobool(x)),
             "default": False,

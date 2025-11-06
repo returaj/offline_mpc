@@ -51,7 +51,8 @@ default_cfg = {
     "update_freq": 2,
     "decay": 0.85,
     "warmup_steps": int(3e4),
-    "cost_weight_temp": 0.6,
+    "value_temp": 0.3,
+    "value_limit": 0.8,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
@@ -244,6 +245,7 @@ def get_union_trainable(
     target_union_obs,
     target_union_act,
     target_union_cost,
+    value_limit,
 ):
     num_models = 5
     batch = target_union_obs.shape[0]
@@ -273,7 +275,7 @@ def get_union_trainable(
     mean_union_score = jnp.mean(union_scores, axis=0)
     baseline_mean, baseline_std = mean_union_score.mean(), mean_union_score.std()
 
-    baseline = jnp.maximum(baseline_mean + 2 * baseline_std, 0.7)
+    baseline = value_limit
     trainable_mask = (mean_union_score > baseline).astype(dtype)
     trainable_count = trainable_mask.sum()
     trainable_percent = trainable_count / batch
@@ -305,6 +307,8 @@ def train_policy_model(
     target_act,
     target_score,
     gamma,
+    value_limit,
+    value_temp,
 ):
     batch, horizon, _ = target_obs.shape
 
@@ -319,7 +323,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp(-target_score / 0.1), max=5.0)
+        weight = jnp.clip(jnp.exp((value_limit - target_score) / value_temp), max=5.0)
         loss = jnp.mean(weight * batch_loss)
         return loss
 
@@ -348,8 +352,8 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
-    config["cost_weight_temp"] = args.cost_weight_temp or config["cost_weight_temp"]
-    config["use_bc_trajectory"] = args.use_bc_trajectory
+    config["value_temp"] = args.value_weight_temp or config["value_temp"]
+    config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
 
     # evaluation environment
@@ -499,6 +503,7 @@ def main(args, cfg_env=None):
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 target_union_cost=target_union_cost,
+                value_limit=config["value_limit"],
             )
 
             (
@@ -535,6 +540,8 @@ def main(args, cfg_env=None):
                     target_act=target_union_act,
                     target_score=union_score,
                     gamma=config["gamma"],
+                    value_limit=config["value_limit"],
+                    value_temp=config["value_temp"],
                 )
 
             logger.logged = False
