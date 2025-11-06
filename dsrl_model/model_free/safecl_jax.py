@@ -162,11 +162,12 @@ def train_embedding_model(
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
-    key1, key2 = jax.random.split(key, num=2)
+    key1, key2, key3 = jax.random.split(key, num=3)
     mix_p1 = jax.random.uniform(key=key1, shape=target_neg.shape)
     target_random1 = mix_p1 * target_neg + (1 - mix_p1) * target_union
     mix_p2 = jax.random.uniform(key=key2, shape=target_union.shape)
-    target_random2 = mix_p2 * target_union + (1 - mix_p2) * target_union
+    target_shuffle_union = jax.random.permutation(key3, target_union, axis=0)
+    target_random2 = mix_p2 * target_shuffle_union + (1 - mix_p2) * target_union
     target_random = jnp.concat([target_random1, target_random2], axis=0)
 
     # Batch
@@ -204,7 +205,7 @@ def train_embedding_model(
         random_z = embedding_model(target_random)
         random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
         random_mean_loss = jnp.mean(
-            range_loss(random_score, target_zeros_score, default_scale)
+            range_loss(random_score, target_zeros_score, default_scale / 2)
         )
         random_mean_score = jnp.mean(random_score)
 
