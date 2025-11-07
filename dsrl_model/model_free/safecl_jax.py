@@ -51,8 +51,8 @@ default_cfg = {
     "update_freq": 2,
     "decay": 0.85,
     "warmup_steps": int(3e4),
-    "value_temp": 0.3,
-    "value_limit": 0.8,
+    "value_temp": 0.1,
+    "value_limit": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
@@ -145,7 +145,7 @@ def range_loss(scores, target_scores, scale):
 
 @nnx.jit
 def train_embedding_model(
-    target_embedding_model,
+    curriculum_embedding_model,
     embedding_model,
     embedding_optimizer,
     target_neg_obs,
@@ -176,9 +176,9 @@ def train_embedding_model(
     target_zeros_score = jnp.zeros(shape=(2 * batch,), dtype=dtype)
 
     # Batch X embd_dim
-    target_neg_z = target_embedding_model(target_neg, training=False)
-    target_union_z = target_embedding_model(target_union, training=False)
-    target_random_z = target_embedding_model(target_random, training=False)
+    target_neg_z = curriculum_embedding_model(target_neg, training=False)
+    target_union_z = curriculum_embedding_model(target_union, training=False)
+    target_random_z = curriculum_embedding_model(target_random, training=False)
 
     def loss_fun(embedding_model):
         default_scale = 1.0
@@ -238,7 +238,7 @@ def index_fun(arr, all_labels, label_range):
 
 @nnx.jit
 def get_union_trainable(
-    target_embedding_model,
+    curriculum_embedding_model,
     embedding_model,
     target_neg_obs,
     target_neg_act,
@@ -256,8 +256,8 @@ def get_union_trainable(
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     # Batch X embd_dim
-    target_neg_z = target_embedding_model(target_neg, training=False)
-    target_union_z = target_embedding_model(target_union, training=False)
+    target_neg_z = curriculum_embedding_model(target_neg, training=False)
+    target_union_z = curriculum_embedding_model(target_union, training=False)
 
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
     def multimodel(carry):
@@ -323,7 +323,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp((value_limit - target_score) / value_temp), max=5.0)
+        weight = jnp.clip(jnp.exp((0.5 - target_score) / value_temp), max=5.0)
         loss = jnp.mean(weight * batch_loss)
         return loss
 
@@ -339,7 +339,7 @@ def main(args, cfg_env=None):
     random.seed(args.seed)
     np.random.seed(args.seed)
     rngs = nnx.Rngs(args.seed)
-    target_rngs = nnx.Rngs(args.seed + 42)
+    curriculum_rngs = nnx.Rngs(args.seed + 42)
 
     # set default device id
     jax.default_device = jax.devices(args.device)[args.device_id]
@@ -401,8 +401,9 @@ def main(args, cfg_env=None):
             ),
         ),
     )
-    target_embedding_model = TransformerEmbedding(
-        rngs=target_rngs,
+    target_embedding_model = deepcopy(embedding_model)
+    curriculum_embedding_model = TransformerEmbedding(
+        rngs=curriculum_rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         horizon=config["train_horizon"],
@@ -496,8 +497,8 @@ def main(args, cfg_env=None):
                 mean_trainable_cost,
                 mean_non_trainable_cost,
             ) = get_union_trainable(
-                target_embedding_model=target_embedding_model,
-                embedding_model=embedding_model,
+                curriculum_embedding_model=curriculum_embedding_model,
+                embedding_model=target_embedding_model,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
@@ -515,7 +516,7 @@ def main(args, cfg_env=None):
                 union_mean_score,
                 random_mean_score,
             ) = train_embedding_model(
-                target_embedding_model=target_embedding_model,
+                curriculum_embedding_model=curriculum_embedding_model,
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
                 target_neg_obs=target_neg_obs,
@@ -526,6 +527,11 @@ def main(args, cfg_env=None):
                 union_scale=union_scale,
                 key=rngs.random_sample(),
             )
+
+            if steps % config["update_freq"]:
+                target_embedding_model = polyak_update(
+                    target_embedding_model, embedding_model, config["update_tau"]
+                )
 
             bc_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
@@ -625,8 +631,8 @@ def main(args, cfg_env=None):
 
     logger.nn_model_save(
         itr=steps,
-        nn_model_saver_element=target_embedding_model,
-        prefix="target_embedding",
+        nn_model_saver_element=curriculum_embedding_model,
+        prefix="curriculum_embedding",
     )
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
