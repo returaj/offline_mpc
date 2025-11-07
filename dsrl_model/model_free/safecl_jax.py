@@ -48,7 +48,8 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "update_freq": 2,
+    "update_bc_freq": 2,
+    "update_embd_freq": int(1e3),
     "decay": 0.85,
     "warmup_steps": int(3e4),
     "value_temp": 0.1,
@@ -528,14 +529,14 @@ def main(args, cfg_env=None):
                 key=rngs.random_sample(),
             )
 
-            if steps % config["update_freq"] == 0:
+            if steps % config["update_embd_freq"] == 0:
                 target_embedding_model = polyak_update(
                     target_embedding_model, embedding_model, config["update_tau"]
                 )
 
             bc_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
-                steps % config["update_freq"] == 0
+                steps % config["update_bc_freq"] == 0
             ):
                 union_scale = 1.0
 
