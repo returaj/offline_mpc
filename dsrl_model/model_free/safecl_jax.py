@@ -528,7 +528,7 @@ def main(args, cfg_env=None):
                 key=rngs.random_sample(),
             )
 
-            if steps % config["update_freq"]:
+            if steps % config["update_freq"] == 0:
                 target_embedding_model = polyak_update(
                     target_embedding_model, embedding_model, config["update_tau"]
                 )
