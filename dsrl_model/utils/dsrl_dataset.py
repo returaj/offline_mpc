@@ -81,22 +81,34 @@ def get_neg_and_union_data_2(d4rl_data, config):
 
     neg_traj_cost = np.max(traj_cost) * 0.7
     high_cost_neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
-    neg_traj_reward = np.max(traj_reward) * 0.3
-    low_reward_neg_idx = np.where(traj_reward <= neg_traj_reward)[0]
-    neg_idx = np.union1d(low_reward_neg_idx, high_cost_neg_idx)
+    num_high_cost_neg_traj = min(len(high_cost_neg_idx), num_neg_traj // 2)
 
-    num_neg_traj = min(len(neg_idx), num_neg_traj)
+    neg_traj_reward = np.mean(traj_reward) - np.std(traj_reward)
+    low_reward_neg_idx = np.where(
+        (traj_reward <= neg_traj_reward) & (traj_cost < neg_traj_cost)
+    )[0]
+    num_low_reward_neg_traj = min(
+        len(low_reward_neg_idx), num_neg_traj - num_high_cost_neg_traj
+    )
+
+    num_neg_traj = num_high_cost_neg_traj + num_low_reward_neg_traj
     num_true_neg_traj = int(num_neg_traj * true_percentage)
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
-    true_neg_shuffled_idx = np.random.choice(
-        neg_idx, size=num_true_neg_traj, replace=False
+    true_neg_high_cost_idx = np.random.choice(
+        high_cost_neg_idx, size=num_high_cost_neg_traj, replace=False
     )
+    true_neg_low_reward_idx = np.random.choice(
+        low_reward_neg_idx, size=num_low_reward_neg_traj, replace=False
+    )
+    true_neg_shuffled_idx = np.concat([true_neg_high_cost_idx, true_neg_low_reward_idx])
+
     union_idx = np.delete(np.arange(traj_cost.shape[0]), true_neg_shuffled_idx)
     false_neg_shuffled_idx = np.random.choice(
         union_idx, size=num_false_neg_traj, replace=False
     )
     neg_shuffled_idx = np.concatenate([true_neg_shuffled_idx, false_neg_shuffled_idx])
+    np.random.shuffle(neg_shuffled_idx)
 
     union_idx = np.delete(np.arange(traj_cost.shape[0]), neg_shuffled_idx)
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
