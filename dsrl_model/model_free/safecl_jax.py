@@ -237,6 +237,20 @@ def index_fun(arr, all_labels, label_range):
     return all_labels[idx]
 
 
+@jax.jit
+def get_trainable_mean_values(value_arr, trainable_mask):
+    batch = trainable_mask.shape[0]
+    trainable_count = trainable_mask.sum()
+    batch_horizon_value = jnp.sum(value_arr, axis=-1)
+    total_trainable_value = jnp.einsum("i,i->", batch_horizon_value, trainable_mask)
+    mean_trainable_value = total_trainable_value / (trainable_count + EPS)
+    total_non_trainable_value = batch_horizon_value.sum() - total_trainable_value
+    mean_non_trainable_value = total_non_trainable_value / (
+        batch - trainable_count + EPS
+    )
+    return mean_trainable_value, mean_non_trainable_value
+
+
 @nnx.jit
 def get_union_trainable(
     curriculum_embedding_model,
@@ -245,6 +259,7 @@ def get_union_trainable(
     target_neg_act,
     target_union_obs,
     target_union_act,
+    target_union_reward,
     target_union_cost,
     value_limit,
 ):
@@ -282,12 +297,12 @@ def get_union_trainable(
     trainable_percent = trainable_count / batch
 
     # Batch
-    batch_horizon_cost = jnp.sum(target_union_cost, axis=-1)
-    total_trainable_cost = jnp.einsum("i,i->", batch_horizon_cost, trainable_mask)
-    mean_trainable_cost = total_trainable_cost / (trainable_count + EPS)
-    total_non_trainable_cost = batch_horizon_cost.sum() - total_trainable_cost
-    mean_non_trainable_cost = total_non_trainable_cost / (batch - trainable_count + EPS)
-
+    mean_trainable_reward, mean_non_trainable_reward = get_trainable_mean_values(
+        target_union_reward, trainable_mask
+    )
+    mean_trainable_cost, mean_non_trainable_cost = get_trainable_mean_values(
+        target_union_cost, trainable_mask
+    )
     return (
         trainable_mask,
         mean_union_score,
@@ -295,6 +310,8 @@ def get_union_trainable(
         baseline_std,
         baseline,
         trainable_percent,
+        mean_trainable_reward,
+        mean_non_trainable_reward,
         mean_trainable_cost,
         mean_non_trainable_cost,
     )
@@ -428,11 +445,13 @@ def main(args, cfg_env=None):
     neg_observations = neg_data["observations"]
     neg_actions = neg_data["actions"]
     neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+    neg_rewards = neg_data["rewards"]
     neg_costs = neg_data["costs"]
 
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
+    union_rewards = union_data["rewards"]
     union_costs = union_data["costs"]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
@@ -450,14 +469,14 @@ def main(args, cfg_env=None):
         batch_size=batch_size,
         ep_len=ep_len,
     )
-    for obs, act, done, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_costs
+    for obs, act, done, reward, cost in zip(
+        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
     ):
-        buffer.add(obs, act, done, cost=cost, is_negative=True)
-    for obs, act, done, cost in zip(
-        union_observations, union_actions, union_dones, union_costs
+        buffer.add(obs, act, done, reward, cost, is_negative=True)
+    for obs, act, done, reward, cost in zip(
+        union_observations, union_actions, union_dones, union_rewards, union_costs
     ):
-        buffer.add(obs, act, done, cost=cost, is_negative=False)
+        buffer.add(obs, act, done, reward, cost, is_negative=False)
 
     buffer.to_jax_ndarray()
 
@@ -478,9 +497,11 @@ def main(args, cfg_env=None):
         for (
             target_neg_obs,
             target_neg_act,
+            target_neg_reward,
             target_neg_cost,
             target_union_obs,
             target_union_act,
+            target_union_reward,
             target_union_cost,
             _,
             _,
@@ -495,6 +516,8 @@ def main(args, cfg_env=None):
                 baseline_std,
                 baseline_score,
                 union_trainable_percent,
+                mean_trainable_reward,
+                mean_non_trainable_reward,
                 mean_trainable_cost,
                 mean_non_trainable_cost,
             ) = get_union_trainable(
@@ -504,6 +527,7 @@ def main(args, cfg_env=None):
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
+                target_union_reward=target_union_reward,
                 target_union_cost=target_union_cost,
                 value_limit=config["value_limit"],
             )
@@ -592,6 +616,20 @@ def main(args, cfg_env=None):
 
                 logger.log_tabular(
                     f"Percentage/new_union_trainable", union_trainable_percent.item()
+                )
+
+                logger.log_tabular(
+                    "Reward/neg_cost", jnp.sum(target_neg_reward, axis=-1).mean().item()
+                )
+                logger.log_tabular(
+                    "Reward/union_cost",
+                    jnp.sum(target_union_reward, axis=-1).mean().item(),
+                )
+                logger.log_tabular(
+                    "Reward/union_trainable", mean_trainable_reward.item()
+                )
+                logger.log_tabular(
+                    "Reward/union_non_trainable", mean_non_trainable_reward.item()
                 )
 
                 logger.log_tabular(

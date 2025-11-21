@@ -14,9 +14,11 @@ def update_arr_jit(arr, idxs, val):
 def batched_data(
     neg_obs,
     neg_act,
+    neg_reward,
     neg_cost,
     union_obs,
     union_act,
+    union_reward,
     union_cost,
     horizon,
     n_idx,
@@ -28,17 +30,21 @@ def batched_data(
 
     h_neg_obs = neg_obs[n_h_idx]
     h_neg_act = neg_act[n_h_idx]
+    h_neg_reward = neg_reward[n_h_idx]
     h_neg_cost = neg_cost[n_h_idx]
     h_union_obs = union_obs[u_h_idx]
     h_union_act = union_act[u_h_idx]
+    h_union_reward = union_reward[u_h_idx]
     h_union_cost = union_cost[u_h_idx]
 
     return (
         h_neg_obs,
         h_neg_act,
+        h_neg_reward,
         h_neg_cost,
         h_union_obs,
         h_union_act,
+        h_union_reward,
         h_union_cost,
         u_idx,
     )
@@ -73,10 +79,12 @@ class OnPolicyBuffer:
         self.dtype = np.float32
         self._neg_obs = np.empty((self.neg_capacity + 1, obs_dim), dtype=self.dtype)
         self._neg_act = np.empty((self.neg_capacity, act_dim), dtype=self.dtype)
+        self._neg_reward = np.empty((self.neg_capacity,), dtype=self.dtype)
         self._neg_cost = np.empty((self.neg_capacity,), dtype=self.dtype)
         self._neg_priorities = np.ones((self.neg_capacity,), dtype=self.dtype)
         self._union_obs = np.empty((self.union_capacity + 1, obs_dim), dtype=self.dtype)
         self._union_act = np.empty((self.union_capacity, act_dim), dtype=self.dtype)
+        self._union_reward = np.empty((self.union_capacity,), dtype=self.dtype)
         self._union_cost = np.empty((self.union_capacity,), dtype=self.dtype)
         self._union_priorities = np.ones((self.union_capacity,), dtype=self.dtype)
 
@@ -89,21 +97,24 @@ class OnPolicyBuffer:
         obs_store,
         act_store,
         priority_store,
+        reward_store,
         cost_store,
         idx,
         obs,
         act,
         priority,
+        reward,
         cost,
         capacity,
     ):
         obs_store[idx : idx + self.ep_len] = np.array(obs)
         act_store[idx : idx + self.ep_len] = np.array(act)
         priority_store[idx : idx + self.ep_len] = np.array(priority)
+        reward_store[idx : idx + self.ep_len] = np.array(reward)
         cost_store[idx : idx + self.ep_len] = np.array(cost)
         return (idx + self.ep_len) % capacity
 
-    def add(self, obs, act, done, cost=None, is_negative=False):
+    def add(self, obs, act, done, reward, cost, is_negative=False):
         assert cost is not None, "cost field cannot be none"
         max_priority = 1.0
         done_sum = np.sum(done) or 1.0
@@ -117,11 +128,13 @@ class OnPolicyBuffer:
                 obs_store=self._neg_obs,
                 act_store=self._neg_act,
                 priority_store=self._neg_priorities,
+                reward_store=self._neg_reward,
                 cost_store=self._neg_cost,
                 idx=self._neg_idx,
                 obs=obs,
                 act=act,
                 priority=new_priorities,
+                reward=reward,
                 cost=cost,
                 capacity=self.neg_capacity,
             )
@@ -130,11 +143,13 @@ class OnPolicyBuffer:
                 obs_store=self._union_obs,
                 act_store=self._union_act,
                 priority_store=self._union_priorities,
+                reward_store=self._union_reward,
                 cost_store=self._union_cost,
                 idx=self._union_idx,
                 obs=obs,
                 act=act,
                 priority=new_priorities,
+                reward=reward,
                 cost=cost,
                 capacity=self.union_capacity,
             )
@@ -143,10 +158,12 @@ class OnPolicyBuffer:
         self.dtype = jnp.float32
         self._neg_obs = jnp.array(self._neg_obs, dtype=self.dtype)
         self._neg_act = jnp.array(self._neg_act, dtype=self.dtype)
+        self._neg_reward = jnp.array(self._neg_reward, dtype=self.dtype)
         self._neg_cost = jnp.array(self._neg_cost, dtype=self.dtype)
         self._neg_priorities = jnp.array(self._neg_priorities, dtype=self.dtype)
         self._union_obs = jnp.array(self._union_obs, dtype=self.dtype)
         self._union_act = jnp.array(self._union_act, dtype=self.dtype)
+        self._union_reward = jnp.array(self._union_reward, dtype=self.dtype)
         self._union_cost = jnp.array(self._union_cost, dtype=self.dtype)
         self._union_priorities = jnp.array(self._union_priorities, dtype=self.dtype)
 
@@ -160,9 +177,11 @@ class OnPolicyBuffer:
         return batched_data(
             neg_obs=self._neg_obs,
             neg_act=self._neg_act,
+            neg_reward=self._neg_reward,
             neg_cost=self._neg_cost,
             union_obs=self._union_obs,
             union_act=self._union_act,
+            union_reward=self._union_reward,
             union_cost=self._union_cost,
             horizon=self.horizon,
             n_idx=n_idx,
