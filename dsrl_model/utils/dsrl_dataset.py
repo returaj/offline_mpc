@@ -87,7 +87,7 @@ def get_neg_and_union_data_2(d4rl_data, config):
     high_cost_neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
     num_high_cost_neg_traj = min(len(high_cost_neg_idx), num_neg_traj // 2)
 
-    reward_fraction = 0.1
+    reward_fraction = 0.2
     neg_traj_reward = (max_reward - min_reward) * reward_fraction + min_reward
     low_reward_neg_idx = np.where(
         (traj_reward <= neg_traj_reward) & (traj_cost < neg_traj_cost)
