@@ -72,18 +72,23 @@ def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
 
 def get_neg_and_union_data_2(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
+    min_cost, max_cost = np.min(traj_cost), np.max(traj_cost)
+
     traj_reward = np.sum(d4rl_data["rewards"], axis=1)
+    min_reward, max_reward = np.min(traj_reward), np.max(traj_reward)
 
     true_percentage = 1.0 - config["non_pref_noise"]
 
     num_neg_traj = config["num_negative_trajectories"]
     num_union_traj = config["num_union_trajectories"]
 
-    neg_traj_cost = np.max(traj_cost) * 0.7
+    cost_fraction = 0.7
+    neg_traj_cost = (max_cost - min_cost) * cost_fraction + min_cost
     high_cost_neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
     num_high_cost_neg_traj = min(len(high_cost_neg_idx), num_neg_traj // 2)
 
-    neg_traj_reward = np.mean(traj_reward) - np.std(traj_reward)
+    reward_fraction = 0.1
+    neg_traj_reward = (max_reward - min_reward) * reward_fraction + min_reward
     low_reward_neg_idx = np.where(
         (traj_reward <= neg_traj_reward) & (traj_cost < neg_traj_cost)
     )[0]
