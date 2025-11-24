@@ -243,11 +243,9 @@ def get_trainable_mean_values(value_arr, trainable_mask):
     trainable_count = trainable_mask.sum()
     batch_horizon_value = jnp.sum(value_arr, axis=-1)
     total_trainable_value = jnp.einsum("i,i->", batch_horizon_value, trainable_mask)
-    mean_trainable_value = total_trainable_value / (trainable_count + EPS)
+    mean_trainable_value = total_trainable_value / (trainable_count + 1)
     total_non_trainable_value = batch_horizon_value.sum() - total_trainable_value
-    mean_non_trainable_value = total_non_trainable_value / (
-        batch - trainable_count + EPS
-    )
+    mean_non_trainable_value = total_non_trainable_value / (batch - trainable_count + 1)
     return mean_trainable_value, mean_non_trainable_value
 
 
