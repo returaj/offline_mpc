@@ -326,11 +326,14 @@ def train_policy_model(
     value_limit,
     value_temp,
 ):
+    dtype = target_obs.dtype
     batch, horizon, _ = target_obs.shape
 
     # Batch_Horizon X obs/act_dim
     target_obs = target_obs.reshape(batch * horizon, -1)
     target_act = target_act.reshape(batch * horizon, -1)
+
+    non_trainable = (target_score <= value_limit).astype(dtype)
 
     def bc_policy_trajectory_loss_fun(bc_policy):
         pred_act, *_ = bc_policy(target_obs)
@@ -340,7 +343,7 @@ def train_policy_model(
             batch_horizon_loss, gamma
         ).squeeze()
         weight = jnp.clip(jnp.exp((0.5 - target_score) / value_temp), max=5.0)
-        loss = jnp.mean(weight * batch_loss)
+        loss = jnp.mean(non_trainable * weight * batch_loss)
         return loss
 
     bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun)
