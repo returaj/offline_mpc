@@ -196,7 +196,7 @@ def train_embedding_model(
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
         union_loss = range_loss(union_score, target_ones_score, union_scale)
         trainable_scores = (target_union_trainable > 0).astype(dtype)
-        trainable_count = trainable_scores.sum() + EPS
+        trainable_count = jnp.clip(trainable_scores.sum(), min=1.0)
         union_mean_loss = (
             jnp.einsum("i,i->", trainable_scores, union_loss) / trainable_count
         )
@@ -342,7 +342,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp((0.5 - target_score) / value_temp), max=5.0)
+        weight = jnp.clip(jnp.exp((0.2 - target_score) / value_temp), max=5.0)
         loss = jnp.mean(non_trainable * weight * batch_loss)
         return loss
 
