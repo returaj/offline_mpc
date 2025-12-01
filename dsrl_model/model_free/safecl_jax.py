@@ -196,7 +196,7 @@ def train_embedding_model(
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
         union_loss = range_loss(union_score, target_ones_score, union_scale)
         trainable_scores = (target_union_trainable > 0).astype(dtype)
-        trainable_count = trainable_scores.sum() + EPS
+        trainable_count = jnp.clip(trainable_scores.sum(), min=1.0)
         union_mean_loss = (
             jnp.einsum("i,i->", trainable_scores, union_loss) / trainable_count
         )
@@ -243,11 +243,9 @@ def get_trainable_mean_values(value_arr, trainable_mask):
     trainable_count = trainable_mask.sum()
     batch_horizon_value = jnp.sum(value_arr, axis=-1)
     total_trainable_value = jnp.einsum("i,i->", batch_horizon_value, trainable_mask)
-    mean_trainable_value = total_trainable_value / (trainable_count + EPS)
+    mean_trainable_value = total_trainable_value / (trainable_count + 1)
     total_non_trainable_value = batch_horizon_value.sum() - total_trainable_value
-    mean_non_trainable_value = total_non_trainable_value / (
-        batch - trainable_count + EPS
-    )
+    mean_non_trainable_value = total_non_trainable_value / (batch - trainable_count + 1)
     return mean_trainable_value, mean_non_trainable_value
 
 
@@ -328,11 +326,14 @@ def train_policy_model(
     value_limit,
     value_temp,
 ):
+    dtype = target_obs.dtype
     batch, horizon, _ = target_obs.shape
 
     # Batch_Horizon X obs/act_dim
     target_obs = target_obs.reshape(batch * horizon, -1)
     target_act = target_act.reshape(batch * horizon, -1)
+
+    non_trainable = (target_score <= value_limit).astype(dtype)
 
     def bc_policy_trajectory_loss_fun(bc_policy):
         pred_act, *_ = bc_policy(target_obs)
@@ -341,8 +342,8 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp((0.5 - target_score) / value_temp), max=5.0)
-        loss = jnp.mean(weight * batch_loss)
+        weight = jnp.clip(jnp.exp((0.2 - target_score) / value_temp), max=5.0)
+        loss = jnp.mean(non_trainable * weight * batch_loss)
         return loss
 
     bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun)
