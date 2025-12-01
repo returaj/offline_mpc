@@ -48,7 +48,7 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "update_bc_freq": 2,
+    "update_bc_freq": 1,
     "update_embd_freq": int(1e3),
     "decay": 0.85,
     "warmup_steps": int(3e4),
