@@ -336,7 +336,7 @@ def train_policy_model(
     non_trainable = (target_score <= value_limit).astype(dtype)
     non_trainable_count = jnp.clip(non_trainable.sum(), min=1.0)
     weight = non_trainable * jnp.exp(-target_score / value_temp)
-    norm_weight = weight.sum() / non_trainable_count
+    norm_weight = jnp.clip(weight.sum() / non_trainable_count, min=EPS)
     final_weight = weight / norm_weight
 
     def bc_policy_trajectory_loss_fun(bc_policy):
