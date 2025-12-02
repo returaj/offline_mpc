@@ -334,8 +334,10 @@ def train_policy_model(
     target_act = target_act.reshape(batch * horizon, -1)
 
     non_trainable = (target_score <= value_limit).astype(dtype)
-    weight = jnp.exp((0.2 - target_score) / value_temp)
-    weight /= jnp.mean(weight) + EPS
+    non_trainable_count = jnp.clip(non_trainable.sum(), min=1.0)
+    weight = non_trainable * jnp.exp(-target_score / value_temp)
+    norm_weight = weight.sum() / non_trainable_count
+    final_weight = weight / norm_weight
 
     def bc_policy_trajectory_loss_fun(bc_policy):
         pred_act, *_ = bc_policy(target_obs)
@@ -344,7 +346,7 @@ def train_policy_model(
         batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
             batch_horizon_loss, gamma
         ).squeeze()
-        loss = jnp.mean(non_trainable * weight * batch_loss)
+        loss = jnp.mean(final_weight * batch_loss)
         return loss
 
     bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun)
