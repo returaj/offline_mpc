@@ -282,6 +282,12 @@ def single_agent_args():
             "default": False,
             "help": "use von Mises Fisher hypershere samples for multimode representation",
         },
+        {
+            "name": "--data-inpaint",
+            "type": str,
+            "default": None,
+            "help": "set data inpaint tuple from full, reward_only, cost_only",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

@@ -21,7 +21,7 @@ from jax import debug
 from dsrl_model.utils.buffer_jax import SafeCLBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data_2,
+    get_neg_and_union_data,
     get_normalized_data,
 )
 from dsrl_model.utils.models_jax import (
@@ -67,6 +67,12 @@ trajectory_cfg = {
     "inpaint_ranges": None,
     "num_negative_trajectories": 50,
     "num_union_trajectories": -1,
+}
+
+trajectory_data = {
+    "full": None,
+    "reward_only": None,
+    "cost_only": ((0.0, 1.0, 0.0, 0.5),),
 }
 
 labels_cfg = {
@@ -374,6 +380,8 @@ def main(args, cfg_env=None):
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
+    trajectory_cfg["data_inpaint"] = args.data_inpaint
+    trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg, **labels_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
@@ -444,7 +452,7 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
+    neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         neg_data, union_data, mu_obs, std_obs = get_normalized_data(

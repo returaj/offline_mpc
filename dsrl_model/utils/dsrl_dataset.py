@@ -70,7 +70,83 @@ def get_dataset_in_d4rl_format(env, config, task, ep_len, num_folds=1):
     return {k: fold_sa_pair(d4rl_data[k], num_folds) for k in keys}
 
 
-def get_neg_and_union_data_2(d4rl_data, config):
+def get_reward_neg_and_union_data(d4rl_data, config):
+    traj_reward = np.sum(d4rl_data["rewards"], axis=1)
+    min_reward, max_reward = np.min(traj_reward), np.max(traj_reward)
+
+    true_percentage = 1.0 - config["non_pref_noise"]
+
+    num_neg_traj = config["num_negative_trajectories"]
+    num_union_traj = config["num_union_trajectories"]
+
+    num_true_neg_traj = int(num_neg_traj * true_percentage)
+    num_false_neg_traj = num_neg_traj - num_true_neg_traj
+
+    reward_fraction = 0.2
+    neg_traj_reward = (max_reward - min_reward) * reward_fraction + min_reward
+    low_reward_neg_idx = np.where((traj_reward <= neg_traj_reward))[0]
+    num_true_neg_traj = min(len(low_reward_neg_idx), num_true_neg_traj)
+
+    true_neg_low_reward_idx = np.random.choice(
+        low_reward_neg_idx, size=num_true_neg_traj, replace=False
+    )
+    union_idx = np.delete(np.arange(traj_reward.shape[0]), true_neg_low_reward_idx)
+    false_neg_low_reward_idx = np.random.choice(
+        union_idx, size=num_false_neg_traj, replace=False
+    )
+    neg_shuffled_idx = np.concatenate(
+        [true_neg_low_reward_idx, false_neg_low_reward_idx]
+    )
+    np.random.shuffle(neg_shuffled_idx)
+
+    union_idx = np.delete(np.arange(traj_reward.shape[0]), neg_shuffled_idx)
+    num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
+    union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
+
+    print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
+    print(f"Number of false negative trajectory dataset: {num_false_neg_traj}")
+
+    return neg_shuffled_idx, union_shuffled_idx
+
+
+def get_cost_neg_and_union_data(d4rl_data, config):
+    traj_cost = np.sum(d4rl_data["costs"], axis=1)
+    min_cost, max_cost = np.min(traj_cost), np.max(traj_cost)
+
+    true_percentage = 1.0 - config["non_pref_noise"]
+
+    num_neg_traj = config["num_negative_trajectories"]
+    num_union_traj = config["num_union_trajectories"]
+
+    num_true_neg_traj = int(num_neg_traj * true_percentage)
+    num_false_neg_traj = num_neg_traj - num_true_neg_traj
+
+    cost_fraction = 0.7
+    neg_traj_cost = (max_cost - min_cost) * cost_fraction + min_cost
+    high_cost_neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
+    num_true_neg_traj = min(len(high_cost_neg_idx), num_true_neg_traj)
+
+    true_neg_high_cost_idx = np.random.choice(
+        high_cost_neg_idx, size=num_true_neg_traj, replace=False
+    )
+    union_idx = np.delete(np.arange(traj_cost.shape[0]), true_neg_high_cost_idx)
+    false_neg_high_cost_idx = np.random.choice(
+        union_idx, size=num_false_neg_traj, replace=False
+    )
+    neg_shuffled_idx = np.concatenate([true_neg_high_cost_idx, false_neg_high_cost_idx])
+    np.random.shuffle(neg_shuffled_idx)
+
+    union_idx = np.delete(np.arange(traj_cost.shape[0]), neg_shuffled_idx)
+    num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
+    union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
+
+    print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
+    print(f"Number of false negative trajectory dataset: {num_false_neg_traj}")
+
+    return neg_shuffled_idx, union_shuffled_idx
+
+
+def get_full_neg_and_union_data(d4rl_data, config):
     traj_cost = np.sum(d4rl_data["costs"], axis=1)
     min_cost, max_cost = np.min(traj_cost), np.max(traj_cost)
 
@@ -82,10 +158,13 @@ def get_neg_and_union_data_2(d4rl_data, config):
     num_neg_traj = config["num_negative_trajectories"]
     num_union_traj = config["num_union_trajectories"]
 
+    num_true_neg_traj = int(num_neg_traj * true_percentage)
+    num_false_neg_traj = num_neg_traj - num_true_neg_traj
+
     cost_fraction = 0.7
     neg_traj_cost = (max_cost - min_cost) * cost_fraction + min_cost
     high_cost_neg_idx = np.where(traj_cost >= neg_traj_cost)[0]
-    num_high_cost_neg_traj = min(len(high_cost_neg_idx), num_neg_traj // 2)
+    num_high_cost_neg_traj = min(len(high_cost_neg_idx), num_true_neg_traj // 2)
 
     reward_fraction = 0.2
     neg_traj_reward = (max_reward - min_reward) * reward_fraction + min_reward
@@ -93,12 +172,10 @@ def get_neg_and_union_data_2(d4rl_data, config):
         (traj_reward <= neg_traj_reward) & (traj_cost < neg_traj_cost)
     )[0]
     num_low_reward_neg_traj = min(
-        len(low_reward_neg_idx), num_neg_traj - num_high_cost_neg_traj
+        len(low_reward_neg_idx), num_true_neg_traj - num_high_cost_neg_traj
     )
 
-    num_neg_traj = num_high_cost_neg_traj + num_low_reward_neg_traj
-    num_true_neg_traj = int(num_neg_traj * true_percentage)
-    num_false_neg_traj = num_neg_traj - num_true_neg_traj
+    num_true_neg_traj = num_high_cost_neg_traj + num_low_reward_neg_traj
 
     true_neg_high_cost_idx = np.random.choice(
         high_cost_neg_idx, size=num_high_cost_neg_traj, replace=False
@@ -119,9 +196,27 @@ def get_neg_and_union_data_2(d4rl_data, config):
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
     union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
 
+    print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
+    print(f"Number of false negative trajectory dataset: {num_false_neg_traj}")
+
+    return neg_shuffled_idx, union_shuffled_idx
+
+
+def get_neg_and_union_data(d4rl_data, config):
+    if config["data_inpaint"] == "full":
+        neg_idxs, union_idxs = get_full_neg_and_union_data(d4rl_data, config)
+    elif config["data_inpaint"] == "reward_only":
+        neg_idxs, union_idxs = get_reward_neg_and_union_data(d4rl_data, config)
+    elif config["data_inpaint"] == "cost_only":
+        neg_idxs, union_idxs = get_cost_neg_and_union_data(d4rl_data, config)
+    else:
+        raise ValueError(
+            "Please set data-inpaint as one of these: full, reward_only, cost_only"
+        )
+
     keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
-    neg_data = {k: d4rl_data[k][neg_shuffled_idx] for k in keys}
-    union_data = {k: d4rl_data[k][union_shuffled_idx] for k in keys}
+    neg_data = {k: d4rl_data[k][neg_idxs] for k in keys}
+    union_data = {k: d4rl_data[k][union_idxs] for k in keys}
 
     print(f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}")
     neg_cost, neg_reward = (
@@ -131,56 +226,6 @@ def get_neg_and_union_data_2(d4rl_data, config):
     print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
 
     print(f"Number of union trajectory dataset: {union_data['observations'].shape[0]}")
-    union_cost, union_reward = (
-        union_data["costs"].sum(1).mean(),
-        union_data["rewards"].sum(1).mean(),
-    )
-    print(f"Avg union trajectory cost/reward: {union_cost:.3f}/{union_reward:.3f}")
-
-    return neg_data, union_data
-
-
-def get_neg_and_union_data(d4rl_data, config):
-    traj_cost = np.sum(d4rl_data["costs"], axis=1)
-
-    num_neg_traj = config["num_negative_trajectories"]
-    num_uneg_traj = config["num_union_negative_trajectories"]
-    num_upos_traj = config["num_union_positive_trajectories"]
-
-    neg_idx = np.where(traj_cost > 75.0)[0]
-    pos_idx = np.where(traj_cost < 25.0)[0]
-
-    keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
-    neg_data = {k: d4rl_data[k][neg_idx[:num_neg_traj]] for k in keys}
-    union_neg_data = {
-        k: d4rl_data[k][neg_idx[num_neg_traj : num_neg_traj + num_uneg_traj]]
-        for k in keys
-    }
-    union_pos_data = {k: d4rl_data[k][pos_idx[:num_upos_traj]] for k in keys}
-
-    print(f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}")
-    neg_cost, neg_reward = (
-        neg_data["costs"].sum(1).mean(),
-        neg_data["rewards"].sum(1).mean(),
-    )
-    print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
-
-    pos_cost, pos_reward = (
-        union_pos_data["costs"].sum(1).mean(),
-        union_pos_data["rewards"].sum(1).mean(),
-    )
-    print(f"Avg positive trajectory cost/reward: {pos_cost:.3f}/{pos_reward:.3f}")
-
-    print(
-        f"Number of union negative trajectory dataset: {union_neg_data['observations'].shape[0]}"
-    )
-    print(
-        f"Number of union positive trajectory dataset: {union_pos_data['observations'].shape[0]}"
-    )
-
-    union_data = {
-        k: np.concatenate([union_neg_data[k], union_pos_data[k]], axis=0) for k in keys
-    }
     union_cost, union_reward = (
         union_data["costs"].sum(1).mean(),
         union_data["rewards"].sum(1).mean(),
