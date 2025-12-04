@@ -201,15 +201,13 @@ class TransformerBlock(nnx.Module):
 
     def __call__(self, x, mask=None, training=False):
         # x shape: batch x horizon x d_model
-        attn_x = self.dp1(self.attn(x, mask=mask), deterministic=not training)
+        attn_x = self.dp1(self.attn(self.ln1(x), mask=mask), deterministic=not training)
         # residual connection
         x = x + attn_x
-        x = self.ln1(x)
 
-        ff_x = self.dp2(self.ff(x), deterministic=not training)
+        ff_x = self.dp2(self.ff(self.ln2(x)), deterministic=not training)
         # residual connection
         x = x + ff_x
-        x = self.ln2(x)
         return x
 
 

@@ -39,7 +39,7 @@ from dsrl_model.utils.utils import single_agent_args
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e2),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -49,15 +49,15 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "update_bc_freq": 1,
-    "update_embd_freq": int(1e3),
+    "update_embd_freq": int(1e2),
     "decay": 0.85,
-    "warmup_steps": int(3e4),
+    "warmup_steps": int(3e2),
     "value_temp": 0.1,
     "value_limit": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e3),
 }
 
 trajectory_cfg = {
@@ -360,8 +360,13 @@ def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
     np.random.seed(args.seed)
-    rngs = nnx.Rngs(args.seed)
-    curriculum_rngs = nnx.Rngs(args.seed + 42)
+    rngs = nnx.Rngs(
+        default=args.seed,
+        params=args.seed + 3,
+        dropout=args.seed + 5,
+        random_sample=args.seed + 7,
+    )
+    curriculum_rngs = nnx.Rngs(params=args.seed + 42, dropout=args.seed + 47)
 
     # set default device id
     jax.default_device = jax.devices(args.device)[args.device_id]
