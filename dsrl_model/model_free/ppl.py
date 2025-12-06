@@ -21,7 +21,7 @@ from torch.optim.lr_scheduler import LinearLR
 from dsrl_model.utils.bufffer import OnPolicyBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data_2,
+    get_neg_and_union_data,
     get_normalized_data,
 )
 from dsrl_model.utils.logger import EpochLogger
@@ -61,6 +61,12 @@ trajectory_cfg = {
     "num_negative_trajectories": 50,
     "num_union_trajectories": -1,
     "percentage_validation_trajectories": 0.2,
+}
+
+trajectory_data = {
+    "full": None,
+    "reward_only": None,
+    "cost_only": ((0.0, 1.0, 0.0, 0.5),),
 }
 
 
@@ -208,6 +214,8 @@ def main(args, cfg_env=None):
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
+    trajectory_cfg["data_inpaint"] = args.data_inpaint
+    trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
@@ -278,7 +286,7 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
+    neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
     # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
