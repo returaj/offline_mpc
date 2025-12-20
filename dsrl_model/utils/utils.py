@@ -253,6 +253,12 @@ def single_agent_args():
             "help": "weighted temperature hyper-parameter for BC",
         },
         {
+            "name": "--num-preferred",
+            "type": int,
+            "default": 0,
+            "help": "number of preferred trajectories D_P",
+        },
+        {
             "name": "--num-non-preferred",
             "type": int,
             "default": 50,
@@ -287,6 +293,12 @@ def single_agent_args():
             "type": str,
             "default": None,
             "help": "set data inpaint tuple from full, reward_only, cost_only",
+        },
+        {
+            "name": "--preferred-label",
+            "type": float,
+            "default": 0.0,
+            "help": "preferred label score for training safecl.",
         },
     ]
     # Create argument parser
