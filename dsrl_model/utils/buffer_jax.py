@@ -230,10 +230,10 @@ class OnPolicyBuffer:
 
     def sample_batch(self, p_idx, n_idx, u_idx):
         return batched_data(
-            pos_obs=self._neg_obs,
-            pos_act=self._neg_act,
-            pos_reward=self._neg_reward,
-            pos_cost=self._neg_cost,
+            pos_obs=self._pos_obs,
+            pos_act=self._pos_act,
+            pos_reward=self._pos_reward,
+            pos_cost=self._pos_cost,
             neg_obs=self._neg_obs,
             neg_act=self._neg_act,
             neg_reward=self._neg_reward,
