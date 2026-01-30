@@ -35,6 +35,16 @@ def l2_normalize(x, axis=None, eps=EPS):
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
+def log1pexp(x, eps=EPS):
+    # safe implementation of L = log(1 + exp(x))
+    # x > 0: L = x + log(1 + exp(-x))
+    # x <=0: L = log(1 + exp(x))
+    # combined: L = Relu(x) + log(1 + exp(-|x|)) = jax.nn.softplus(x)
+    abs_x = jnp.abs(x)
+    pos_x = jax.nn.relu(x)
+    return pos_x + jnp.log(1 + jnp.exp(-abs_x))
+
+
 def get_tree_norm(tree):
     square_tree = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), tree)
     total_square = jax.tree_util.tree_reduce(lambda acc, x: acc + x, square_tree)
