@@ -102,6 +102,7 @@ def discounted_sum(arr, gamma):
     return cumsum
 
 
+@nnx.jit
 def train_cost_model(
     cost_model,
     cost_optimizer,
@@ -151,6 +152,7 @@ def train_cost_model(
     return loss, *aux_values
 
 
+@nnx.jit
 def train_policy_model(
     cost_model,
     bc_policy,
