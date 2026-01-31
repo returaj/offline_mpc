@@ -66,9 +66,16 @@ def batched_data(
     )
 
 
+@functools.partial(jax.jit, static_argnames=["horizon"])
+def sample_horizon_arr(arr, idx, horizon):
+    horizon_offsets = jnp.arange(horizon)
+    h_idx = idx[..., None] + horizon_offsets
+    return arr[h_idx]
+
+
 @jax.jit
-def sample_label(labels, idx):
-    return labels[idx]
+def sample_arr(arr, idx):
+    return arr[idx]
 
 
 class OnPolicyBuffer:
@@ -289,6 +296,53 @@ class OnPolicyBuffer:
             yield self.sample_batch(p_idx, n_idx, u_idx)
 
 
+class OSILBuffer(OnPolicyBuffer):
+    def __init__(
+        self,
+        rngs,
+        obs_dim,
+        act_dim,
+        pos_data_size,
+        neg_data_size,
+        union_data_size,
+        horizon,
+        batch_size,
+        ep_len=1000,
+        priorities_alpha=1,
+    ):
+        super().__init__(
+            rngs,
+            obs_dim,
+            act_dim,
+            pos_data_size,
+            neg_data_size,
+            union_data_size,
+            horizon,
+            batch_size,
+            ep_len,
+            priorities_alpha,
+        )
+        self._union_done = np.zeros((self.union_capacity,), dtype=self.dtype)
+
+    def add(
+        self, obs, act, done, reward, cost, is_pos=False, is_neg=False, is_union=False
+    ):
+        if is_union:
+            idx = self._union_idx
+            self._union_done[idx : idx + self.ep_len] = np.array(done)
+
+        super().add(obs, act, done, reward, cost, is_pos, is_neg, is_union)
+
+    def to_jax_ndarray(self):
+        super().to_jax_ndarray()
+        self._union_done = jnp.array(self._union_done)
+
+    def sample_batch(self, p_idx, n_idx, u_idx):
+        batch = super().sample_batch(p_idx, n_idx, u_idx)
+        h_union_done = sample_horizon_arr(self._union_done, u_idx, self.horizon)
+        return (*batch, h_union_done)
+
+
 class SafeCLBuffer(OnPolicyBuffer):
     def __init__(
         self,
@@ -327,5 +381,5 @@ class SafeCLBuffer(OnPolicyBuffer):
 
     def sample_batch(self, p_idx, n_idx, u_idx):
         batch = super().sample_batch(p_idx, n_idx, u_idx)
-        label = sample_label(self._union_labels, u_idx)
+        label = sample_arr(self._union_labels, u_idx)
         return (*batch, label)
