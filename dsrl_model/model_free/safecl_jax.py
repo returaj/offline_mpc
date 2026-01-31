@@ -21,8 +21,8 @@ from jax import debug
 from dsrl_model.utils.buffer_jax import SafeCLBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data_2,
     get_normalized_data,
+    get_pos_neg_and_union_data,
 )
 from dsrl_model.utils.models_jax import (
     ExpCostModel,
@@ -48,7 +48,7 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "update_bc_freq": 2,
+    "update_bc_freq": 1,
     "update_embd_freq": int(1e3),
     "decay": 0.85,
     "warmup_steps": int(3e4),
@@ -64,9 +64,16 @@ trajectory_cfg = {
     "density": 1.0,
     "target_cost": 25.0,
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
-    "inpaint_ranges": ((0.0, 1.0, 0.0, 0.5),),
+    "inpaint_ranges": None,
+    "num_positive_trajectories": 0,
     "num_negative_trajectories": 50,
     "num_union_trajectories": -1,
+}
+
+trajectory_data = {
+    "full": None,
+    "reward_only": None,
+    "cost_only": ((0.0, 1.0, 0.0, 0.5),),
 }
 
 labels_cfg = {
@@ -149,18 +156,23 @@ def train_embedding_model(
     curriculum_embedding_model,
     embedding_model,
     embedding_optimizer,
+    target_pos_obs,
+    target_pos_act,
     target_neg_obs,
     target_neg_act,
     target_union_obs,
     target_union_act,
     target_union_trainable,
     union_scale,
+    has_positive,
+    pos_label,
     key,
 ):
     dtype = target_neg_obs.dtype
     batch = target_neg_obs.shape[0]
 
     # shape: Batch X Horizon X obs_act_dim
+    target_pos = jnp.concat([target_pos_obs, target_pos_act], axis=-1)
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
@@ -173,10 +185,12 @@ def train_embedding_model(
     target_random = jnp.concat([target_random1, target_random2], axis=0)
 
     # Batch
-    target_ones_score = jnp.ones(shape=(batch,), dtype=dtype)
-    target_zeros_score = jnp.zeros(shape=(2 * batch,), dtype=dtype)
+    target_pos_score = pos_label * jnp.ones(shape=(batch,), dtype=dtype)
+    target_neg_score = jnp.ones(shape=(batch,), dtype=dtype)
+    target_random_score = jnp.zeros(shape=(2 * batch,), dtype=dtype)
 
     # Batch X embd_dim
+    target_pos_z = curriculum_embedding_model(target_pos, training=False)
     target_neg_z = curriculum_embedding_model(target_neg, training=False)
     target_union_z = curriculum_embedding_model(target_union, training=False)
     target_random_z = curriculum_embedding_model(target_random, training=False)
@@ -184,19 +198,25 @@ def train_embedding_model(
     def loss_fun(embedding_model):
         default_scale = 1.0
 
+        pos_z = embedding_model(target_pos)
+        # Batch
+        pos_score = jnp.einsum("ij,ij->i", pos_z, target_pos_z)
+        pos_mean_loss = has_positive * jnp.mean(
+            range_loss(pos_score, target_pos_score, default_scale)
+        )
+        pos_mean_score = has_positive * jnp.mean(pos_score)
+
         neg_z = embedding_model(target_neg)
         # Batch
         neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
-        neg_mean_loss = jnp.mean(
-            range_loss(neg_score, target_ones_score, default_scale)
-        )
+        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, default_scale))
         neg_mean_score = jnp.mean(neg_score)
 
         union_z = embedding_model(target_union)
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
-        union_loss = range_loss(union_score, target_ones_score, union_scale)
+        union_loss = range_loss(union_score, target_neg_score, union_scale)
         trainable_scores = (target_union_trainable > 0).astype(dtype)
-        trainable_count = trainable_scores.sum() + EPS
+        trainable_count = jnp.clip(trainable_scores.sum(), min=1.0)
         union_mean_loss = (
             jnp.einsum("i,i->", trainable_scores, union_loss) / trainable_count
         )
@@ -207,16 +227,18 @@ def train_embedding_model(
         random_z = embedding_model(target_random)
         random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
         random_mean_loss = jnp.mean(
-            range_loss(random_score, target_zeros_score, default_scale / 2)
+            range_loss(random_score, target_random_score, default_scale / 2)
         )
         random_mean_score = jnp.mean(random_score)
 
-        loss = neg_mean_loss + union_mean_loss + random_mean_loss
+        loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
 
         return loss, (
+            pos_mean_loss,
             neg_mean_loss,
             union_mean_loss,
             random_mean_loss,
+            pos_mean_score,
             neg_mean_score,
             union_mean_score,
             random_mean_score,
@@ -237,14 +259,25 @@ def index_fun(arr, all_labels, label_range):
     return all_labels[idx]
 
 
+@jax.jit
+def get_trainable_mean_values(value_arr, trainable_mask):
+    batch = trainable_mask.shape[0]
+    trainable_count = trainable_mask.sum()
+    batch_horizon_value = jnp.sum(value_arr, axis=-1)
+    total_trainable_value = jnp.einsum("i,i->", batch_horizon_value, trainable_mask)
+    mean_trainable_value = total_trainable_value / (trainable_count + 1)
+    total_non_trainable_value = batch_horizon_value.sum() - total_trainable_value
+    mean_non_trainable_value = total_non_trainable_value / (batch - trainable_count + 1)
+    return mean_trainable_value, mean_non_trainable_value
+
+
 @nnx.jit
 def get_union_trainable(
     curriculum_embedding_model,
     embedding_model,
-    target_neg_obs,
-    target_neg_act,
     target_union_obs,
     target_union_act,
+    target_union_reward,
     target_union_cost,
     value_limit,
 ):
@@ -253,11 +286,9 @@ def get_union_trainable(
     dtype = target_union_obs.dtype
 
     # Batch X Horizon X obs_act_dim
-    target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     # Batch X embd_dim
-    target_neg_z = curriculum_embedding_model(target_neg, training=False)
     target_union_z = curriculum_embedding_model(target_union, training=False)
 
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
@@ -269,9 +300,6 @@ def get_union_trainable(
         score = jnp.einsum("ij,ij->i", z, target_z)
         return carry, score
 
-    _, neg_scores = multimodel((target_neg, target_neg_z, embedding_model))
-    mean_neg_score = jnp.mean(neg_scores)
-
     _, union_scores = multimodel((target_union, target_union_z, embedding_model))
     mean_union_score = jnp.mean(union_scores, axis=0)
     baseline_mean, baseline_std = mean_union_score.mean(), mean_union_score.std()
@@ -282,12 +310,12 @@ def get_union_trainable(
     trainable_percent = trainable_count / batch
 
     # Batch
-    batch_horizon_cost = jnp.sum(target_union_cost, axis=-1)
-    total_trainable_cost = jnp.einsum("i,i->", batch_horizon_cost, trainable_mask)
-    mean_trainable_cost = total_trainable_cost / (trainable_count + EPS)
-    total_non_trainable_cost = batch_horizon_cost.sum() - total_trainable_cost
-    mean_non_trainable_cost = total_non_trainable_cost / (batch - trainable_count + EPS)
-
+    mean_trainable_reward, mean_non_trainable_reward = get_trainable_mean_values(
+        target_union_reward, trainable_mask
+    )
+    mean_trainable_cost, mean_non_trainable_cost = get_trainable_mean_values(
+        target_union_cost, trainable_mask
+    )
     return (
         trainable_mask,
         mean_union_score,
@@ -295,6 +323,8 @@ def get_union_trainable(
         baseline_std,
         baseline,
         trainable_percent,
+        mean_trainable_reward,
+        mean_non_trainable_reward,
         mean_trainable_cost,
         mean_non_trainable_cost,
     )
@@ -304,50 +334,92 @@ def get_union_trainable(
 def train_policy_model(
     bc_policy,
     bc_optimizer,
-    target_obs,
-    target_act,
-    target_score,
+    target_pos_obs,
+    target_pos_act,
+    target_union_obs,
+    target_union_act,
+    target_union_score,
     gamma,
     value_limit,
     value_temp,
+    has_positive,
+    pos_label,
 ):
-    batch, horizon, _ = target_obs.shape
+    dtype = target_union_obs.dtype
+    batch, horizon, _ = target_union_obs.shape
 
     # Batch_Horizon X obs/act_dim
-    target_obs = target_obs.reshape(batch * horizon, -1)
-    target_act = target_act.reshape(batch * horizon, -1)
+    target_pos_obs = target_pos_obs.reshape(batch * horizon, -1)
+    target_pos_act = target_pos_act.reshape(batch * horizon, -1)
+
+    target_union_obs = target_union_obs.reshape(batch * horizon, -1)
+    target_union_act = target_union_act.reshape(batch * horizon, -1)
+
+    non_trainable = (target_union_score <= value_limit).astype(dtype)
+    non_trainable_count = jnp.clip(non_trainable.sum(), min=1.0)
+    union_weight = non_trainable * jnp.exp(-target_union_score / value_temp)
+
+    pos_weight = (
+        has_positive * jnp.exp(-pos_label / value_temp) * jnp.ones_like(union_weight)
+    )
+
+    norm_weight = (union_weight.sum() + pos_weight.sum()) / (
+        non_trainable_count + has_positive * batch
+    )
+    norm_weight = jnp.clip(norm_weight, min=EPS)
+
+    final_union_weight = union_weight / norm_weight
+    final_pos_weight = pos_weight / norm_weight
 
     def bc_policy_trajectory_loss_fun(bc_policy):
-        pred_act, *_ = bc_policy(target_obs)
-        flat_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
-        batch_horizon_loss = flat_loss.reshape(batch, horizon)
-        batch_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
-            batch_horizon_loss, gamma
+        pred_union_act, *_ = bc_policy(target_union_obs)
+        flat_union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        batch_horizon_union_loss = flat_union_loss.reshape(batch, horizon)
+        batch_union_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
+            batch_horizon_union_loss, gamma
         ).squeeze()
-        weight = jnp.clip(jnp.exp((0.5 - target_score) / value_temp), max=5.0)
-        loss = jnp.mean(weight * batch_loss)
-        return loss
+        union_loss = jnp.mean(final_union_weight * batch_union_loss)
 
-    bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun)
-    bc_loss, bc_grad = bc_grad_fun(bc_policy)
+        pred_pos_act, *_ = bc_policy(target_pos_obs)
+        flat_pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        batch_horizon_pos_loss = flat_pos_loss.reshape(batch, horizon)
+        batch_pos_loss = jax.vmap(discounted_sum, in_axes=(0, None))(
+            batch_horizon_pos_loss, gamma
+        ).squeeze()
+        pos_loss = jnp.mean(final_pos_weight * batch_pos_loss)
+
+        loss = pos_loss + union_loss
+        return loss, (pos_loss, union_loss)
+
+    bc_grad_fun = nnx.value_and_grad(bc_policy_trajectory_loss_fun, has_aux=True)
+    (bc_loss, aux_values), bc_grad = bc_grad_fun(bc_policy)
     bc_grad = jax.tree.map(lambda g: g / horizon, bc_grad)
     bc_optimizer.update(bc_grad)
-    return bc_loss
+    return bc_loss, *aux_values
 
 
 def main(args, cfg_env=None):
     # set the random seed, device and number of threads
     random.seed(args.seed)
     np.random.seed(args.seed)
-    rngs = nnx.Rngs(args.seed)
-    curriculum_rngs = nnx.Rngs(args.seed + 42)
+    rngs = nnx.Rngs(
+        default=args.seed,
+        params=args.seed + 3,
+        dropout=args.seed + 5,
+        random_sample=args.seed + 7,
+    )
+    curriculum_rngs = nnx.Rngs(params=args.seed + 42, dropout=args.seed + 47)
 
     # set default device id
     jax.default_device = jax.devices(args.device)[args.device_id]
 
+    has_positive = float(args.num_preferred > 0)
+    trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
+    trajectory_cfg["data_inpaint"] = args.data_inpaint
+    trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg, **labels_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
@@ -356,6 +428,7 @@ def main(args, cfg_env=None):
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
+    config["pos_label"] = args.preferred_label
 
     # evaluation environment
     eval_env = gym.make(args.task)
@@ -418,21 +491,23 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data_2(data, trajectory_cfg)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(data, trajectory_cfg)
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
-        neg_data, union_data, mu_obs, std_obs = get_normalized_data(
-            neg_data, union_data
+        pos_data, neg_data, union_data, mu_obs, std_obs = get_normalized_data(
+            pos_data, neg_data, union_data
         )
 
     neg_observations = neg_data["observations"]
     neg_actions = neg_data["actions"]
     neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+    neg_rewards = neg_data["rewards"]
     neg_costs = neg_data["costs"]
 
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
+    union_rewards = union_data["rewards"]
     union_costs = union_data["costs"]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
@@ -440,24 +515,43 @@ def main(args, cfg_env=None):
         neg_observations.shape[1] == ep_len
     ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
 
+    pos_data_size = 1
+    if has_positive:
+        pos_data_size = np.prod(pos_data["observations"].shape[:-1])
+
     buffer = SafeCLBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
+        pos_data_size=pos_data_size,
         neg_data_size=np.prod(neg_observations.shape[:-1]),
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
         ep_len=ep_len,
     )
-    for obs, act, done, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_costs
+
+    if has_positive:
+        pos_observations = pos_data["observations"]
+        pos_actions = pos_data["actions"]
+        pos_dones = pos_data["timeouts"] | pos_data["terminals"]
+        pos_rewards = pos_data["rewards"]
+        pos_costs = pos_data["costs"]
+
+        for obs, act, done, reward, cost in zip(
+            pos_observations, pos_actions, pos_dones, pos_rewards, pos_costs
+        ):
+            buffer.add(obs, act, done, reward, cost, is_pos=True)
+
+    for obs, act, done, reward, cost in zip(
+        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
     ):
-        buffer.add(obs, act, done, cost=cost, is_negative=True)
-    for obs, act, done, cost in zip(
-        union_observations, union_actions, union_dones, union_costs
+        buffer.add(obs, act, done, reward, cost, is_neg=True)
+
+    for obs, act, done, reward, cost in zip(
+        union_observations, union_actions, union_dones, union_rewards, union_costs
     ):
-        buffer.add(obs, act, done, cost=cost, is_negative=False)
+        buffer.add(obs, act, done, reward, cost, is_union=True)
 
     buffer.to_jax_ndarray()
 
@@ -476,11 +570,17 @@ def main(args, cfg_env=None):
     while steps < config["total_iteration"]:
         # shape: Batch X Horizon X obs/act_dim
         for (
+            target_pos_obs,
+            target_pos_act,
+            target_pos_reward,
+            target_pos_cost,
             target_neg_obs,
             target_neg_act,
+            target_neg_reward,
             target_neg_cost,
             target_union_obs,
             target_union_act,
+            target_union_reward,
             target_union_cost,
             _,
             _,
@@ -495,24 +595,27 @@ def main(args, cfg_env=None):
                 baseline_std,
                 baseline_score,
                 union_trainable_percent,
+                mean_trainable_reward,
+                mean_non_trainable_reward,
                 mean_trainable_cost,
                 mean_non_trainable_cost,
             ) = get_union_trainable(
                 curriculum_embedding_model=curriculum_embedding_model,
                 embedding_model=target_embedding_model,
-                target_neg_obs=target_neg_obs,
-                target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
+                target_union_reward=target_union_reward,
                 target_union_cost=target_union_cost,
                 value_limit=config["value_limit"],
             )
 
             (
                 embedding_loss,
+                pos_mean_loss,
                 neg_mean_loss,
                 union_mean_loss,
                 random_mean_loss,
+                pos_mean_score,
                 neg_mean_score,
                 union_mean_score,
                 random_mean_score,
@@ -520,12 +623,16 @@ def main(args, cfg_env=None):
                 curriculum_embedding_model=curriculum_embedding_model,
                 embedding_model=embedding_model,
                 embedding_optimizer=embedding_optimizer,
+                target_pos_obs=target_pos_obs,
+                target_pos_act=target_pos_act,
                 target_neg_obs=target_neg_obs,
                 target_neg_act=target_neg_act,
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 target_union_trainable=union_trainable,
                 union_scale=union_scale,
+                has_positive=has_positive,
+                pos_label=config["pos_label"],
                 key=rngs.random_sample(),
             )
 
@@ -534,21 +641,25 @@ def main(args, cfg_env=None):
                     target_embedding_model, embedding_model, config["update_tau"]
                 )
 
-            bc_loss = jnp.array(0.0)
+            bc_loss = bc_pos_loss = bc_union_loss = jnp.array(0.0)
             if (steps > config["warmup_steps"]) and (
                 steps % config["update_bc_freq"] == 0
             ):
                 union_scale = 1.0
 
-                bc_loss = train_policy_model(
+                bc_loss, bc_pos_loss, bc_union_loss = train_policy_model(
                     bc_policy=bc_policy,
                     bc_optimizer=bc_optimizer,
-                    target_obs=target_union_obs,
-                    target_act=target_union_act,
-                    target_score=union_score,
+                    target_pos_obs=target_pos_obs,
+                    target_pos_act=target_pos_act,
+                    target_union_obs=target_union_obs,
+                    target_union_act=target_union_act,
+                    target_union_score=union_score,
                     gamma=config["gamma"],
                     value_limit=config["value_limit"],
                     value_temp=config["value_temp"],
+                    has_positive=has_positive,
+                    pos_label=config["pos_label"],
                 )
 
             logger.logged = False
@@ -574,6 +685,7 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Train/Steps", steps)
 
                 logger.log_tabular("Loss/Loss_embedding", embedding_loss.item())
+                logger.log_tabular("Loss/Loss_embd_pos_mean_loss", pos_mean_loss.item())
                 logger.log_tabular("Loss/Loss_embd_neg_mean_loss", neg_mean_loss.item())
                 logger.log_tabular(
                     "Loss/Loss_embd_union_mean_loss", union_mean_loss.item()
@@ -582,7 +694,10 @@ def main(args, cfg_env=None):
                     "Loss/Loss_embd_random_mean_loss", random_mean_loss.item()
                 )
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
+                logger.log_tabular("Loss/Loss_bc_pos_policy", bc_pos_loss.item())
+                logger.log_tabular("Loss/Loss_bc_union_policy", bc_union_loss.item())
 
+                logger.log_tabular("Mean/embd_pos_score", pos_mean_score.item())
                 logger.log_tabular("Mean/embd_neg_score", neg_mean_score.item())
                 logger.log_tabular("Mean/embd_union_score", union_mean_score.item())
                 logger.log_tabular("Mean/embd_random_score", random_mean_score.item())
@@ -595,10 +710,30 @@ def main(args, cfg_env=None):
                 )
 
                 logger.log_tabular(
-                    "Cost/neg_cost", jnp.sum(target_neg_cost, axis=-1).mean().item()
+                    "Reward/pos", jnp.sum(target_pos_reward, axis=-1).mean().item()
                 )
                 logger.log_tabular(
-                    "Cost/union_cost", jnp.sum(target_union_cost, axis=-1).mean().item()
+                    "Reward/neg", jnp.sum(target_neg_reward, axis=-1).mean().item()
+                )
+                logger.log_tabular(
+                    "Reward/union",
+                    jnp.sum(target_union_reward, axis=-1).mean().item(),
+                )
+                logger.log_tabular(
+                    "Reward/union_trainable", mean_trainable_reward.item()
+                )
+                logger.log_tabular(
+                    "Reward/union_non_trainable", mean_non_trainable_reward.item()
+                )
+
+                logger.log_tabular(
+                    "Cost/pos", jnp.sum(target_pos_cost, axis=-1).mean().item()
+                )
+                logger.log_tabular(
+                    "Cost/neg", jnp.sum(target_neg_cost, axis=-1).mean().item()
+                )
+                logger.log_tabular(
+                    "Cost/union", jnp.sum(target_union_cost, axis=-1).mean().item()
                 )
                 logger.log_tabular("Cost/union_trainable", mean_trainable_cost.item())
                 logger.log_tabular(
