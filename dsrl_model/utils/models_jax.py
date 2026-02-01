@@ -178,11 +178,12 @@ class ContrastiveCostModel(nnx.Module):
             affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
             layers += [affine_layer, act]
         self.encoder = nnx.Sequential(*layers)
-        self.projection = nnx.Linear(sizes[-1], 1)
+        self.projection = nnx.Linear(sizes[-1], 1, rngs=rngs)
 
     def __call__(self, x):
         z = l2_normalize(self.encoder(x), axis=-1)
-        cost = jax.nn.sigmoid(self.projection(z))
+        proj_z = jnp.squeeze(self.projection(z), axis=-1)
+        cost = jax.nn.sigmoid(proj_z)
         return z, cost
 
 

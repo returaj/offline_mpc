@@ -108,6 +108,8 @@ def discounted_sum(arr, gamma):
 
 @jax.jit
 def pref_cost_loss(pos_cost, neg_cost, union_cost, has_positive, gamma):
+    # neg_cost shape: Batch X Horizon
+
     # batch
     pos_traj_cost = discounted_sum(pos_cost.T, gamma)
     neg_traj_cost = discounted_sum(neg_cost.T, gamma)
@@ -234,19 +236,87 @@ def train_cost_model(
     return loss, *aux_values
 
 
+@nnx.jit
+def compute_target_value(cost_model, bc_policy, value_model, obs, act, done, gamma):
+    dtype = obs.dtype
+
+    # Batch X Horizon X obs_dim
+    horizon = obs.shape[1]
+
+    # mask last horizon
+    mask_last_horizon = jnp.concat(
+        [jnp.ones(horizon - 1, dtype=dtype), jnp.zeros(1, dtype=dtype)]
+    )
+    # This is a permutation matrix to shift one timestep ahead
+    shift_one_timestep = jnp.eye(horizon, k=-1, dtype=dtype)
+
+    def batch_fun(obs, act, done):
+        # Batch X Horizon
+        _, cost = cost_model(jnp.concat([obs, act], axis=-1))
+        cost = mask_last_horizon * cost
+        # Batch X Horizon X act_dim
+        act_next, *_ = bc_policy(obs)
+        # Batch X Horizon
+        v_next = jnp.maximum(*value_model(jnp.concat([obs, act_next], axis=-1)))
+        v_next = v_next @ shift_one_timestep
+
+        target = cost + gamma * (1 - done) * v_next
+        return target
+
+    target_value = jax.vmap(batch_fun, in_axes=(0, 0, 0))(obs, act, done)
+    return target_value
+
+
+@nnx.jit
 def train_value_model(
     cost_model,
     bc_policy,
-    value_model,
     target_value_model,
+    value_model,
+    value_optimizer,
     target_obs,
     target_act,
     target_done,
     gamma,
 ):
-    # TODO: Start here
+    dtype = target_obs.dtype
+    # Batch X Horizon X obs_dim
+    horizon = target_obs.shape[1]
 
-    pass
+    # Batch X Horizon X obs_act_dim
+    target_oa = jnp.concat([target_obs, target_act], axis=-1)
+
+    # mask the horizon-1 element
+    mask = jnp.concat([jnp.ones(horizon - 1, dtype=dtype), jnp.zeros(1, dtype=dtype)])
+
+    # Batch X Horizon
+    target_v = compute_target_value(
+        cost_model=cost_model,
+        bc_policy=bc_policy,
+        value_model=target_value_model,
+        obs=target_obs,
+        act=target_act,
+        done=target_done,
+        gamma=gamma,
+    )
+
+    def loss_fun(value_model):
+        # Batch X Horizon
+        pred_v1, pred_v2 = value_model(target_oa)
+        v1_loss = mask * optax.huber_loss(pred_v1, target_v, delta=2.0)
+        v2_loss = mask * optax.huber_loss(pred_v2, target_v, delta=2.0)
+        discounted_v1_loss = discounted_sum(v1_loss.T, gamma)
+        discounted_v2_loss = discounted_sum(v2_loss.T, gamma)
+
+        loss = jnp.mean(discounted_v1_loss) + jnp.mean(discounted_v2_loss)
+        return loss
+
+    grad_fun = nnx.value_and_grad(loss_fun)
+    loss, grads = grad_fun(value_model)
+    grads = jax.tree.map(lambda g: g / horizon, grads)
+    value_optimizer.update(grads)
+
+    return loss
 
 
 @nnx.jit
@@ -494,7 +564,14 @@ def main(args, cfg_env=None):
 
             steps += 1
 
-            cost_loss, cost_pref_loss, cost_contrastive_loss = train_cost_model(
+            (
+                cost_loss,
+                pos_neg_pref_loss,
+                pos_union_pref_loss,
+                union_neg_pref_loss,
+                pref_loss,
+                contrastive_loss,
+            ) = train_cost_model(
                 cost_model=cost_model,
                 cost_optimizer=cost_optimizer,
                 target_pos_obs=target_pos_obs,
