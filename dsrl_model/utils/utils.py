@@ -253,6 +253,12 @@ def single_agent_args():
             "help": "weighted temperature hyper-parameter for BC",
         },
         {
+            "name": "--use-osil-weight",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "use osil-style value weight in policy learning",
+        },
+        {
             "name": "--num-preferred",
             "type": int,
             "default": 0,

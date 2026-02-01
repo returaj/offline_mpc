@@ -40,17 +40,16 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 10.0,
-    "bag_size": 1,
+    "max_grad_norm": 1.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "update_freq": 1,
-    "cost_weight_temp": 0.6,
-    "train_horizon": 20,  # 20
+    "update_bc_freq": 2,
+    "update_cost_freq": 5,
+    "update_tau": 0.005,
+    "value_weight_temp": 2.5,  # TD3-BC coef
+    "train_horizon": 5,  # 5
     "weight_decay": 0.01,
-    "grad_reg_coeffs": 10.0,
     "total_iteration": int(1e6),
-    "bc_weight_binary": None,
 }
 
 trajectory_cfg = {
@@ -92,6 +91,18 @@ def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
     return eval_reward, eval_cost, eval_len
 
 
+@nnx.jit
+def polyak_update(target_model, curr_model, tau):
+    target_param = nnx.state(target_model, nnx.Param)
+    curr_param = nnx.state(curr_model, nnx.Param)
+
+    new_target_param = jax.tree_util.tree_map(
+        lambda t, c: (1 - tau) * t + tau * c, target_param, curr_param
+    )
+    nnx.update(target_model, new_target_param)
+    return target_model
+
+
 @jax.jit
 def discounted_sum(arr, gamma):
     dtype = arr.dtype
@@ -107,7 +118,7 @@ def discounted_sum(arr, gamma):
 
 
 @jax.jit
-def pref_cost_loss(pos_cost, neg_cost, union_cost, has_positive, gamma):
+def pref_cost_loss_fun(pos_cost, neg_cost, union_cost, has_positive, gamma):
     # neg_cost shape: Batch X Horizon
 
     # batch
@@ -133,13 +144,13 @@ def pref_cost_loss(pos_cost, neg_cost, union_cost, has_positive, gamma):
 @jax.jit
 def compute_contrastive_ce_loss(p, q):
     q = jax.nn.log_softmax(q, axis=1)
-    p = p / jnp.clip(p.sum(axis=1, keepdim=True), min=1.0)
+    p = p / jnp.clip(p.sum(axis=1, keepdims=True), min=1.0)
     loss = -jnp.sum(p * q, axis=1)
     return jnp.mean(loss)
 
 
 @jax.jit
-def contrastive_cost_loss(pos_zs, neg_zs, union_zs, gamma):
+def contrastive_cost_loss_fun(pos_zs, neg_zs, union_zs, gamma):
     del pos_zs
 
     temp = 0.1  # value from SupContrast
@@ -203,7 +214,7 @@ def train_cost_model(
             pos_neg_pref_loss,
             pos_union_pref_loss,
             union_neg_pref_loss,
-        ) = pref_cost_loss(
+        ) = pref_cost_loss_fun(
             pos_cost=pos_cost,
             neg_cost=neg_cost,
             union_cost=union_cost,
@@ -211,7 +222,7 @@ def train_cost_model(
             gamma=gamma,
         )
 
-        contrastive_loss = contrastive_cost_loss(
+        contrastive_loss = contrastive_cost_loss_fun(
             pos_zs=pos_zs,
             neg_zs=neg_zs,
             union_zs=union_zs,
@@ -241,7 +252,11 @@ def compute_target_value(cost_model, bc_policy, value_model, obs, act, done, gam
     dtype = obs.dtype
 
     # Batch X Horizon X obs_dim
-    horizon = obs.shape[1]
+    batch, horizon, _ = obs.shape
+
+    # Batch X Horizon X act_dim
+    act_next, *_ = bc_policy(obs.reshape(batch * horizon, -1))
+    act_next = act_next.reshape(batch, horizon, -1)
 
     # mask last horizon
     mask_last_horizon = jnp.concat(
@@ -250,12 +265,10 @@ def compute_target_value(cost_model, bc_policy, value_model, obs, act, done, gam
     # This is a permutation matrix to shift one timestep ahead
     shift_one_timestep = jnp.eye(horizon, k=-1, dtype=dtype)
 
-    def batch_fun(obs, act, done):
+    def batch_fun(obs, act, act_next, done):
         # Batch X Horizon
         _, cost = cost_model(jnp.concat([obs, act], axis=-1))
         cost = mask_last_horizon * cost
-        # Batch X Horizon X act_dim
-        act_next, *_ = bc_policy(obs)
         # Batch X Horizon
         v_next = jnp.maximum(*value_model(jnp.concat([obs, act_next], axis=-1)))
         v_next = v_next @ shift_one_timestep
@@ -263,7 +276,7 @@ def compute_target_value(cost_model, bc_policy, value_model, obs, act, done, gam
         target = cost + gamma * (1 - done) * v_next
         return target
 
-    target_value = jax.vmap(batch_fun, in_axes=(0, 0, 0))(obs, act, done)
+    target_value = jax.vmap(batch_fun, in_axes=(0, 0, 0, 0))(obs, act, act_next, done)
     return target_value
 
 
@@ -320,8 +333,42 @@ def train_value_model(
 
 
 @nnx.jit
+def compute_value_weight(
+    value_model,
+    bc_policy,
+    obs,
+    act,
+    alpha,
+    beta,
+    use_osil_weight,
+):
+    pred_act, *_ = bc_policy(obs)
+
+    # Batch_Horizon
+    q = jnp.maximum(*value_model(jnp.concat([obs, act], axis=-1)))
+    v = jnp.maximum(*value_model(jnp.concat([obs, pred_act], axis=-1)))
+
+    def per_transition_weight():
+        neg_adv = jnp.clip(-(q - v) / beta, max=2.0)
+        union_weight = jnp.exp(neg_adv) / jnp.mean(jnp.abs(v))
+        return union_weight
+
+    def constant_adaptive_weight():
+        # osil type union weight
+        neg_adv = -(q - v) / beta
+        log_Z = jax.nn.logsumexp(neg_adv) - jnp.log(neg_adv.shape[0]) + EPS
+        union_weight = alpha * jnp.exp(jnp.clip(log_Z, max=5.0))
+        return union_weight
+
+    union_weight = jnp.where(
+        use_osil_weight, constant_adaptive_weight(), per_transition_weight()
+    )
+    return union_weight, jnp.abs(q).mean(), jnp.abs(v).mean()
+
+
+@nnx.jit
 def train_policy_model(
-    cost_model,
+    value_model,
     bc_policy,
     bc_optimizer,
     target_pos_obs,
@@ -329,39 +376,38 @@ def train_policy_model(
     target_union_obs,
     target_union_act,
     has_positive,
-    gamma,
-    temp,
+    alpha,
+    beta,
+    use_osil_weight=True,
 ):
-    batch_bag, horizon, _ = target_union_obs.shape
+    # Batch X Horizon X obs_dim
+    batch, horizon, _ = target_union_obs.shape
 
-    # Batch_Bag_Horizon X obs/act_dim
-    target_pos_obs = target_pos_obs.reshape(batch_bag * horizon, -1)
-    target_pos_act = target_pos_act.reshape(batch_bag * horizon, -1)
+    # Batch_Horizon X obs/act_dim
+    target_pos_obs = target_pos_obs.reshape(batch * horizon, -1)
+    target_pos_act = target_pos_act.reshape(batch * horizon, -1)
 
-    target_union_obs = target_union_obs.reshape(batch_bag * horizon, -1)
-    target_union_act = target_union_act.reshape(batch_bag * horizon, -1)
+    target_union_obs = target_union_obs.reshape(batch * horizon, -1)
+    target_union_act = target_union_act.reshape(batch * horizon, -1)
 
-    # Batch_Bag_Horizon
-    union_cost = cost_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
-    horizon_union_cost = union_cost.reshape((batch_bag, horizon))
-    # Batch_Bag
-    batch_bag_union_cost = discounted_sum(horizon_union_cost.T, gamma)
-    # weight = exp(-C / temp) / Mean [ exp(-C / temp) ]
-    exp_union_weight = jnp.exp(-batch_bag_union_cost / temp)
-    union_weight = exp_union_weight / exp_union_weight.mean()
+    union_weight, qmean, vmean = compute_value_weight(
+        value_model=value_model,
+        bc_policy=bc_policy,
+        obs=target_union_obs,
+        act=target_union_act,
+        alpha=alpha,
+        beta=beta,
+        use_osil_weight=use_osil_weight,
+    )
 
     def loss_fun(bc_policy):
         pred_pos_act, *_ = bc_policy(target_pos_obs)
-        flat_pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
-        horizon_pos_loss = has_positive * flat_pos_loss.reshape((batch_bag, horizon))
-        batch_bag_pos_loss = discounted_sum(horizon_pos_loss.T, gamma)
-        pos_loss = jnp.mean(batch_bag_pos_loss)
+        pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        pos_loss = has_positive * jnp.mean(pos_loss)
 
         pred_union_act, *_ = bc_policy(target_union_obs)
-        flat_union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
-        horizon_union_loss = flat_union_loss.reshape((batch_bag, horizon))
-        batch_bag_union_loss = discounted_sum(horizon_union_loss.T, gamma)
-        union_loss = jnp.mean(union_weight * batch_bag_union_loss)
+        union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        union_loss = jnp.mean(union_weight * union_loss)
 
         loss = pos_loss + union_loss
         return loss, (pos_loss, union_loss)
@@ -370,7 +416,7 @@ def train_policy_model(
     (loss, aux_values), grads = grad_fun(bc_policy)
     bc_optimizer.update(grads)
 
-    return loss, *aux_values
+    return loss, *aux_values, qmean, vmean
 
 
 def main(args, cfg_env=None):
@@ -399,6 +445,7 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["value_weight_temp"] = args.value_weight_temp or config["value_weight_temp"]
     config["bc_weight_temp"] = args.bc_weight_temp
+    config["use_osil_weight"] = args.use_osil_weight
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
 
@@ -445,13 +492,13 @@ def main(args, cfg_env=None):
         ),
     )
 
-    value_cost = EnsembleValue(
+    value_model = EnsembleValue(
         rngs=rngs,
         x_dim=obs_space.shape[0] + act_space.shape[0],
         hidden_size=config["hidden_size"],
     )
     value_optimizer = nnx.Optimizer(
-        model=value_cost,
+        model=value_model,
         tx=optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
             optax.adamw(
@@ -459,7 +506,7 @@ def main(args, cfg_env=None):
             ),
         ),
     )
-    value_cost_target = deepcopy(value_cost)
+    value_model_target = deepcopy(value_model)
 
     # data
     agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
@@ -571,31 +618,70 @@ def main(args, cfg_env=None):
                 union_neg_pref_loss,
                 pref_loss,
                 contrastive_loss,
-            ) = train_cost_model(
+            ) = jnp.zeros(6, dtype=jnp.float32)
+            if (steps % config["update_cost_freq"]) == 0:
+                (
+                    cost_loss,
+                    pos_neg_pref_loss,
+                    pos_union_pref_loss,
+                    union_neg_pref_loss,
+                    pref_loss,
+                    contrastive_loss,
+                ) = train_cost_model(
+                    cost_model=cost_model,
+                    cost_optimizer=cost_optimizer,
+                    target_pos_obs=target_pos_obs,
+                    target_pos_act=target_pos_act,
+                    target_neg_obs=target_neg_obs,
+                    target_neg_act=target_neg_act,
+                    target_union_obs=target_union_obs,
+                    target_union_act=target_union_act,
+                    has_positive=has_positive,
+                    gamma=config["gamma"],
+                )
+
+            value_loss = train_value_model(
                 cost_model=cost_model,
-                cost_optimizer=cost_optimizer,
-                target_pos_obs=target_pos_obs,
-                target_pos_act=target_pos_act,
-                target_neg_obs=target_neg_obs,
-                target_neg_act=target_neg_act,
-                target_union_obs=target_union_obs,
-                target_union_act=target_union_act,
-                has_positive=has_positive,
+                bc_policy=bc_policy_target,
+                target_value_model=value_model_target,
+                value_model=value_model,
+                value_optimizer=value_optimizer,
+                target_obs=target_union_obs,
+                target_act=target_union_act,
+                target_done=target_union_done,
                 gamma=config["gamma"],
             )
 
-            bc_loss, bc_pos_loss, bc_union_loss = train_policy_model(
-                cost_model=cost_model,
-                bc_policy=bc_policy,
-                bc_optimizer=bc_optimizer,
-                target_pos_obs=target_pos_obs,
-                target_pos_act=target_pos_act,
-                target_union_obs=target_union_obs,
-                target_union_act=target_union_act,
-                has_positive=has_positive,
-                gamma=config["gamma"],
-                temp=config["cost_weight_temp"],
-            )
+            (
+                bc_loss,
+                bc_pos_loss,
+                bc_union_loss,
+                bc_qmean,
+                bc_vmean,
+            ) = jnp.zeros(5, dtype=jnp.float32)
+            if (steps % config["update_bc_freq"]) == 0:
+                (
+                    bc_loss,
+                    bc_pos_loss,
+                    bc_union_loss,
+                    bc_qmean,
+                    bc_vmean,
+                ) = train_policy_model(
+                    value_model=value_model,
+                    bc_policy=bc_policy,
+                    bc_optimizer=bc_optimizer,
+                    target_pos_obs=target_pos_obs,
+                    target_pos_act=target_pos_act,
+                    target_union_obs=target_union_obs,
+                    target_union_act=target_union_act,
+                    has_positive=has_positive,
+                    alpha=config["value_weight_temp"],
+                    beta=config["bc_weight_temp"],
+                    use_osil_weight=config["use_osil_weight"],
+                )
+
+                polyak_update(value_model_target, value_model, config["update_tau"])
+                polyak_update(bc_policy_target, bc_policy, config["update_tau"])
 
             logger.logged = False
 
@@ -620,23 +706,27 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Train/Steps", steps)
 
                 logger.log_tabular("Loss/Loss_cost", cost_loss.item())
-                logger.log_tabular("Loss/Loss_pos_neg_cost", pos_neg_cost_loss.item())
                 logger.log_tabular(
-                    "Loss/Loss_pos_union_cost", pos_union_cost_loss.item()
+                    "Loss/Loss_pos_neg_pref_cost", pos_neg_pref_loss.item()
                 )
                 logger.log_tabular(
-                    "Loss/Loss_union_neg_cost", union_neg_cost_loss.item()
+                    "Loss/Loss_pos_union_pref_cost", pos_union_pref_loss.item()
                 )
+                logger.log_tabular(
+                    "Loss/Loss_union_neg_pref_cost", union_neg_pref_loss.item()
+                )
+                logger.log_tabular("Loss/Loss_pref_cost", pref_loss.item())
+                logger.log_tabular(
+                    "Loss/Loss_contrastive_cost", contrastive_loss.item()
+                )
+
+                logger.log_tabular("Loss/Loss_value", value_loss.item())
 
                 logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
                 logger.log_tabular("Loss/Loss_bc_pos_policy", bc_pos_loss.item())
                 logger.log_tabular("Loss/Loss_bc_union_policy", bc_union_loss.item())
-
-                logger.log_tabular("CostPred/pos_bag_cost", mean_pos_bag_cost.item())
-                logger.log_tabular("CostPred/neg_bag_cost", mean_neg_bag_cost.item())
-                logger.log_tabular(
-                    "CostPred/union_bag_cost", mean_union_bag_cost.item()
-                )
+                logger.log_tabular("Loss/bc_q_value", bc_qmean.item())
+                logger.log_tabular("Loss/bc_v_value", bc_vmean.item())
 
                 logger.log_tabular(
                     "Reward/pos", jnp.sum(target_pos_reward, axis=-1).mean().item()
@@ -664,6 +754,10 @@ def main(args, cfg_env=None):
                     get_tree_norm(nnx.state(cost_model, nnx.Param)),
                 )
                 logger.log_tabular(
+                    "Norm/value_model",
+                    get_tree_norm(nnx.state(value_model, nnx.Param)),
+                )
+                logger.log_tabular(
                     "Norm/bc_policy",
                     get_tree_norm(nnx.state(bc_policy, nnx.Param)),
                 )
@@ -677,6 +771,11 @@ def main(args, cfg_env=None):
                 )
                 logger.nn_model_save(
                     itr=steps,
+                    nn_model_saver_element=value_model,
+                    prefix="value",
+                )
+                logger.nn_model_save(
+                    itr=steps,
                     nn_model_saver_element=bc_policy,
                     prefix="bc_policy",
                 )
@@ -685,6 +784,7 @@ def main(args, cfg_env=None):
                 break
 
     logger.nn_model_save(itr=steps, nn_model_saver_element=cost_model, prefix="cost")
+    logger.nn_model_save(itr=steps, nn_model_saver_element=value_model, prefix="value")
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=bc_policy, prefix="bc_policy"
     )

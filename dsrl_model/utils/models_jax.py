@@ -198,7 +198,7 @@ class TdmpcValue(nnx.Module):
             nnx.Linear(hidden_size, hidden_size, rngs=rngs),
             nnx.elu,
             nnx.Linear(
-                hidden_size, 1, kernal_init=zero_init, bias_init=zero_init, rngs=rngs
+                hidden_size, 1, kernel_init=zero_init, bias_init=zero_init, rngs=rngs
             ),
         )
 
