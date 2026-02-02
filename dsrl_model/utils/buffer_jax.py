@@ -3,11 +3,54 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import struct
+
+
+@struct.dataclass
+class BatchData:
+    horizon: int = struct.field(pytree_node=False)
+
+    pos_obs: jnp.ndarray
+    pos_act: jnp.ndarray
+    pos_reward: jnp.ndarray
+    pos_cost: jnp.ndarray
+
+    neg_obs: jnp.ndarray
+    neg_act: jnp.ndarray
+    neg_reward: jnp.ndarray
+    neg_cost: jnp.ndarray
+
+    union_obs: jnp.ndarray
+    union_act: jnp.ndarray
+    union_reward: jnp.ndarray
+    union_cost: jnp.ndarray
+    union_idx: jnp.ndarray
+    union_done: jnp.ndarray = None
 
 
 @jax.jit
-def update_arr_jit(arr, idxs, val):
-    return arr.at[idxs].set(val)
+def get_batch_data_obj(obj, p_idx, n_idx, u_idx):
+    horizon_offsets = jnp.arange(obj.horizon)
+    p_h_idx = p_idx[..., None] + horizon_offsets
+    n_h_idx = n_idx[..., None] + horizon_offsets
+    u_h_idx = u_idx[..., None] + horizon_offsets
+
+    return BatchData(
+        horizon=obj.horizon,
+        pos_obs=obj.pos_obs[p_h_idx],
+        pos_act=obj.pos_act[p_h_idx],
+        pos_reward=obj.pos_reward[p_h_idx],
+        pos_cost=obj.pos_cost[p_h_idx],
+        neg_obs=obj.neg_obs[n_h_idx],
+        neg_act=obj.neg_act[n_h_idx],
+        neg_reward=obj.neg_reward[n_h_idx],
+        neg_cost=obj.neg_cost[n_h_idx],
+        union_obs=obj.union_obs[u_h_idx],
+        union_act=obj.union_act[u_h_idx],
+        union_reward=obj.union_reward[u_h_idx],
+        union_cost=obj.union_cost[u_h_idx],
+        union_idx=u_idx,
+    )
 
 
 @functools.partial(jax.jit, static_argnames=["horizon"])
@@ -76,6 +119,92 @@ def sample_horizon_arr(arr, idx, horizon):
 @jax.jit
 def sample_arr(arr, idx):
     return arr[idx]
+
+
+@jax.jit
+def update_arr_jit(arr, idxs, val):
+    return arr.at[idxs].set(val)
+
+
+@struct.dataclass
+class OnPolicyDataBuffer:
+    horizon: int = struct.field(pytree_node=False)
+    batch_size: int = struct.field(pytree_node=False)
+
+    pos_obs: jnp.ndarray
+    pos_act: jnp.ndarray
+    pos_reward: jnp.ndarray
+    pos_cost: jnp.ndarray
+    pos_priorities: jnp.ndarray
+
+    neg_obs: jnp.ndarray
+    neg_act: jnp.ndarray
+    neg_reward: jnp.ndarray
+    neg_cost: jnp.ndarray
+    neg_priorities: jnp.ndarray
+
+    union_obs: jnp.ndarray
+    union_act: jnp.ndarray
+    union_reward: jnp.ndarray
+    union_cost: jnp.ndarray
+    union_priorities: jnp.ndarray
+
+    @staticmethod
+    def sample_idxs(obj, key, num_steps):
+        key1, key2, key3 = jax.random.split(key, 3)
+
+        pos_probs = obj.pos_priorities / obj.pos_priorities.sum()
+        pos_total = len(pos_probs)
+        pos_idxs = jax.random.choice(
+            key=key1,
+            a=pos_total,
+            shape=(num_steps, obj.batch_size),
+            p=pos_probs,
+            replace=True,
+        )
+
+        neg_probs = obj.neg_priorities / obj.neg_priorities.sum()
+        neg_total = len(neg_probs)
+        neg_idxs = jax.random.choice(
+            key=key2,
+            a=neg_total,
+            shape=(num_steps, obj.batch_size),
+            p=neg_probs,
+            replace=True,
+        )
+
+        union_probs = obj.union_priorities / obj.union_priorities.sum()
+        union_total = len(union_probs)
+        union_idxs = jax.random.choice(
+            key=key3,
+            a=union_total,
+            shape=(num_steps, obj.batch_size),
+            p=union_probs,
+            replace=True,
+        )
+
+        return pos_idxs, neg_idxs, union_idxs
+
+    @staticmethod
+    def sample_batch(obj, p_idx, n_idx, u_idx):
+        return get_batch_data_obj(
+            obj=obj,
+            p_idx=p_idx,
+            n_idx=n_idx,
+            u_idx=u_idx,
+        )
+
+
+@struct.dataclass
+class OSILDataBuffer(OnPolicyDataBuffer):
+    union_done: jnp.ndarray
+
+    @staticmethod
+    def sample_batch(obj, p_idx, n_idx, u_idx):
+        batch = super().sample_batch(obj, p_idx, n_idx, u_idx)
+        h_union_done = sample_horizon_arr(obj.union_done, u_idx, obj.horizon)
+        batch = batch.replace(union_done=h_union_done)
+        return batch
 
 
 class OnPolicyBuffer:
@@ -235,6 +364,28 @@ class OnPolicyBuffer:
             self._union_priorities, idxs, priorities
         )
 
+    def get_data_buffer(self, data_buffer_cls=OnPolicyDataBuffer, **kwargs):
+        return data_buffer_cls(
+            horizon=self.horizon,
+            batch_size=self.batch_size,
+            pos_obs=self._pos_obs,
+            pos_act=self._pos_act,
+            pos_reward=self._pos_reward,
+            pos_cost=self._pos_cost,
+            pos_priorities=self._pos_priorities,
+            neg_obs=self._neg_obs,
+            neg_act=self._neg_act,
+            neg_reward=self._neg_reward,
+            neg_cost=self._neg_cost,
+            neg_priorities=self._neg_priorities,
+            union_obs=self._union_obs,
+            union_act=self._union_act,
+            union_reward=self._union_reward,
+            union_cost=self._union_cost,
+            union_priorities=self._union_priorities,
+            **kwargs,
+        )
+
     def sample_batch(self, p_idx, n_idx, u_idx):
         return batched_data(
             pos_obs=self._pos_obs,
@@ -337,10 +488,8 @@ class OSILBuffer(OnPolicyBuffer):
         super().to_jax_ndarray()
         self._union_done = jnp.array(self._union_done)
 
-    def sample_batch(self, p_idx, n_idx, u_idx):
-        batch = super().sample_batch(p_idx, n_idx, u_idx)
-        h_union_done = sample_horizon_arr(self._union_done, u_idx, self.horizon)
-        return (*batch, h_union_done)
+    def get_data_buffer(self):
+        return super().get_data_buffer(OSILDataBuffer, union_done=self._union_done)
 
 
 class SafeCLBuffer(OnPolicyBuffer):

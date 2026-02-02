@@ -2,6 +2,7 @@ import argparse
 from distutils.util import strtobool
 
 import gymnasium
+from flax import struct
 
 
 class ActionRepeater(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
@@ -37,6 +38,29 @@ def get_params_norm(params, grads=False):
         else:
             total_norm += p.data.norm(2).item()
     return total_norm
+
+
+def make_static_config_from_dict(name: str, d: dict):
+    annotations = {}
+    defaults = {}
+
+    for k, v in d.items():
+        annotations[k] = type(v)
+        defaults[k] = struct.field(
+            default=v,
+            pytree_node=False,  # made it fixed / immutable ?
+        )
+
+    cls = type(
+        name,
+        (),
+        {
+            "__annotations__": annotations,
+            **defaults,
+        },
+    )
+
+    return struct.dataclass(cls)
 
 
 def single_agent_args():
