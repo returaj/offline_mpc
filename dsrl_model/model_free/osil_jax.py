@@ -385,7 +385,6 @@ def policy_loss_grad_fun(
     return loss, grads, *aux_values, qmean, vmean
 
 
-@nnx.jit
 def train_step(
     cost_model,
     cost_optimizer,
@@ -463,6 +462,7 @@ def train_step(
     )
 
 
+@nnx.jit
 def train_n_steps(
     cost_model,
     cost_optimizer,
@@ -483,7 +483,18 @@ def train_n_steps(
         data_buffer, key, num_steps
     )
 
-    for i in range(num_steps):
+    def body_fun(i, carry):
+        (
+            _,
+            cost_model,
+            cost_optimizer,
+            value_model_target,
+            value_model,
+            value_optimizer,
+            bc_policy_target,
+            bc_policy,
+            bc_optimizer,
+        ) = carry
 
         batch_data = data_buffer.sample_batch(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
@@ -503,6 +514,32 @@ def train_n_steps(
             has_positive=has_positive,
             steps=i,
         )
+
+        return (
+            val,
+            cost_model,
+            cost_optimizer,
+            value_model_target,
+            value_model,
+            value_optimizer,
+            bc_policy_target,
+            bc_policy,
+            bc_optimizer,
+        )
+
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 18
+    init_carry = (
+        init_val,
+        cost_model,
+        cost_optimizer,
+        value_model_target,
+        value_model,
+        value_optimizer,
+        bc_policy_target,
+        bc_policy,
+        bc_optimizer,
+    )
+    val, *_ = nnx.fori_loop(0, num_steps, body_fun, init_carry)
 
     return val, num_steps
 
