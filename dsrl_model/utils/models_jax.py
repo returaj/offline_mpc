@@ -169,6 +169,52 @@ class ExpCostModel(nnx.Module):
         return jax.nn.sigmoid(x)
 
 
+class ContrastiveCostModel(nnx.Module):
+    def __init__(self, rngs, x_dims, hidden_size=256):
+        sizes = [x_dims, hidden_size, hidden_size, 128]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nnx.elu if j < len(sizes) - 2 else jax.nn.identity
+            affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
+            layers += [affine_layer, act]
+        self.encoder = nnx.Sequential(*layers)
+        self.projection = nnx.Linear(sizes[-1], 1, rngs=rngs)
+
+    def __call__(self, x):
+        z = l2_normalize(self.encoder(x), axis=-1)
+        proj_z = jnp.squeeze(self.projection(z), axis=-1)
+        cost = jax.nn.sigmoid(proj_z)
+        return z, cost
+
+
+class TdmpcValue(nnx.Module):
+    def __init__(self, rngs, x_dim, hidden_size=256):
+        zero_init = nnx.initializers.zeros
+
+        self.model = nnx.Sequential(
+            nnx.Linear(x_dim, hidden_size, rngs=rngs),
+            nnx.LayerNorm(hidden_size, rngs=rngs),
+            nnx.tanh,
+            nnx.Linear(hidden_size, hidden_size, rngs=rngs),
+            nnx.elu,
+            nnx.Linear(
+                hidden_size, 1, kernel_init=zero_init, bias_init=zero_init, rngs=rngs
+            ),
+        )
+
+    def __call__(self, x):
+        return jnp.squeeze(self.model(x), axis=-1)
+
+
+class EnsembleValue(nnx.Module):
+    def __init__(self, rngs, x_dim, hidden_size=256):
+        self.v1 = TdmpcValue(rngs, x_dim, hidden_size)
+        self.v2 = TdmpcValue(rngs, x_dim, hidden_size)
+
+    def __call__(self, x):
+        return self.v1(x), self.v2(x)
+
+
 def positionalencoding1d(d_model, length):
     """
     Code: https://github.com/wzlxjtu/PositionalEncoding2D/blob/master/positionalembedding2d.py
