@@ -33,6 +33,7 @@ from dsrl_model.utils.models_jax import (
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
+# jax.config.update("jax_disable_jit", True)
 EPS = 1e-6
 
 default_cfg = {
@@ -272,9 +273,6 @@ def value_loss_grad_fun(
     dtype = data.union_obs.dtype
     horizon = data.horizon
 
-    # Batch X Horizon X obs_act_dim
-    target_oa = jnp.concat([data.union_obs, data.union_act], axis=-1)
-
     # mask the horizon-1 element
     mask = jnp.concat([jnp.ones(horizon - 1, dtype=dtype), jnp.zeros(1, dtype=dtype)])
 
@@ -290,6 +288,8 @@ def value_loss_grad_fun(
     )
 
     def loss_fun(value_model):
+        # Batch X Horizon X obs_act_dim
+        target_oa = jnp.concat([data.union_obs, data.union_act], axis=-1)
         # Batch X Horizon
         pred_v1, pred_v2 = value_model(target_oa)
         v1_loss = mask * optax.huber_loss(pred_v1, target_v, delta=2.0)
@@ -370,14 +370,19 @@ def policy_loss_grad_fun(
     def loss_fun(bc_policy):
         pred_pos_act, *_ = bc_policy(target_pos_obs)
         pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
-        pos_loss = has_positive * jnp.mean(pos_loss)
+        pos_bc_loss = has_positive * jnp.mean(pos_loss)
 
         pred_union_act, *_ = bc_policy(target_union_obs)
         union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
-        union_loss = jnp.mean(union_weight * union_loss)
+        union_bc_loss = jnp.mean(union_loss)
 
-        loss = pos_loss + union_loss
-        return loss, (pos_loss, union_loss)
+        union_value = jnp.maximum(
+            *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
+        )
+        union_value_loss = jnp.mean(union_weight * union_value)
+
+        loss = pos_bc_loss + union_bc_loss + union_value_loss
+        return loss, (pos_bc_loss, union_bc_loss, union_value_loss)
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(bc_policy)
@@ -436,8 +441,12 @@ def train_step(
     )
     bc_optimizer.update(policy_grads)
 
-    polyak_update(value_model_target, value_model, policy_cond * config.update_tau)
-    polyak_update(bc_policy_target, bc_policy, policy_cond * config.update_tau)
+    value_model_target = polyak_update(
+        value_model_target, value_model, policy_cond * config.update_tau
+    )
+    bc_policy_target = polyak_update(
+        bc_policy_target, bc_policy, policy_cond * config.update_tau
+    )
 
     mean_pos_reward = batch_data.pos_reward.sum(-1).mean()
     mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
@@ -527,7 +536,7 @@ def train_n_steps(
             bc_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 18
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 19
     init_carry = (
         init_val,
         cost_model,
@@ -743,11 +752,12 @@ def main(args, cfg_env=None):
             pref_loss,
             contrastive_loss,
             value_loss,
-            bc_loss,
-            bc_pos_loss,
-            bc_union_loss,
-            bc_qmean,
-            bc_vmean,
+            policy_loss,
+            policy_pos_bc_loss,
+            policy_union_bc_loss,
+            policy_union_value_loss,
+            policy_qmean,
+            policy_vmean,
             mean_pos_reward,
             mean_neg_reward,
             mean_union_reward,
@@ -793,11 +803,14 @@ def main(args, cfg_env=None):
 
             logger.log_tabular("Loss/Loss_value", value_loss.item())
 
-            logger.log_tabular("Loss/Loss_bc_policy", bc_loss.item())
-            logger.log_tabular("Loss/Loss_bc_pos_policy", bc_pos_loss.item())
-            logger.log_tabular("Loss/Loss_bc_union_policy", bc_union_loss.item())
-            logger.log_tabular("Loss/bc_q_value", bc_qmean.item())
-            logger.log_tabular("Loss/bc_v_value", bc_vmean.item())
+            logger.log_tabular("Loss/Loss_policy", policy_loss.item())
+            logger.log_tabular("Loss/Loss_policy_pos_bc", policy_pos_bc_loss.item())
+            logger.log_tabular("Loss/Loss_policy_union_bc", policy_union_bc_loss.item())
+            logger.log_tabular(
+                "Loss/Loss_policy_union_value", policy_union_value_loss.item()
+            )
+            logger.log_tabular("Loss/policy_q_value", policy_qmean.item())
+            logger.log_tabular("Loss/policy_v_value", policy_vmean.item())
 
             logger.log_tabular("Reward/pos", mean_pos_reward.item())
             logger.log_tabular("Reward/neg", mean_neg_reward.item())
