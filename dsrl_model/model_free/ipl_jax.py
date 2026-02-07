@@ -140,6 +140,7 @@ def policy_loss_grads_fun(
     )
     v_union = jnp.minimum(*value_model(target_union_obs))
     weight_union = jnp.clip((q_union - v_union) / beta, max=5.0)
+    weight_union = jnp.exp(weight_union)
     # scalar value
     weight_pos = jnp.max(weight_union)
 
