@@ -151,6 +151,12 @@ def single_agent_args():
             "help": "Default common learning rate for the models",
         },
         {
+            "name": "--lmbda",
+            "type": float,
+            "default": None,  # 1e-3 performs better
+            "help": "hyperparameter lambda value",
+        },
+        {
             "name": "--cost-weight-temp",
             "type": float,
             "default": None,
