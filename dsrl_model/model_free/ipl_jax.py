@@ -184,7 +184,9 @@ def critic_loss_grads_fun(
         q1, q2 = critic_model(jnp.concat([obs, act], axis=-1))
         q1, q2 = q2 * mask_last_horizon, q2 * mask_last_horizon
         # use mean v_next
-        v_next = jnp.mean(jnp.stack(value_model(obs)), axis=0) @ shift_one_timestep
+        # v_next = jnp.mean(jnp.stack(value_model(obs)), axis=0) @ shift_one_timestep
+        # use min v_next
+        v_next = jnp.minimum(*value_model(obs)) @ shift_one_timestep
         v_next = jnp.clip(v_next, min=-200, max=200)
         r1, r2 = q1 - gamma * v_next, q2 - gamma * v_next
         return r1, r2
@@ -296,10 +298,6 @@ def train_step(
     )
     critic_optimizer.update(critic_grads)
 
-    critic_model_target = polyak_update(
-        critic_model_target, critic_model, config.update_tau
-    )
-
     policy_loss, policy_grads, *policy_aux = policy_loss_grads_fun(
         value_model=value_model,
         critic_model=critic_model_target,
@@ -309,6 +307,10 @@ def train_step(
         beta=config.beta,
     )
     policy_optimizer.update(policy_grads)
+
+    critic_model_target = polyak_update(
+        critic_model_target, critic_model, config.update_tau
+    )
 
     mean_pos_reward = batch_data.pos_reward.sum(-1).mean()
     mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
