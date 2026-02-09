@@ -158,7 +158,7 @@ def policy_loss_grads_fun(
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(policy_model)
-    return loss, grads, *aux_values
+    return loss, grads, *aux_values, q_union.mean(), v_union.mean()
 
 
 def critic_loss_grads_fun(
@@ -183,7 +183,8 @@ def critic_loss_grads_fun(
         # Batch X Horizon
         q1, q2 = critic_model(jnp.concat([obs, act], axis=-1))
         q1, q2 = q2 * mask_last_horizon, q2 * mask_last_horizon
-        v_next = jnp.minimum(*value_model(obs)) @ shift_one_timestep
+        # use mean v_next
+        v_next = jnp.mean(jnp.stack(value_model(obs)), axis=0) @ shift_one_timestep
         v_next = jnp.clip(v_next, min=-200, max=200)
         r1, r2 = q1 - gamma * v_next, q2 - gamma * v_next
         return r1, r2
@@ -256,7 +257,7 @@ def value_loss_grads_fun(
         )
         neg_loss = xql_rescale_loss(value_model, data.neg_obs, data.neg_act)
         union_loss = xql_rescale_loss(value_model, data.union_obs, data.union_act)
-        loss = (pos_loss + neg_loss + union_loss) / 3
+        loss = pos_loss + neg_loss + union_loss
         return loss, (pos_loss, neg_loss, union_loss)
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -295,6 +296,10 @@ def train_step(
     )
     critic_optimizer.update(critic_grads)
 
+    critic_model_target = polyak_update(
+        critic_model_target, critic_model, config.update_tau
+    )
+
     policy_loss, policy_grads, *policy_aux = policy_loss_grads_fun(
         value_model=value_model,
         critic_model=critic_model_target,
@@ -304,10 +309,6 @@ def train_step(
         beta=config.beta,
     )
     policy_optimizer.update(policy_grads)
-
-    critic_model_target = polyak_update(
-        critic_model_target, critic_model, config.update_tau
-    )
 
     mean_pos_reward = batch_data.pos_reward.sum(-1).mean()
     mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
@@ -393,7 +394,7 @@ def train_n_steps(
             policy_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 17
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 19
     init_carry = (
         init_val,
         value_model,
@@ -611,6 +612,8 @@ def main(args, cfg_env=None):
             policy_loss,
             policy_pos_loss,
             policy_union_loss,
+            mean_union_q,
+            mean_union_v,
             mean_pos_reward,
             mean_neg_reward,
             mean_union_reward,
@@ -662,6 +665,8 @@ def main(args, cfg_env=None):
             logger.log_tabular("Loss/Loss_policy", policy_loss.item())
             logger.log_tabular("Loss/Loss_policy_pos_loss", policy_pos_loss.item())
             logger.log_tabular("Loss/Loss_policy_union_loss", policy_union_loss.item())
+            logger.log_tabular("Loss/policy_union_q", mean_union_q.item())
+            logger.log_tabular("Loss/policy_union_v", mean_union_v.item())
 
             logger.log_tabular("Reward/pos", mean_pos_reward.item())
             logger.log_tabular("Reward/neg", mean_neg_reward.item())
