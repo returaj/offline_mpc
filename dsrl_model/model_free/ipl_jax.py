@@ -257,10 +257,13 @@ def value_loss_grads_fun(
         pos_loss = has_positive * xql_rescale_loss(
             value_model, data.pos_obs, data.pos_act
         )
-        neg_loss = xql_rescale_loss(value_model, data.neg_obs, data.neg_act)
+        # neg trajectory is already part of union dataset
+        # training on neg trajectory with full batch size is changing the data
+        # distribution and we are overweighing the neg trajectory in the dataset
+        # neg_loss = xql_rescale_loss(value_model, data.neg_obs, data.neg_act)
         union_loss = xql_rescale_loss(value_model, data.union_obs, data.union_act)
-        loss = pos_loss + neg_loss + union_loss
-        return loss, (pos_loss, neg_loss, union_loss)
+        loss = pos_loss + union_loss
+        return loss, (pos_loss, union_loss)
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(value_model)
@@ -312,11 +315,11 @@ def train_step(
         critic_model_target, critic_model, config.update_tau
     )
 
-    mean_pos_reward = batch_data.pos_reward.sum(-1).mean()
+    mean_pos_reward = has_positive * batch_data.pos_reward.sum(-1).mean()
     mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
     mean_union_reward = batch_data.union_reward.sum(-1).mean()
 
-    mean_pos_cost = batch_data.pos_cost.sum(-1).mean()
+    mean_pos_cost = has_positive * batch_data.pos_cost.sum(-1).mean()
     mean_neg_cost = batch_data.neg_cost.sum(-1).mean()
     mean_union_cost = batch_data.union_cost.sum(-1).mean()
 
@@ -396,7 +399,7 @@ def train_n_steps(
             policy_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 19
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 18
     init_carry = (
         init_val,
         value_model,
@@ -605,7 +608,6 @@ def main(args, cfg_env=None):
         (
             value_loss,
             value_pos_loss,
-            value_neg_loss,
             value_union_loss,
             critic_loss,
             critic_pos_neg_loss,
@@ -650,7 +652,7 @@ def main(args, cfg_env=None):
 
             logger.log_tabular("Loss/Loss_value", value_loss.item())
             logger.log_tabular("Loss/Loss_value_pos", value_pos_loss.item())
-            logger.log_tabular("Loss/Loss_value_neg", value_neg_loss.item())
+            # logger.log_tabular("Loss/Loss_value_neg", value_neg_loss.item())
             logger.log_tabular("Loss/Loss_value_union", value_union_loss.item())
 
             logger.log_tabular("Loss/Loss_critic", critic_loss.item())
