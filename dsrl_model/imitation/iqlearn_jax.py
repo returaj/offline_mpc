@@ -343,7 +343,7 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
-    trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
+    trajectory_cfg["num_negative_trajectories"] = 2
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
     trajectory_cfg["data_inpaint"] = args.data_inpaint
@@ -421,6 +421,12 @@ def main(args, cfg_env=None):
     pos_rewards = pos_data["rewards"]
     pos_costs = pos_data["costs"]
 
+    neg_observations = neg_data["observations"]
+    neg_actions = neg_data["actions"]
+    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+    neg_rewards = neg_data["rewards"]
+    neg_costs = neg_data["costs"]
+
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
@@ -432,16 +438,12 @@ def main(args, cfg_env=None):
         pos_observations.shape[1] == ep_len
     ), f"{pos_observations.shape[1]} episode length is different from {ep_len}"
 
-    # In imitation learning we do not have neg dataset
-    # Our buffer implementation requires atleast 1 data_size
-    # neg_data will be some dummy data
-    neg_data_size = 1
     buffer = OnPolicyBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=np.prod(pos_observations.shape[:-1]),
-        neg_data_size=neg_data_size,
+        neg_data_size=np.prod(neg_observations.shape[:-1]),
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -452,6 +454,11 @@ def main(args, cfg_env=None):
         pos_observations, pos_actions, pos_dones, pos_rewards, pos_costs
     ):
         buffer.add(obs, act, done, reward, cost, is_pos=True)
+
+    for obs, act, done, reward, cost in zip(
+        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
+    ):
+        buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs
