@@ -112,10 +112,13 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         component_dist = distrax.Independent(component_dist, 1)
         pretanh_action_dist = distrax.MixtureSameFamily(mixture_dist, component_dist)
 
-        mixture_sample = gumbel_softmax(self.rngs(), mixture_logits, tau=1.0, hard=True)
-        component_sample = component_dist.sample(seed=self.rngs())
-        pretanh_actions = jnp.einsum("ij,ijk->ik", mixture_sample, component_sample)
-        actions = jax.nn.tanh(pretanh_actions)
+        pretanh_actions = pretanh_action_dist.sample(seed=self.rngs())
+        actions = jnp.tanh(pretanh_actions)
+
+        # mixture_sample = gumbel_softmax(self.rngs(), mixture_logits, tau=1.0, hard=True)
+        # component_sample = component_dist.sample(seed=self.rngs())
+        # pretanh_actions = jnp.einsum("ij,ijk->ik", mixture_sample, component_sample)
+        # actions = jax.nn.tanh(pretanh_actions)
 
         pretanh_logp = pretanh_action_dist.log_prob(pretanh_actions)
         jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
