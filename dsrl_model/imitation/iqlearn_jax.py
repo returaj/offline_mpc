@@ -57,8 +57,8 @@ trajectory_cfg = {
     "target_cost": 25.0,
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
     "inpaint_ranges": None,
-    "num_positive_trajectories": 0,
-    "num_negative_trajectories": 50,
+    "num_positive_trajectories": 5,
+    "num_negative_trajectories": 0,
     "num_union_trajectories": -1,
 }
 
