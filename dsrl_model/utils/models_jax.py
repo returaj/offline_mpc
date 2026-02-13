@@ -71,8 +71,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         act_dim,
         hidden_size=256,
         num_components=2,
-        mean_range=(-7.0, 7.0),
-        logstd_range=(-5.0, 2.0),
+        mean_range=(-5.0, 5.0),
+        logstd_range=(-5.0, 1.0),
         eps=EPS,
         mdn_temperature=1.0,
     ):
