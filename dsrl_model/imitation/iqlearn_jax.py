@@ -187,16 +187,16 @@ def critic_loss_grads_fun(
 
     def iqlearn_loss(q, v, vnext):
         # Batch X Horizon
-        reward = pos_idx * mask_last_horizon * (q - gamma * vnext)
+        reward = mask_last_horizon * (q - gamma * vnext)
         total_pos_reward = batch * (horizon - 1)
-        reward_loss = -jnp.sum(reward) / total_pos_reward
+        reward_pos_loss = -jnp.sum(pos_idx * reward) / total_pos_reward
         # Batch X Horizon
         v0 = mask_last_horizon * (v - gamma * vnext)
         value_loss = v0.mean()
         # Batch X Horizon
-        chi_loss = 1 / total_pos_reward * 1 / (4 * lmbda) * (reward**2).sum()
-        loss = reward_loss + value_loss + chi_loss
-        return loss, reward_loss, value_loss, chi_loss
+        chi_loss = 1 / (4 * lmbda) * (reward**2).mean()
+        loss = reward_pos_loss + value_loss + chi_loss
+        return loss, reward_pos_loss, value_loss, chi_loss
 
     def loss_fun(critic_model):
         q1, q2 = critic_model(jnp.concat([target_obs, target_act], axis=-1))
