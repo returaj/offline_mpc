@@ -135,7 +135,10 @@ def policy_loss_grads_fun(
         pred_act, log_prob, *_ = policy_model(target_obs)
         q = jnp.minimum(*critic_model(jnp.concat([target_obs, pred_act], axis=-1)))
         loss = -(q - alpha * log_prob).mean()
-        return loss, (-log_prob.mean(),)
+        return loss, (
+            q.mean(),
+            -log_prob.mean(),
+        )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(policy_model)
@@ -314,7 +317,7 @@ def train_n_steps(
             policy_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 12
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 13
     init_carry = (
         init_val,
         critic_model_target,
@@ -499,6 +502,7 @@ def main(args, cfg_env=None):
             critic_value_loss,
             critic_chi_loss,
             policy_loss,
+            policy_q,
             policy_entropy,
             mean_pos_reward,
             mean_neg_reward,
@@ -540,6 +544,7 @@ def main(args, cfg_env=None):
             logger.log_tabular("Loss/Loss_critic_chi_loss", critic_chi_loss.item())
 
             logger.log_tabular("Loss/Loss_policy", policy_loss.item())
+            logger.log_tabular("Loss/policy_qvalue", policy_q.item())
             logger.log_tabular("Loss/policy_entropy", policy_entropy.item())
 
             logger.log_tabular("Reward/pos", mean_pos_reward.item())

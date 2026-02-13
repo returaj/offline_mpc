@@ -121,7 +121,12 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         # actions = jax.nn.tanh(pretanh_actions)
 
         pretanh_logp = pretanh_action_dist.log_prob(pretanh_actions)
-        jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
+        # jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
+        jacobian_det = jnp.sum(
+            2.0
+            * (jnp.log(2.0) - pretanh_actions - nnx.softplus(-2.0 * pretanh_actions)),
+            axis=-1,
+        )
         log_prob = pretanh_logp - jacobian_det
 
         return actions, log_prob, pretanh_actions, pretanh_action_dist
