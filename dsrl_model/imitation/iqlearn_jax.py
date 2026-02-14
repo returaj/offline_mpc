@@ -45,6 +45,7 @@ default_cfg = {
     "bag_size": 1,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
+    "update_critic_freq": 2,
     "update_tau": 0.005,
     "train_horizon": 5,  # 20
     "weight_decay": 0.01,
@@ -229,7 +230,9 @@ def train_step(
     policy_optimizer,
     batch_data,
     config,
+    steps,
 ):
+    critic_cond = (steps % config.update_critic_freq) == 0
     critic_loss, critic_grads, *critic_aux = critic_loss_grads_fun(
         critic_model_target=critic_model_target,
         critic_model=critic_model,
@@ -238,6 +241,10 @@ def train_step(
         gamma=config.gamma,
         alpha=config.alpha,
         lmbda=config.lmbda,
+    )
+    critic_grads = jax.tree.map(
+        lambda g: jnp.where(critic_cond, g, jnp.zeros_like(g)),
+        critic_grads,
     )
     critic_optimizer.update(critic_grads)
 
@@ -314,6 +321,7 @@ def train_n_steps(
             policy_optimizer=policy_optimizer,
             batch_data=batch_data,
             config=config,
+            steps=i,
         )
 
         return (
