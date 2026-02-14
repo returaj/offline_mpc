@@ -41,7 +41,7 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 10.0,
+    "max_grad_norm": 1.0,
     "bag_size": 1,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
@@ -154,6 +154,9 @@ def critic_loss_grads_fun(
     alpha,
     lmbda,
 ):
+    # using target network was making the critic learning very unstable
+    del critic_model_target
+
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.pos_obs.shape
 
@@ -165,16 +168,20 @@ def critic_loss_grads_fun(
     shift_one_timestep = jnp.eye(horizon, k=-1, dtype=dtype)
 
     # 2Batch
+    # pos_idx = jnp.ones(batch, dtype=dtype)
     pos_idx = jnp.concat([jnp.ones(batch, dtype=dtype), jnp.zeros(batch, dtype=dtype)])
     # 2Batch X 1
     pos_idx = pos_idx[:, None]
     # 2Batch X Horizon X obs/act_dim
+    # target_obs, target_act = data.pos_obs, data.pos_act
     target_obs = jnp.concat([data.pos_obs, data.union_obs], axis=0)
     target_act = jnp.concat([data.pos_act, data.union_act], axis=0)
 
     b2, h, _ = target_obs.shape
     # 2Batch X act_dim
-    pi_act, pi_log_prob, *_ = policy_model(target_obs.reshape(b2 * h, -1))
+    pi_act, pi_log_prob, *_ = jax.lax.stop_gradient(
+        policy_model(target_obs.reshape(b2 * h, -1))
+    )
 
     def get_vpi(critic, obs):
         # 2Batch X obs_dim
@@ -201,7 +208,8 @@ def critic_loss_grads_fun(
     def loss_fun(critic_model):
         q1, q2 = critic_model(jnp.concat([target_obs, target_act], axis=-1))
         v = get_vpi(critic_model, target_obs)
-        vnext = get_vpi(critic_model_target, target_obs) @ shift_one_timestep
+        # vnext = get_vpi(critic_model_target, target_obs) @ shift_one_timestep
+        vnext = v @ shift_one_timestep
         qloss1, *aux_values1 = iqlearn_loss(q1, v, vnext)
         qloss2, *aux_values2 = iqlearn_loss(q2, v, vnext)
         loss = (qloss1 + qloss2) / 2
