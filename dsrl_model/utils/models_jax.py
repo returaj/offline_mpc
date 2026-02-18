@@ -97,7 +97,7 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         self.means = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
         self.logstds = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
 
-    def __call__(self, obs):
+    def get_pretanh_action_dist(self, obs):
         x = self.pre_encoder(obs)
 
         mixture_logits = self.logits(x) / self.mdn_temp
@@ -111,6 +111,11 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         component_dist = distrax.Normal(loc=means, scale=stds)
         component_dist = distrax.Independent(component_dist, 1)
         pretanh_action_dist = distrax.MixtureSameFamily(mixture_dist, component_dist)
+
+        return pretanh_action_dist
+
+    def __call__(self, obs):
+        pretanh_action_dist = self.get_pretanh_action_dist(obs)
 
         pretanh_actions = pretanh_action_dist.sample(seed=self.rngs())
         actions = jnp.tanh(pretanh_actions)
@@ -130,6 +135,21 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         log_prob = pretanh_logp - jacobian_det
 
         return actions, log_prob, pretanh_actions, pretanh_action_dist
+
+    def get_log_prob(self, obs, act):
+        act = jnp.clip(act, -1.0 + self.eps, 1.0 - self.eps)
+        pretanh_act = jnp.atanh(act)
+
+        pretanh_dist = self.get_pretanh_action_dist(obs)
+        pretanh_logp = pretanh_dist.log_prob(pretanh_act)
+        # jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
+        jacobian_det = jnp.sum(
+            2.0 * (jnp.log(2.0) - pretanh_act - nnx.softplus(-2.0 * pretanh_act)),
+            axis=-1,
+        )
+        log_prob = pretanh_logp - jacobian_det
+
+        return log_prob
 
     @functools.partial(jax.jit, static_argnums=0)
     def action_w_key(self, key, obs, deterministic=False):
@@ -167,7 +187,7 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
 
 class ExpCostModel(nnx.Module):
-    def __init__(self, rngs, x_dims, hidden_size=256):
+    def __init__(self, rngs, x_dims, hidden_size=256, clip_range=(0.0, 1.0)):
         sizes = [x_dims, hidden_size, hidden_size, 1]
         layers = list()
         for j in range(len(sizes) - 1):
@@ -175,10 +195,13 @@ class ExpCostModel(nnx.Module):
             affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
             layers += [affine_layer, act]
         self.model = nnx.Sequential(*layers)
+        self.min, self.max = clip_range
 
     def __call__(self, x):
         x = jnp.squeeze(self.model(x), axis=-1)
-        return jax.nn.sigmoid(x)
+        ret = jax.nn.sigmoid(x)
+        ret = jnp.clip(ret, min=self.min, max=self.max)
+        return ret
 
 
 class ContrastiveCostModel(nnx.Module):
