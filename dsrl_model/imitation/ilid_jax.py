@@ -43,7 +43,9 @@ default_cfg = {
     "hidden_size": 256,
     "max_grad_norm": 1.0,
     "decay": 0.9,
+    "alpha": 1.0,
     "lmbda": 0.85,
+    "pu_nu": 0.5,
     "rollback": 5,
     "action_repeat": 1,  # set to 2, min value is 1
     "update_tau": 0.005,
@@ -153,7 +155,7 @@ def train_n_steps_policy(
         def loss_fun(model):
             logp_pos = model.get_log_prob(pos_obs, pos_act)
             logp_union = union_weight * model.get_log_prob(union_obs, union_act)
-            return -jnp.mean(logp_pos) - jnp.mean(logp_union)
+            return -config.alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
 
         grad_fun = nnx.value_and_grad(loss_fun)
         loss, grads = grad_fun(model)
@@ -194,9 +196,15 @@ def train_n_steps_disc(
         union_obs = batch_data.union_obs
 
         def loss_fun(model):
-            logp_pos = jnp.log(model(pos_obs))
-            logp_union = jnp.log(1.0 - model(union_obs))
-            loss = -jnp.mean(logp_pos + logp_union)
+            p_pos, p_union = model(pos_obs), 1.0 - model(union_obs)
+            # standard discriminator loss fun
+            # loss_pos, loss_union = -jnp.log(p_pos), -jnp.log(p_union)
+
+            # PU-Learning loss fun
+            loss_pos = -jnp.log(p_pos)
+            loss_union = -jnp.log(p_union) / config.pu_nu + jnp.log(1 - p_pos)
+            loss = jnp.mean(loss_pos + loss_union)
+
             return loss
 
         grad_fun = nnx.value_and_grad(loss_fun)
@@ -358,7 +366,7 @@ def main(args, cfg_env=None):
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     logger.save_config(dict_args)
     logger.log("Start discriminator model training.")
-    
+
     disc_loss = policy_loss = jnp.array(0.0)
     steps = 0
     while steps < config["total_iteration_disc"]:
@@ -374,7 +382,7 @@ def main(args, cfg_env=None):
         steps += num_itr
 
         logger.logged = False
-        
+
         if (steps % config["log_freq"] == 0) and (not logger.logged):
             logger.log_tabular("Loss/loss_discriminator", disc_loss.item())
             logger.log_tabular("Loss/loss_policy", policy_loss.item())
@@ -416,7 +424,7 @@ def main(args, cfg_env=None):
         )
 
         steps += num_itr
-        
+
         logger.logged = False
 
         if (steps % config["log_freq"] == 0) and (not logger.logged):
