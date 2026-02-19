@@ -63,6 +63,15 @@ def bce_loss(logits, labels, weights=1.0):
     return jnp.mean(loss)
 
 
+class Scalar(nnx.Module):
+    def __init__(self, val):
+        dtype = jnp.float32
+        self.val = nnx.Param(jnp.array(val, dtype=dtype))
+
+    def __call__(self):
+        return self.val
+
+
 class SafeDiceTanhMixtureActor(nnx.Module):
     def __init__(
         self,

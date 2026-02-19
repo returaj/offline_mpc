@@ -27,6 +27,7 @@ from dsrl_model.utils.dsrl_dataset import (
 from dsrl_model.utils.models_jax import (
     ExpCostModel,
     SafeDiceTanhMixtureActor,
+    Scalar,
     get_tree_norm,
 )
 from dsrl_model.utils.native_logger import EpochLogger
@@ -37,7 +38,7 @@ from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_ar
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e1),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -51,8 +52,9 @@ default_cfg = {
     "update_tau": 0.005,
     "train_horizon": 1,  # 20
     "weight_decay": 0.01,
-    "total_iteration_disc": int(1e5),
-    "total_iteration_policy": int(1e6),
+    "total_iteration_disc": int(1e2),
+    "warmup_iteration_policy": int(1e2),
+    "total_iteration_policy": int(1e2),
 }
 
 trajectory_cfg = {
@@ -94,6 +96,20 @@ def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
     return eval_reward, eval_cost, eval_len
 
 
+def get_pos_data_log_prob(policy_model, data_buffer):
+    obs, act = data_buffer.pos_obs[:-1], data_buffer.pos_act
+    valid = data_buffer.pos_priorities
+
+    assert (
+        obs.shape[0] == act.shape[0] == valid.shape[0]
+    ), "Shape of obs, act or valid does not match."
+
+    log_prob = policy_model.get_log_prob(obs, act)
+    baseline = jnp.sum(log_prob * valid) / jnp.sum(valid)
+    return baseline
+
+
+@nnx.jit
 def polyak_update(target_model, curr_model, tau):
     target_param = nnx.state(target_model, nnx.Param)
     curr_param = nnx.state(curr_model, nnx.Param)
@@ -119,12 +135,96 @@ def discounted_sum(arr, gamma):
     return cumsum
 
 
+def policy_loss_grads_fun(
+    policy_model,
+    data,
+    alpha,
+):
+    # Batch X Horizon X obs_dim
+    batch, horizon, _ = data.pos_obs.shape
+
+    pos_obs = data.pos_obs.reshape(batch * horizon, -1)
+    pos_act = data.pos_act.reshape(batch * horizon, -1)
+
+    union_obs = data.union_obs.reshape(batch * horizon, -1)
+    union_act = data.union_act.reshape(batch * horizon, -1)
+    union_weight = data.union_weight.reshape((batch * horizon,))
+
+    def loss_fun(policy_model):
+        # Batch_Horizon,
+        logp_pos = policy_model.get_log_prob(pos_obs, pos_act)
+        logp_union = union_weight * policy_model.get_log_prob(union_obs, union_act)
+        loss = -alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
+        return loss, (union_weight.min(), union_weight.mean(), union_weight.max())
+
+    grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
+    (loss, aux_value), grads = grad_fun(policy_model)
+    return loss, grads, *aux_value
+
+
+def alpha_loss_grads_fun(log_alpha_model, policy_model, data, log_pi_baseline):
+    ep = 0.01
+
+    # Batch X Horizon X obs_dim
+    batch, horizon, _ = data.pos_obs.shape
+
+    obs = data.pos_obs.reshape(batch * horizon, -1)
+    act = data.pos_act.reshape(batch * horizon, -1)
+
+    log_pi = policy_model.get_log_prob(obs, act)
+    weight = jax.lax.stop_gradient(log_pi.mean() + ep - log_pi_baseline)
+
+    def loss_fun(log_alpha_model):
+        alpha = jax.lax.stop_gradient(jnp.exp(log_alpha_model()))
+        loss = jnp.exp(log_alpha_model()) * weight
+        return loss, (alpha,)
+
+    grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
+    (loss, aux_value), grads = grad_fun(log_alpha_model)
+    return loss, grads, *aux_value
+
+
+def train_steps_policy(
+    policy_model,
+    policy_optimizer,
+    log_alpha_model,
+    log_alpha_optimizer,
+    batch_data,
+    log_pi_baseline,
+    is_train_alpha,
+):
+    alpha_loss, alpha_grads, alpha = alpha_loss_grads_fun(
+        log_alpha_model=log_alpha_model,
+        policy_model=policy_model,
+        data=batch_data,
+        log_pi_baseline=log_pi_baseline,
+    )
+    alpha_grads = jax.tree.map(
+        lambda g: jnp.where(is_train_alpha, g, jnp.zeros_like(g)),
+        alpha_grads,
+    )
+    log_alpha_optimizer.update(alpha_grads)
+
+    policy_loss, policy_grads, *policy_aux = policy_loss_grads_fun(
+        policy_model=policy_model,
+        data=batch_data,
+        alpha=alpha,
+    )
+    policy_optimizer.update(policy_grads)
+
+    return is_train_alpha * alpha_loss, alpha, policy_loss, *policy_aux
+
+
 @nnx.jit
 def train_n_steps_policy(
     policy_model,
     policy_optimizer,
+    log_alpha_model,
+    log_alpha_optimizer,
     data_buffer,
     config,
+    log_pi_baseline,
+    is_train_alpha,
     key,
 ):
     num_steps = config.log_freq
@@ -134,37 +234,44 @@ def train_n_steps_policy(
     )
 
     def body_fun(i, carry):
-        _, model, optimizer = carry
+        (
+            _,
+            policy_model,
+            policy_optimizer,
+            log_alpha_model,
+            log_alpha_optimizer,
+        ) = carry
 
         batch_data = data_buffer.sample_batch(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        # Batch X Horizon X obs_dim
-        batch, horizon, _ = batch_data.pos_obs.shape
-
-        pos_obs = batch_data.pos_obs.reshape(batch * horizon, -1)
-        pos_act = batch_data.pos_act.reshape(batch * horizon, -1)
-
-        union_obs = batch_data.union_obs.reshape(batch * horizon, -1)
-        union_act = batch_data.union_act.reshape(batch * horizon, -1)
-        union_weight = batch_data.union_weight.reshape(
-            batch * horizon,
+        val = train_steps_policy(
+            policy_model=policy_model,
+            policy_optimizer=policy_optimizer,
+            log_alpha_model=log_alpha_model,
+            log_alpha_optimizer=log_alpha_optimizer,
+            batch_data=batch_data,
+            log_pi_baseline=log_pi_baseline,
+            is_train_alpha=is_train_alpha,
         )
 
-        def loss_fun(model):
-            logp_pos = model.get_log_prob(pos_obs, pos_act)
-            logp_union = union_weight * model.get_log_prob(union_obs, union_act)
-            return -config.alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
+        return (
+            val,
+            policy_model,
+            policy_optimizer,
+            log_alpha_model,
+            log_alpha_optimizer,
+        )
 
-        grad_fun = nnx.value_and_grad(loss_fun)
-        loss, grads = grad_fun(model)
-        optimizer.update(grads)
-
-        return (loss, model, optimizer)
-
-    init_val = jnp.zeros((), dtype=jnp.float32)
-    init_carry = (init_val, policy_model, policy_optimizer)
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 6
+    init_carry = (
+        init_val,
+        policy_model,
+        policy_optimizer,
+        log_alpha_model,
+        log_alpha_optimizer,
+    )
     val, *_ = nnx.fori_loop(0, num_steps, body_fun, init_carry)
 
     return val, num_steps
@@ -277,6 +384,22 @@ def main(args, cfg_env=None):
         ),
     )
 
+    expert_policy_model = SafeDiceTanhMixtureActor(
+        rngs=rngs,
+        obs_dim=obs_space.shape[0],
+        act_dim=act_space.shape[0],
+        hidden_size=config["hidden_size"],
+    )
+    expert_policy_optimizer = nnx.Optimizer(
+        model=expert_policy_model,
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
+    )
+
     discriminator_model = ExpCostModel(
         rngs=rngs,
         x_dims=obs_space.shape[0],
@@ -285,6 +408,17 @@ def main(args, cfg_env=None):
     )
     discriminator_optimizer = nnx.Optimizer(
         model=discriminator_model,
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
+    )
+
+    log_alpha_model = Scalar(0.0)
+    log_alpha_optimizer = nnx.Optimizer(
+        model=log_alpha_model,
         tx=optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
             optax.adamw(
@@ -367,7 +501,7 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start discriminator model training.")
 
-    disc_loss = policy_loss = jnp.array(0.0)
+    disc_loss = jnp.array(0.0)
     steps = 0
     while steps < config["total_iteration_disc"]:
 
@@ -381,24 +515,86 @@ def main(args, cfg_env=None):
 
         steps += num_itr
 
+        if steps % config["log_freq"] == 0:
+            logger.log(
+                f"Loss discriminator {steps}/{config['total_iteration_disc']}: {disc_loss.item():.3f}"
+            )
+            norm_discriminator = get_tree_norm(
+                nnx.state(discriminator_model, nnx.Param)
+            )
+            logger.log(f"Norm discriminator_model: {norm_discriminator.item():.3f}")
+
+        if steps >= config["total_iteration_disc"]:
+            break
+
+    logger.log("Start warmup training of expert policy model.")
+    log_pi_baseline = jnp.array(0.0)
+    steps = 0
+    while steps < config["warmup_iteration_policy"]:
+
+        val, num_itr = train_n_steps_policy(
+            policy_model=expert_policy_model,
+            policy_optimizer=expert_policy_optimizer,
+            log_alpha_model=log_alpha_model,
+            log_alpha_optimizer=log_alpha_optimizer,
+            data_buffer=data_buffer,
+            config=config_data,
+            log_pi_baseline=log_pi_baseline,
+            is_train_alpha=False,
+            key=rngs.random_sample(),
+        )
+
+        (
+            alpha_loss,
+            alpha,
+            policy_loss,
+            policy_weight_min,
+            policy_weight_mean,
+            policy_weight_max,
+        ) = val
+
+        steps += num_itr
+
         logger.logged = False
 
-        if (steps % config["log_freq"] == 0) and (not logger.logged):
+        if steps % config["log_freq"] == 0:
             logger.log_tabular("Loss/loss_discriminator", disc_loss.item())
-            logger.log_tabular("Loss/loss_policy", policy_loss.item())
+            logger.log_tabular("Loss/loss_alpha", alpha_loss.item())
+            logger.log_tabular("Loss/loss_expert_policy", policy_loss.item())
+
+            logger.log_tabular("Value/alpha", alpha.item())
+            logger.log_tabular("Value/log_pi_baseline", log_pi_baseline.item())
+            logger.log_tabular(
+                "Value/policy_union_weight_min", policy_weight_min.item()
+            )
+            logger.log_tabular(
+                "Value/policy_union_weight_mean", policy_weight_mean.item()
+            )
+            logger.log_tabular(
+                "Value/policy_union_weight_max", policy_weight_max.item()
+            )
+
             logger.log_tabular(
                 "Norm/discriminator_model",
                 get_tree_norm(nnx.state(discriminator_model, nnx.Param)),
             )
             logger.log_tabular(
-                "Norm/policy_model",
-                get_tree_norm(nnx.state(policy_model, nnx.Param)),
+                "Norm/expert_policy_model",
+                get_tree_norm(nnx.state(expert_policy_model, nnx.Param)),
             )
 
             logger.dump_tabular()
 
-        if steps >= config["total_iteration_disc"]:
+        if steps >= config["warmup_iteration_policy"]:
             break
+
+    logger.log("Estimate log_pi_baseline from trained expert_policy_model")
+    log_pi_baseline = jax.lax.stop_gradient(
+        get_pos_data_log_prob(expert_policy_model, data_buffer)
+    )
+
+    logger.log("Initialize policy_model with expert_policy_model")
+    policy_model = polyak_update(policy_model, expert_policy_model, 1.0)
 
     logger.log(
         "Reshuffle union dataset based on discriminator next state expert prediction."
@@ -411,17 +607,30 @@ def main(args, cfg_env=None):
         decay=config_data.decay,
     )
 
-    logger.log("Start policy model training.")
+    logger.log("Start training policy model.")
     steps = 0
     while steps < config["total_iteration_policy"]:
 
-        policy_loss, num_itr = train_n_steps_policy(
+        val, num_itr = train_n_steps_policy(
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
+            log_alpha_model=log_alpha_model,
+            log_alpha_optimizer=log_alpha_optimizer,
             data_buffer=data_buffer,
             config=config_data,
+            log_pi_baseline=log_pi_baseline,
+            is_train_alpha=True,
             key=rngs.random_sample(),
         )
+
+        (
+            alpha_loss,
+            alpha,
+            policy_loss,
+            policy_weight_min,
+            policy_weight_mean,
+            policy_weight_max,
+        ) = val
 
         steps += num_itr
 
@@ -429,14 +638,28 @@ def main(args, cfg_env=None):
 
         if (steps % config["log_freq"] == 0) and (not logger.logged):
             logger.log_tabular("Loss/loss_discriminator", disc_loss.item())
-            logger.log_tabular("Loss/loss_policy", policy_loss.item())
+            logger.log_tabular("Loss/loss_alpha", alpha_loss.item())
+            logger.log_tabular("Loss/loss_expert_policy", policy_loss.item())
+
+            logger.log_tabular("Value/alpha", alpha.item())
+            logger.log_tabular("Value/log_pi_baseline", log_pi_baseline.item())
+            logger.log_tabular(
+                "Value/policy_union_weight_min", policy_weight_min.item()
+            )
+            logger.log_tabular(
+                "Value/policy_union_weight_mean", policy_weight_mean.item()
+            )
+            logger.log_tabular(
+                "Value/policy_union_weight_max", policy_weight_max.item()
+            )
+
             logger.log_tabular(
                 "Norm/discriminator_model",
                 get_tree_norm(nnx.state(discriminator_model, nnx.Param)),
             )
             logger.log_tabular(
-                "Norm/policy_model",
-                get_tree_norm(nnx.state(policy_model, nnx.Param)),
+                "Norm/expert_policy_model",
+                get_tree_norm(nnx.state(expert_policy_model, nnx.Param)),
             )
 
             logger.dump_tabular()
