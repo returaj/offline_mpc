@@ -42,16 +42,15 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 1.0,
+    "max_grad_norm": 10.0,
     "decay": 0.9,
     "alpha": 1.0,
     "lmbda": 0.85,
     "pu_nu": 0.5,
     "rollback": 5,
     "action_repeat": 1,  # set to 2, min value is 1
-    "update_tau": 0.005,
-    "train_horizon": 1,  # 20
-    "weight_decay": 0.01,
+    "train_horizon": 1,
+    "weight_decay": 0.005,
     "total_iteration_disc": int(1e5),
     "warmup_iteration_policy": int(1e5),
     "total_iteration_policy": int(1e6),
@@ -192,6 +191,7 @@ def train_steps_policy(
     batch_data,
     log_pi_baseline,
     is_train_alpha,
+    config,
 ):
     alpha_loss, alpha_grads, alpha = alpha_loss_grads_fun(
         log_alpha_model=log_alpha_model,
@@ -205,6 +205,7 @@ def train_steps_policy(
     )
     log_alpha_optimizer.update(alpha_grads)
 
+    alpha = jnp.where(is_train_alpha, alpha, config.alpha)
     policy_loss, policy_grads, *policy_aux = policy_loss_grads_fun(
         policy_model=policy_model,
         data=batch_data,
@@ -254,6 +255,7 @@ def train_n_steps_policy(
             batch_data=batch_data,
             log_pi_baseline=log_pi_baseline,
             is_train_alpha=is_train_alpha,
+            config=config,
         )
 
         return (
@@ -354,6 +356,8 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["warmup_iteration_policy"] = args.warmup_bc
+    do_alpha_warmup = config["warmup_iteration_policy"] > 0
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
@@ -527,9 +531,10 @@ def main(args, cfg_env=None):
         if steps >= config["total_iteration_disc"]:
             break
 
-    logger.log("Start warmup training of expert policy model.")
     log_pi_baseline = jnp.array(0.0)
     steps = 0
+    if do_alpha_warmup:
+        logger.log("Start warmup training of expert policy model.")
     while steps < config["warmup_iteration_policy"]:
 
         val, num_itr = train_n_steps_policy(
@@ -540,7 +545,7 @@ def main(args, cfg_env=None):
             data_buffer=data_buffer,
             config=config_data,
             log_pi_baseline=log_pi_baseline,
-            is_train_alpha=False,
+            is_train_alpha=False,  # no alpha training when warmup
             key=rngs.random_sample(),
         )
 
@@ -588,13 +593,14 @@ def main(args, cfg_env=None):
         if steps >= config["warmup_iteration_policy"]:
             break
 
-    logger.log("Estimate log_pi_baseline from trained expert_policy_model")
-    log_pi_baseline = jax.lax.stop_gradient(
-        get_pos_data_log_prob(expert_policy_model, data_buffer)
-    )
+    if do_alpha_warmup:
+        logger.log("Estimate log_pi_baseline from trained expert_policy_model")
+        log_pi_baseline = jax.lax.stop_gradient(
+            get_pos_data_log_prob(expert_policy_model, data_buffer)
+        )
 
-    logger.log("Initialize policy_model with expert_policy_model")
-    policy_model = polyak_update(policy_model, expert_policy_model, 1.0)
+        logger.log("Initialize policy_model with expert_policy_model")
+        policy_model = polyak_update(policy_model, expert_policy_model, 1.0)
 
     logger.log(
         "Reshuffle union dataset based on discriminator next state expert prediction."
@@ -622,7 +628,7 @@ def main(args, cfg_env=None):
             data_buffer=data_buffer,
             config=config_data,
             log_pi_baseline=log_pi_baseline,
-            is_train_alpha=True,
+            is_train_alpha=do_alpha_warmup,
             key=rngs.random_sample(),
         )
 
