@@ -38,7 +38,7 @@ from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_ar
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e1),
+    "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -52,9 +52,9 @@ default_cfg = {
     "update_tau": 0.005,
     "train_horizon": 1,  # 20
     "weight_decay": 0.01,
-    "total_iteration_disc": int(1e2),
-    "warmup_iteration_policy": int(1e2),
-    "total_iteration_policy": int(1e2),
+    "total_iteration_disc": int(1e5),
+    "warmup_iteration_policy": int(1e5),
+    "total_iteration_policy": int(1e6),
 }
 
 trajectory_cfg = {
@@ -560,7 +560,7 @@ def main(args, cfg_env=None):
         if steps % config["log_freq"] == 0:
             logger.log_tabular("Loss/loss_discriminator", disc_loss.item())
             logger.log_tabular("Loss/loss_alpha", alpha_loss.item())
-            logger.log_tabular("Loss/loss_expert_policy", policy_loss.item())
+            logger.log_tabular("Loss/loss_policy", policy_loss.item())
 
             logger.log_tabular("Value/alpha", alpha.item())
             logger.log_tabular("Value/log_pi_baseline", log_pi_baseline.item())
@@ -579,7 +579,7 @@ def main(args, cfg_env=None):
                 get_tree_norm(nnx.state(discriminator_model, nnx.Param)),
             )
             logger.log_tabular(
-                "Norm/expert_policy_model",
+                "Norm/policy_model",
                 get_tree_norm(nnx.state(expert_policy_model, nnx.Param)),
             )
 
@@ -600,6 +600,9 @@ def main(args, cfg_env=None):
         "Reshuffle union dataset based on discriminator next state expert prediction."
     )
     pred_expert_mask = discriminator_model(data_buffer.union_obs) > config_data.lmbda
+    logger.log(
+        f"Number of predicted expert state in union dataset: {pred_expert_mask.sum()} / {pred_expert_mask.shape[0]}"
+    )
     data_buffer = reshuffle_union_data(
         obj=data_buffer,
         pred_expert_mask=pred_expert_mask,
@@ -639,7 +642,7 @@ def main(args, cfg_env=None):
         if (steps % config["log_freq"] == 0) and (not logger.logged):
             logger.log_tabular("Loss/loss_discriminator", disc_loss.item())
             logger.log_tabular("Loss/loss_alpha", alpha_loss.item())
-            logger.log_tabular("Loss/loss_expert_policy", policy_loss.item())
+            logger.log_tabular("Loss/loss_policy", policy_loss.item())
 
             logger.log_tabular("Value/alpha", alpha.item())
             logger.log_tabular("Value/log_pi_baseline", log_pi_baseline.item())
@@ -658,8 +661,8 @@ def main(args, cfg_env=None):
                 get_tree_norm(nnx.state(discriminator_model, nnx.Param)),
             )
             logger.log_tabular(
-                "Norm/expert_policy_model",
-                get_tree_norm(nnx.state(expert_policy_model, nnx.Param)),
+                "Norm/policy_model",
+                get_tree_norm(nnx.state(policy_model, nnx.Param)),
             )
 
             logger.dump_tabular()
