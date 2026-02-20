@@ -274,8 +274,15 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     keys = ["observations", "actions", "rewards", "costs", "terminals", "timeouts"]
 
     union_data = {k: d4rl_data[k][union_idxs] for k in keys}
-    ax.plot(traj_costs[union_idxs], traj_rewards[union_idxs], "o", color="lightblue")
-    print(f"Number of union trajectory dataset: {union_data['observations'].shape[0]}")
+    num_union_data = union_data["observations"].shape[0]
+    ax.plot(
+        traj_costs[union_idxs],
+        traj_rewards[union_idxs],
+        "o",
+        color="lightblue",
+        label=f"union_{num_union_data}",
+    )
+    print(f"Number of union trajectory dataset: {num_union_data}")
     union_cost, union_reward = (
         union_data["costs"].sum(1).mean(),
         union_data["rewards"].sum(1).mean(),
@@ -285,10 +292,15 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     pos_data = None
     if has_positive:
         pos_data = {k: d4rl_data[k][pos_idxs] for k in keys}
-        ax.plot(traj_costs[pos_idxs], traj_rewards[pos_idxs], "o", color="darkgreen")
-        print(
-            f"Number of positive trajectory dataset: {pos_data['observations'].shape[0]}"
+        num_pos_data = pos_data["observations"].shape[0]
+        ax.plot(
+            traj_costs[pos_idxs],
+            traj_rewards[pos_idxs],
+            "o",
+            color="darkgreen",
+            label=f"pos_{num_pos_data}",
         )
+        print(f"Number of positive trajectory dataset: {num_pos_data}")
         pos_cost, pos_reward = (
             pos_data["costs"].sum(1).mean(),
             pos_data["rewards"].sum(1).mean(),
@@ -298,10 +310,15 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     neg_data = None
     if has_negative:
         neg_data = {k: d4rl_data[k][neg_idxs] for k in keys}
-        ax.plot(traj_costs[neg_idxs], traj_rewards[neg_idxs], "o", color="darkred")
-        print(
-            f"Number of negative trajectory dataset: {neg_data['observations'].shape[0]}"
+        num_neg_data = neg_data["observations"].shape[0]
+        ax.plot(
+            traj_costs[neg_idxs],
+            traj_rewards[neg_idxs],
+            "o",
+            color="darkred",
+            label=f"neg_{num_neg_data}",
         )
+        print(f"Number of negative trajectory dataset: {num_neg_data}")
         neg_cost, neg_reward = (
             neg_data["costs"].sum(1).mean(),
             neg_data["rewards"].sum(1).mean(),
@@ -311,6 +328,7 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     ax.set_title(f"Sampled Dataset ({config['data_inpaint']})")
     ax.set_xlabel("Traj Cost")
     ax.set_ylabel("Traj Reward")
+    ax.legend(loc="lower right")
 
     os.makedirs(save_dir, exist_ok=True)
     fig.savefig(f"{save_dir}/sampled_dataset.png", bbox_inches="tight")
