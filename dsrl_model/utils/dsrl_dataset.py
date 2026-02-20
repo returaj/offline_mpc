@@ -1,3 +1,5 @@
+import os
+
 import dsrl.infos as dsrl_infos
 import matplotlib.pyplot as plt
 import numpy as np
@@ -243,7 +245,7 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     return pos_shuffled_idx, neg_shuffled_idx, union_shuffled_idx
 
 
-def get_pos_neg_and_union_data(d4rl_data, config):
+def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     if config["data_inpaint"] == "full":
         pos_idxs, neg_idxs, union_idxs = get_full_pos_neg_and_union_data(
             d4rl_data, config
@@ -306,10 +308,12 @@ def get_pos_neg_and_union_data(d4rl_data, config):
         )
         print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
 
-    ax.set_title("Sampled Dataset for Training")
+    ax.set_title(f"Sampled Dataset ({config['data_inpaint']})")
     ax.set_xlabel("Traj Cost")
     ax.set_ylabel("Traj Reward")
-    fig.savefig("./sampled_dataset.png", bbox_inches="tight")
+
+    os.makedirs(save_dir, exist_ok=True)
+    fig.savefig(f"{save_dir}/sampled_dataset.png", bbox_inches="tight")
 
     return pos_data, neg_data, union_data
 

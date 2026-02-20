@@ -512,7 +512,9 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    pos_data, neg_data, union_data = get_pos_neg_and_union_data(data, trajectory_cfg)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(
+        data, trajectory_cfg, save_dir=args.log_dir
+    )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         pos_data, neg_data, union_data, mu_obs, std_obs = get_normalized_data(
