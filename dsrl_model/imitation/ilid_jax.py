@@ -52,7 +52,7 @@ default_cfg = {
     "train_horizon": 1,
     "weight_decay": 0.005,
     "total_iteration_disc": int(1e5),
-    "warmup_iteration_policy": int(1e5),
+    "warmup_iteration_policy": int(2e5),
     "total_iteration_policy": int(1e6),
 }
 
