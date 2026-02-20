@@ -26,6 +26,7 @@ class BatchData:
     union_cost: jnp.ndarray
     union_idx: jnp.ndarray
     union_done: jnp.ndarray = None
+    union_weight: jnp.ndarray = None
 
 
 @jax.jit
@@ -205,6 +206,57 @@ class OSILDataBuffer(OnPolicyDataBuffer):
         h_union_done = sample_horizon_arr(obj.union_done, u_idx, obj.horizon)
         batch = batch.replace(union_done=h_union_done)
         return batch
+
+
+@struct.dataclass
+class ILIDDataBuffer(OnPolicyDataBuffer):
+    union_weight: jnp.ndarray = None
+
+    @staticmethod
+    def sample_batch(obj, p_idx, n_idx, u_idx):
+        batch = super().sample_batch(obj, p_idx, n_idx, u_idx)
+        union_weight = sample_horizon_arr(obj.union_weight, u_idx, obj.horizon)
+        batch = batch.replace(union_weight=union_weight)
+        return batch
+
+
+@functools.partial(jax.jit, static_argnames="rollback")
+def reshuffle_union_data(obj: ILIDDataBuffer, pred_expert_mask, rollback, decay):
+    weight_init = 1.0
+    N = obj.union_obs.shape[0]
+    dtype = obj.union_obs.dtype
+
+    done = 1.0 - obj.union_priorities
+    ep_id = jnp.cumsum(jnp.concat([jnp.array([0.0]), done[:-1]]))
+
+    # -------------------------------------------------
+    # Vectorized rollback
+    # -------------------------------------------------
+    ks = jnp.arange(rollback)
+    indx_arr = jnp.arange(N)
+
+    def shifted_mask(k):
+        shifted = indx_arr + k + 1
+        valid = shifted < N
+        same_ep = jnp.where(valid, ep_id[indx_arr] == ep_id[shifted], False)
+        kstep_expert = jnp.where(valid, pred_expert_mask[shifted], False)
+        return kstep_expert & same_ep
+
+    rollback_masks = jax.vmap(shifted_mask)(ks)
+    # union all rollback masks
+    total_mask = jnp.any(rollback_masks, axis=0)
+    new_priorities = jnp.array(total_mask, dtype=dtype)
+
+    # -------------------------------------------------
+    # Weight decay (vectorized)
+    # -------------------------------------------------
+    decay_weights = weight_init * (decay**ks)
+    weight_candidates = rollback_masks * decay_weights[:, None]
+    new_weight = jnp.max(weight_candidates, axis=0)
+    new_weight = jnp.where(total_mask, new_weight, 0.0)
+
+    obj = obj.replace(union_priorities=new_priorities, union_weight=new_weight)
+    return obj
 
 
 class OnPolicyBuffer:
@@ -490,6 +542,15 @@ class OSILBuffer(OnPolicyBuffer):
 
     def get_data_buffer(self):
         return super().get_data_buffer(OSILDataBuffer, union_done=self._union_done)
+
+
+class ILIDBuffer(OnPolicyBuffer):
+    def to_jax_ndarray(self):
+        super().to_jax_ndarray()
+        self._union_weight = np.zeros((self.union_capacity,), dtype=self.dtype)
+
+    def get_data_buffer(self):
+        return super().get_data_buffer(ILIDDataBuffer, union_weight=self._union_weight)
 
 
 class SafeCLBuffer(OnPolicyBuffer):
