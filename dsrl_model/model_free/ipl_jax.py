@@ -166,6 +166,7 @@ def critic_loss_grads_fun(
     critic_model,
     data,
     has_positive,
+    has_negative,
     gamma,
     lmbda,
 ):
@@ -183,31 +184,42 @@ def critic_loss_grads_fun(
         # Batch X Horizon
         q1, q2 = critic_model(jnp.concat([obs, act], axis=-1))
         q1, q2 = q2 * mask_last_horizon, q2 * mask_last_horizon
-        # use mean v_next
+        ## use mean v_next
         # v_next = jnp.mean(jnp.stack(value_model(obs)), axis=0) @ shift_one_timestep
-        # use min v_next
+        ## use min v_next
         v_next = jnp.minimum(*value_model(obs)) @ shift_one_timestep
         v_next = jnp.clip(v_next, min=-200, max=200)
-        r1, r2 = q1 - gamma * v_next, q2 - gamma * v_next
+        ## ensure last horizon is not used
+        ## as last reward term is not estimated
+        r1 = (q1 - gamma * v_next) * mask_last_horizon
+        r2 = (q2 - gamma * v_next) * mask_last_horizon
         return r1, r2
 
     def pref_loss(critic_model, obs1, act1, obs2, act2):
         # Batch X Horizon
         r1_1, r1_2 = get_reward(critic_model, obs1, act1)
         r2_1, r2_2 = get_reward(critic_model, obs2, act2)
-        logp1 = nnx.log_sigmoid(r1_1 - r2_1) * mask_last_horizon
-        logp2 = nnx.log_sigmoid(r1_2 - r2_2) * mask_last_horizon
+        # traj_reward_1 > traj_reward_2
+        logit1 = r1_1.sum(axis=1) - r2_1.sum(axis=1)
+        logp1 = nnx.log_sigmoid(logit1)
+        # traj_reward_1 > traj_reward_2
+        logit2 = r1_2.sum(axis=1) - r2_2.sum(axis=1)
+        logp2 = nnx.log_sigmoid(logit2)
         reg_loss = ((r1_1**2 + r1_2**2 + r2_1**2 + r2_2**2) / 4).mean()
         loss = -logp1.mean() - logp2.mean() + lmbda * reg_loss
         return loss
 
     def loss_fun(critic_model):
-        pos_neg_loss = has_positive * pref_loss(
-            critic_model=critic_model,
-            obs1=data.pos_obs,
-            act1=data.pos_act,
-            obs2=data.neg_obs,
-            act2=data.neg_act,
+        pos_neg_loss = (
+            has_positive
+            * has_negative
+            * pref_loss(
+                critic_model=critic_model,
+                obs1=data.pos_obs,
+                act1=data.pos_act,
+                obs2=data.neg_obs,
+                act2=data.neg_act,
+            )
         )
         pos_union_loss = has_positive * pref_loss(
             critic_model=critic_model,
@@ -216,7 +228,7 @@ def critic_loss_grads_fun(
             obs2=data.union_obs,
             act2=data.union_act,
         )
-        union_neg_loss = pref_loss(
+        union_neg_loss = has_negative * pref_loss(
             critic_model=critic_model,
             obs1=data.union_obs,
             act1=data.union_act,
@@ -281,6 +293,7 @@ def train_step(
     batch_data,
     config,
     has_positive,
+    has_negative,
 ):
     value_loss, value_grads, *value_aux = value_loss_grads_fun(
         value_model=value_model,
@@ -296,6 +309,7 @@ def train_step(
         critic_model=critic_model,
         data=batch_data,
         has_positive=has_positive,
+        has_negative=has_negative,
         gamma=config.gamma,
         lmbda=config.lmbda,
     )
@@ -316,11 +330,11 @@ def train_step(
     )
 
     mean_pos_reward = has_positive * batch_data.pos_reward.sum(-1).mean()
-    mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
+    mean_neg_reward = has_negative * batch_data.neg_reward.sum(-1).mean()
     mean_union_reward = batch_data.union_reward.sum(-1).mean()
 
     mean_pos_cost = has_positive * batch_data.pos_cost.sum(-1).mean()
-    mean_neg_cost = batch_data.neg_cost.sum(-1).mean()
+    mean_neg_cost = has_negative * batch_data.neg_cost.sum(-1).mean()
     mean_union_cost = batch_data.union_cost.sum(-1).mean()
 
     return (
@@ -351,6 +365,7 @@ def train_n_steps(
     data_buffer,
     config,
     has_positive,
+    has_negative,
     key,
 ):
     num_steps = config.log_freq
@@ -386,6 +401,7 @@ def train_n_steps(
             batch_data=batch_data,
             config=config,
             has_positive=has_positive,
+            has_negative=has_negative,
         )
 
         return (
@@ -430,6 +446,12 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     has_positive = float(args.num_preferred > 0)
+    has_negative = float(args.num_non_preferred > 0)
+
+    assert (
+        has_positive or has_negative
+    ), "Both preferred and non-preferred trajectory dataset cannot be empty together."
+
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -521,12 +543,6 @@ def main(args, cfg_env=None):
             pos_data, neg_data, union_data
         )
 
-    neg_observations = neg_data["observations"]
-    neg_actions = neg_data["actions"]
-    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_rewards = neg_data["rewards"]
-    neg_costs = neg_data["costs"]
-
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
@@ -535,19 +551,23 @@ def main(args, cfg_env=None):
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
-        neg_observations.shape[1] == ep_len
-    ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
+        union_observations.shape[1] == ep_len
+    ), f"{union_observations.shape[1]} episode length is different from {ep_len}"
 
     pos_data_size = 1
     if has_positive:
         pos_data_size = np.prod(pos_data["observations"].shape[:-1])
+
+    neg_data_size = 1
+    if has_negative:
+        neg_data_size = np.prod(neg_data["observations"].shape[:-1])
 
     buffer = OnPolicyBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=pos_data_size,
-        neg_data_size=np.prod(neg_observations.shape[:-1]),
+        neg_data_size=neg_data_size,
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -566,10 +586,17 @@ def main(args, cfg_env=None):
         ):
             buffer.add(obs, act, done, reward, cost, is_pos=True)
 
-    for obs, act, done, reward, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
-    ):
-        buffer.add(obs, act, done, reward, cost, is_neg=True)
+    if has_negative:
+        neg_observations = neg_data["observations"]
+        neg_actions = neg_data["actions"]
+        neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+        neg_rewards = neg_data["rewards"]
+        neg_costs = neg_data["costs"]
+
+        for obs, act, done, reward, cost in zip(
+            neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
+        ):
+            buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs
@@ -604,6 +631,7 @@ def main(args, cfg_env=None):
             data_buffer=data_buffer,
             config=config_data,
             has_positive=has_positive,
+            has_negative=has_negative,
             key=rngs.random_sample(),
         )
 
