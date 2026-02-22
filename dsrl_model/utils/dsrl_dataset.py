@@ -119,6 +119,7 @@ def get_reward_pos_neg_and_union_data(d4rl_data, config):
     del_idx = np.concatenate([pos_shuffled_idx, neg_shuffled_idx])
     union_idx = np.delete(np.arange(num_trajs), del_idx)
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
+    num_union_traj = min(len(union_idx), num_union_traj)
     union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
 
     print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
@@ -170,6 +171,7 @@ def get_cost_pos_neg_and_union_data(d4rl_data, config):
     del_idx = np.concatenate([pos_shuffled_idx, neg_shuffled_idx])
     union_idx = np.delete(np.arange(num_trajs), del_idx)
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
+    num_union_traj = min(len(union_idx), num_union_traj)
     union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
 
     print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
@@ -237,6 +239,7 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     del_idx = np.concatenate([pos_shuffled_idx, neg_shuffled_idx])
     union_idx = np.delete(np.arange(num_trajs), del_idx)
     num_union_traj = len(union_idx) if num_union_traj < 0 else num_union_traj
+    num_union_traj = min(len(union_idx), num_union_traj)
     union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
 
     print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
