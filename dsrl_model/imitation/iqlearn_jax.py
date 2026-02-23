@@ -47,7 +47,7 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "update_critic_freq": 2,
     "update_tau": 0.005,
-    "train_horizon": 5,  # 20
+    "train_horizon": 5,  # min horizon 2 is required
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
     "total_iteration": int(1e6),
