@@ -25,7 +25,6 @@ from dsrl_model.utils.dsrl_dataset import (
     get_pos_neg_and_union_data,
 )
 from dsrl_model.utils.models_jax import (
-    ExpCostModel,
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     bce_loss,
@@ -165,6 +164,7 @@ def train_embedding_model(
     target_union_trainable,
     union_scale,
     has_positive,
+    has_negative,
     pos_label,
     key,
 ):
@@ -176,18 +176,20 @@ def train_embedding_model(
     target_neg = jnp.concat([target_neg_obs, target_neg_act], axis=-1)
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
-    key1, key2, key3 = jax.random.split(key, num=3)
+    ## we were able to do this if it is guareented 
+    ## that there will be negative trajectories too.
+    # mix_p1 = jax.random.uniform(key=key1, shape=target_neg.shape)
+    # target_random1 = mix_p1 * target_neg + (1 - mix_p1) * target_union
+
+    key1, key2 = jax.random.split(key, num=2)
     mix_p1 = jax.random.uniform(key=key1, shape=target_neg.shape)
-    target_random1 = mix_p1 * target_neg + (1 - mix_p1) * target_union
-    mix_p2 = jax.random.uniform(key=key2, shape=target_union.shape)
-    target_shuffle_union = jax.random.permutation(key3, target_union, axis=0)
-    target_random2 = mix_p2 * target_shuffle_union + (1 - mix_p2) * target_union
-    target_random = jnp.concat([target_random1, target_random2], axis=0)
+    target_shuffle_union = jax.random.permutation(key2, target_union, axis=0)
+    target_random = mix_p1 * target_shuffle_union + (1 - mix_p1) * target_union
 
     # Batch
     target_pos_score = pos_label * jnp.ones(shape=(batch,), dtype=dtype)
     target_neg_score = jnp.ones(shape=(batch,), dtype=dtype)
-    target_random_score = jnp.zeros(shape=(2 * batch,), dtype=dtype)
+    target_random_score = jnp.zeros(shape=(batch,), dtype=dtype)
 
     # Batch X embd_dim
     target_pos_z = curriculum_embedding_model(target_pos, training=False)
@@ -209,8 +211,10 @@ def train_embedding_model(
         neg_z = embedding_model(target_neg)
         # Batch
         neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
-        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, default_scale))
-        neg_mean_score = jnp.mean(neg_score)
+        neg_mean_loss = has_negative * jnp.mean(
+            range_loss(neg_score, target_neg_score, default_scale)
+        )
+        neg_mean_score = has_negative * jnp.mean(neg_score)
 
         union_z = embedding_model(target_union)
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
@@ -227,7 +231,7 @@ def train_embedding_model(
         random_z = embedding_model(target_random)
         random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
         random_mean_loss = jnp.mean(
-            range_loss(random_score, target_random_score, default_scale / 2)
+            range_loss(random_score, target_random_score, default_scale)
         )
         random_mean_score = jnp.mean(random_score)
 
@@ -414,6 +418,12 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     has_positive = float(args.num_preferred > 0)
+    has_negative = float(args.num_non_preferred > 0)
+
+    assert (
+        has_positive or has_negative
+    ), "Both preferred and non-preferred trajectory dataset cannot be empty together."
+
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -429,18 +439,19 @@ def main(args, cfg_env=None):
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
     config["pos_label"] = args.preferred_label
+    config["lr"] = args.lr
+
+    # set training steps
+    batch_size = args.batch_size or config.get("batch_size")
+    config["batch_size"] = batch_size
 
     # evaluation environment
     eval_env = gym.make(args.task)
     eval_env.set_target_cost(config["target_cost"])
     eval_env.reset(seed=args.seed)
 
-    # set training steps
-    batch_size = args.batch_size or config.get("batch_size")
-
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    config["bc_lr"] = args.lr
     bc_policy = SafeDiceTanhMixtureActor(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
@@ -452,7 +463,7 @@ def main(args, cfg_env=None):
         tx=optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
             optax.adamw(
-                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
             ),
         ),
     )
@@ -471,7 +482,7 @@ def main(args, cfg_env=None):
         tx=optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
             optax.adamw(
-                learning_rate=config["bc_lr"], weight_decay=config["weight_decay"]
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
             ),
         ),
     )
@@ -500,12 +511,6 @@ def main(args, cfg_env=None):
             pos_data, neg_data, union_data
         )
 
-    neg_observations = neg_data["observations"]
-    neg_actions = neg_data["actions"]
-    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_rewards = neg_data["rewards"]
-    neg_costs = neg_data["costs"]
-
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
     union_dones = union_data["timeouts"] | union_data["terminals"]
@@ -514,19 +519,23 @@ def main(args, cfg_env=None):
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
-        neg_observations.shape[1] == ep_len
-    ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
+        union_observations.shape[1] == ep_len
+    ), f"{union_observations.shape[1]} episode length is different from {ep_len}"
 
     pos_data_size = 1
     if has_positive:
         pos_data_size = np.prod(pos_data["observations"].shape[:-1])
+
+    neg_data_size = 1
+    if has_negative:
+        neg_data_size = np.prod(neg_data["observations"].shape[:-1])
 
     buffer = SafeCLBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=pos_data_size,
-        neg_data_size=np.prod(neg_observations.shape[:-1]),
+        neg_data_size=neg_data_size,
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -545,10 +554,17 @@ def main(args, cfg_env=None):
         ):
             buffer.add(obs, act, done, reward, cost, is_pos=True)
 
-    for obs, act, done, reward, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
-    ):
-        buffer.add(obs, act, done, reward, cost, is_neg=True)
+    if has_negative:
+        neg_observations = neg_data["observations"]
+        neg_actions = neg_data["actions"]
+        neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+        neg_rewards = neg_data["rewards"]
+        neg_costs = neg_data["costs"]
+
+        for obs, act, done, reward, cost in zip(
+            neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
+        ):
+            buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs
@@ -634,6 +650,7 @@ def main(args, cfg_env=None):
                 target_union_trainable=union_trainable,
                 union_scale=union_scale,
                 has_positive=has_positive,
+                has_negative=has_negative,
                 pos_label=config["pos_label"],
                 key=rngs.random_sample(),
             )
