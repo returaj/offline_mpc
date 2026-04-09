@@ -118,7 +118,9 @@ def discounted_sum(arr, gamma):
 
 
 @jax.jit
-def pref_cost_loss_fun(pos_cost, neg_cost, union_cost, has_positive, gamma):
+def pref_cost_loss_fun(
+    pos_cost, neg_cost, union_cost, has_positive, has_negative, gamma
+):
     # neg_cost shape: Batch X Horizon
 
     # batch
@@ -129,12 +131,14 @@ def pref_cost_loss_fun(pos_cost, neg_cost, union_cost, has_positive, gamma):
     # min L = - log[ exp(neg) / (exp(neg) + exp(pos)) ] = log[ 1 + exp(pos - neg) ]
     # L = nn.softplus(pos-neg)
     pos_neg_loss = jnp.mean(
-        has_positive * jax.nn.softplus(pos_traj_cost - neg_traj_cost)
+        has_positive * has_negative * jax.nn.softplus(pos_traj_cost - neg_traj_cost)
     )
     pos_union_loss = jnp.mean(
         has_positive * jax.nn.softplus(pos_traj_cost - union_traj_cost)
     )
-    union_neg_loss = jnp.mean(jax.nn.softplus(union_traj_cost - neg_traj_cost))
+    union_neg_loss = jnp.mean(
+        has_negative * jax.nn.softplus(union_traj_cost - neg_traj_cost)
+    )
 
     loss = pos_neg_loss + pos_union_loss + union_neg_loss
 
@@ -151,38 +155,36 @@ def compute_contrastive_ce_loss(p, q):
 
 @jax.jit
 def contrastive_cost_loss_fun(pos_zs, neg_zs, union_zs, gamma):
-    del pos_zs
+    del pos_zs, neg_zs
 
     temp = 0.1  # value from SupContrast
 
-    dtype = neg_zs.dtype
+    dtype = union_zs.dtype
     # batch X horizon X zdim
-    batch, horizon, _ = neg_zs.shape
+    batch, horizon, _ = union_zs.shape
 
     # logits for union and non-pref
-    neg_zs = jnp.concat(neg_zs, axis=0)  # BH X zdim
     union_zs = jnp.concat(union_zs, axis=0)  # BH X zdim
-    combined_zs = jnp.concat([neg_zs, union_zs], axis=0)  # 2BH X zdim
-    combined_logits = combined_zs @ combined_zs.T / temp  # 2BH X 2BH
+    union_logits = union_zs @ union_zs.T / temp  # BH X BH
     # remove the self instance from the loss fn
-    diag_mask = -1e9 * jnp.eye(combined_logits.shape[0], dtype=dtype)
-    combined_logits = combined_logits + diag_mask
+    diag_mask = -1e9 * jnp.eye(union_logits.shape[0], dtype=dtype)
+    union_logits = union_logits + diag_mask
 
     # state-action pairs in the same trajectory are gamma discounted closer to each other
     # H_mask = [[1, gamma, gamma^2, ..., gamma^(H-1)]] * H
     discounted_mask = gamma ** jnp.arange(horizon, dtype=dtype)
     horizon_mask = jnp.ones((horizon, 1), dtype=dtype) * discounted_mask
-    mask = jnp.eye(2 * batch, dtype=dtype)
-    combined_mask = jnp.kron(mask, horizon_mask)  # 2BH X 2BH
+    mask = jnp.eye(batch, dtype=dtype)
+    union_mask = jnp.kron(mask, horizon_mask)  # BH X BH
     # remove the self instance from the loss fn
-    combined_mask = combined_mask * (1.0 - jnp.eye(combined_mask.shape[0], dtype=dtype))
+    union_mask = union_mask * (1.0 - jnp.eye(union_mask.shape[0], dtype=dtype))
 
-    loss = compute_contrastive_ce_loss(combined_mask, combined_logits)
+    loss = compute_contrastive_ce_loss(union_mask, union_logits)
 
     return loss
 
 
-def cost_loss_grad_fun(cost_model, data, has_positive, gamma):
+def cost_loss_grad_fun(cost_model, data, has_positive, has_negative, gamma):
     # Batch X Horizon X obs_act_dim
     target_pos = jnp.concat([data.pos_obs, data.pos_act], axis=-1)
     target_neg = jnp.concat([data.neg_obs, data.neg_act], axis=-1)
@@ -204,6 +206,7 @@ def cost_loss_grad_fun(cost_model, data, has_positive, gamma):
             neg_cost=neg_cost,
             union_cost=union_cost,
             has_positive=has_positive,
+            has_negative=has_negative,
             gamma=gamma,
         )
 
@@ -402,6 +405,7 @@ def train_step(
     batch_data,
     config,
     has_positive,
+    has_negative,
     steps,
 ):
     cost_cond = (steps % config.update_cost_freq) == 0
@@ -409,6 +413,7 @@ def train_step(
         cost_model=cost_model,
         data=batch_data,
         has_positive=has_positive,
+        has_negative=has_negative,
         gamma=config.gamma,
     )
     cost_grads = jax.tree.map(
@@ -448,12 +453,12 @@ def train_step(
         bc_policy_target, bc_policy, policy_cond * config.update_tau
     )
 
-    mean_pos_reward = batch_data.pos_reward.sum(-1).mean()
-    mean_neg_reward = batch_data.neg_reward.sum(-1).mean()
+    mean_pos_reward = has_positive * batch_data.pos_reward.sum(-1).mean()
+    mean_neg_reward = has_negative * batch_data.neg_reward.sum(-1).mean()
     mean_union_reward = batch_data.union_reward.sum(-1).mean()
 
-    mean_pos_cost = batch_data.pos_cost.sum(-1).mean()
-    mean_neg_cost = batch_data.neg_cost.sum(-1).mean()
+    mean_pos_cost = has_positive * batch_data.pos_cost.sum(-1).mean()
+    mean_neg_cost = has_negative * batch_data.neg_cost.sum(-1).mean()
     mean_union_cost = batch_data.union_cost.sum(-1).mean()
 
     return (
@@ -484,6 +489,7 @@ def train_n_steps(
     data_buffer,
     config,
     has_positive,
+    has_negative,
     key,
 ):
     num_steps = config.log_freq
@@ -521,6 +527,7 @@ def train_n_steps(
             batch_data=batch_data,
             config=config,
             has_positive=has_positive,
+            has_negative=has_negative,
             steps=i,
         )
 
@@ -568,6 +575,12 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     has_positive = float(args.num_preferred > 0)
+    has_negative = float(args.num_non_preferred > 0)
+
+    assert (
+        has_positive or has_negative
+    ), "Both preferred and non-preferred trajectory dataset cannot be empty together."
+
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -651,18 +664,14 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    pos_data, neg_data, union_data = get_pos_neg_and_union_data(data, trajectory_cfg)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(
+        data, trajectory_cfg, save_dir=args.log_dir
+    )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         pos_data, neg_data, union_data, mu_obs, std_obs = get_normalized_data(
             pos_data, neg_data, union_data
         )
-
-    neg_observations = neg_data["observations"]
-    neg_actions = neg_data["actions"]
-    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_rewards = neg_data["rewards"]
-    neg_costs = neg_data["costs"]
 
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
@@ -672,19 +681,23 @@ def main(args, cfg_env=None):
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
-        neg_observations.shape[1] == ep_len
-    ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
+        union_observations.shape[1] == ep_len
+    ), f"{union_observations.shape[1]} episode length is different from {ep_len}"
 
     pos_data_size = 1
     if has_positive:
         pos_data_size = np.prod(pos_data["observations"].shape[:-1])
+
+    neg_data_size = 1
+    if has_negative:
+        neg_data_size = np.prod(neg_data["observations"].shape[:-1])
 
     buffer = OSILBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=pos_data_size,
-        neg_data_size=np.prod(neg_observations.shape[:-1]),
+        neg_data_size=neg_data_size,
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -703,10 +716,17 @@ def main(args, cfg_env=None):
         ):
             buffer.add(obs, act, done, reward, cost, is_pos=True)
 
-    for obs, act, done, reward, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
-    ):
-        buffer.add(obs, act, done, reward, cost, is_neg=True)
+    if has_negative:
+        neg_observations = neg_data["observations"]
+        neg_actions = neg_data["actions"]
+        neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+        neg_rewards = neg_data["rewards"]
+        neg_costs = neg_data["costs"]
+
+        for obs, act, done, reward, cost in zip(
+            neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
+        ):
+            buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs
@@ -741,6 +761,7 @@ def main(args, cfg_env=None):
             data_buffer=data_buffer,
             config=config_data,
             has_positive=has_positive,
+            has_negative=has_negative,
             key=rngs.random_sample(),
         )
 

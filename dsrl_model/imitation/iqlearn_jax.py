@@ -47,7 +47,7 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "update_critic_freq": 2,
     "update_tau": 0.005,
-    "train_horizon": 5,  # 20
+    "train_horizon": 5,  # min horizon 2 is required
     "weight_decay": 0.01,
     "grad_reg_coeffs": 10.0,
     "total_iteration": int(1e6),
@@ -362,7 +362,7 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
-    trajectory_cfg["num_negative_trajectories"] = 2
+    trajectory_cfg["num_negative_trajectories"] = 0
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
     trajectory_cfg["data_inpaint"] = args.data_inpaint
@@ -427,7 +427,9 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    pos_data, neg_data, union_data = get_pos_neg_and_union_data(data, trajectory_cfg)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(
+        data, trajectory_cfg, save_dir=args.log_dir
+    )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         pos_data, neg_data, union_data, mu_obs, std_obs = get_normalized_data(
@@ -439,12 +441,6 @@ def main(args, cfg_env=None):
     pos_dones = pos_data["timeouts"] | pos_data["terminals"]
     pos_rewards = pos_data["rewards"]
     pos_costs = pos_data["costs"]
-
-    neg_observations = neg_data["observations"]
-    neg_actions = neg_data["actions"]
-    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_rewards = neg_data["rewards"]
-    neg_costs = neg_data["costs"]
 
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
@@ -462,7 +458,7 @@ def main(args, cfg_env=None):
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=np.prod(pos_observations.shape[:-1]),
-        neg_data_size=np.prod(neg_observations.shape[:-1]),
+        neg_data_size=1,  # dummy negative data
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -473,11 +469,6 @@ def main(args, cfg_env=None):
         pos_observations, pos_actions, pos_dones, pos_rewards, pos_costs
     ):
         buffer.add(obs, act, done, reward, cost, is_pos=True)
-
-    for obs, act, done, reward, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
-    ):
-        buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs

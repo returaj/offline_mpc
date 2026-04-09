@@ -113,6 +113,7 @@ def train_cost_model(
     target_union_obs,
     target_union_act,
     has_positive,
+    has_negative,
     gamma,
 ):
     # Batch X Horizon X obs_act_dim
@@ -133,9 +134,11 @@ def train_cost_model(
 
         # min L = - log[ exp(neg) / (exp(neg) + exp(pos)) ] = log[ 1 + exp(pos - neg) ]
         # L = nn.softplus(pos-neg)
-        pos_neg_loss = has_positive * jax.nn.softplus(pos_cost - neg_cost)
+        pos_neg_loss = (
+            has_positive * has_negative * jax.nn.softplus(pos_cost - neg_cost)
+        )
         pos_union_loss = has_positive * jax.nn.softplus(pos_cost - union_cost)
-        union_neg_loss = jax.nn.softplus(union_cost - neg_cost)
+        union_neg_loss = has_negative * jax.nn.softplus(union_cost - neg_cost)
 
         loss = pos_neg_loss + pos_union_loss + union_neg_loss
 
@@ -210,6 +213,12 @@ def main(args, cfg_env=None):
     jax.default_device = jax.devices(args.device)[args.device_id]
 
     has_positive = float(args.num_preferred > 0)
+    has_negative = float(args.num_non_preferred > 0)
+
+    assert (
+        has_positive or has_negative
+    ), "Both preferred and non-preferred trajectory dataset cannot be empty together."
+
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
@@ -270,18 +279,14 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    pos_data, neg_data, union_data = get_pos_neg_and_union_data(data, trajectory_cfg)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(
+        data, trajectory_cfg, save_dir=args.log_dir
+    )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
         pos_data, neg_data, union_data, mu_obs, std_obs = get_normalized_data(
             pos_data, neg_data, union_data
         )
-
-    neg_observations = neg_data["observations"]
-    neg_actions = neg_data["actions"]
-    neg_dones = neg_data["timeouts"] | neg_data["terminals"]
-    neg_rewards = neg_data["rewards"]
-    neg_costs = neg_data["costs"]
 
     union_observations = union_data["observations"]
     union_actions = union_data["actions"]
@@ -291,19 +296,23 @@ def main(args, cfg_env=None):
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
     assert (
-        neg_observations.shape[1] == ep_len
-    ), f"{neg_observations.shape[1]} episode length is different from {ep_len}"
+        union_observations.shape[1] == ep_len
+    ), f"{union_observations.shape[1]} episode length is different from {ep_len}"
 
     pos_data_size = 1
     if has_positive:
         pos_data_size = np.prod(pos_data["observations"].shape[:-1])
+
+    neg_data_size = 1
+    if has_negative:
+        neg_data_size = np.prod(neg_data["observations"].shape[:-1])
 
     buffer = OnPolicyBuffer(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         pos_data_size=pos_data_size,
-        neg_data_size=np.prod(neg_observations.shape[:-1]),
+        neg_data_size=neg_data_size,
         union_data_size=np.prod(union_observations.shape[:-1]),
         horizon=config["train_horizon"],
         batch_size=batch_size,
@@ -322,10 +331,17 @@ def main(args, cfg_env=None):
         ):
             buffer.add(obs, act, done, reward, cost, is_pos=True)
 
-    for obs, act, done, reward, cost in zip(
-        neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
-    ):
-        buffer.add(obs, act, done, reward, cost, is_neg=True)
+    if has_negative:
+        neg_observations = neg_data["observations"]
+        neg_actions = neg_data["actions"]
+        neg_dones = neg_data["timeouts"] | neg_data["terminals"]
+        neg_rewards = neg_data["rewards"]
+        neg_costs = neg_data["costs"]
+
+        for obs, act, done, reward, cost in zip(
+            neg_observations, neg_actions, neg_dones, neg_rewards, neg_costs
+        ):
+            buffer.add(obs, act, done, reward, cost, is_neg=True)
 
     for obs, act, done, reward, cost in zip(
         union_observations, union_actions, union_dones, union_rewards, union_costs
@@ -381,6 +397,7 @@ def main(args, cfg_env=None):
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 has_positive=has_positive,
+                has_negative=has_negative,
                 gamma=config["gamma"],
             )
 
@@ -394,6 +411,14 @@ def main(args, cfg_env=None):
                 target_union_act=target_union_act,
                 has_positive=has_positive,
             )
+
+            mean_pos_reward = has_positive * target_pos_reward.sum(-1).mean()
+            mean_neg_reward = has_negative * target_neg_reward.sum(-1).mean()
+            mean_union_reward = target_union_reward.sum(-1).mean()
+
+            mean_pos_cost = has_positive * target_pos_cost.sum(-1).mean()
+            mean_neg_cost = has_negative * target_neg_cost.sum(-1).mean()
+            mean_union_cost = target_union_cost.sum(-1).mean()
 
             logger.logged = False
 
@@ -430,26 +455,13 @@ def main(args, cfg_env=None):
                 logger.log_tabular("Loss/Loss_bc_pos_policy", bc_pos_loss.item())
                 logger.log_tabular("Loss/Loss_bc_union_policy", bc_union_loss.item())
 
-                logger.log_tabular(
-                    "Reward/pos", jnp.sum(target_pos_reward, axis=-1).mean().item()
-                )
-                logger.log_tabular(
-                    "Reward/neg", jnp.sum(target_neg_reward, axis=-1).mean().item()
-                )
-                logger.log_tabular(
-                    "Reward/union",
-                    jnp.sum(target_union_reward, axis=-1).mean().item(),
-                )
+                logger.log_tabular("Reward/pos", mean_pos_reward.item())
+                logger.log_tabular("Reward/neg", mean_neg_reward.item())
+                logger.log_tabular("Reward/union", mean_union_reward.item())
 
-                logger.log_tabular(
-                    "Cost/pos", jnp.sum(target_pos_cost, axis=-1).mean().item()
-                )
-                logger.log_tabular(
-                    "Cost/neg", jnp.sum(target_neg_cost, axis=-1).mean().item()
-                )
-                logger.log_tabular(
-                    "Cost/union", jnp.sum(target_union_cost, axis=-1).mean().item()
-                )
+                logger.log_tabular("Cost/pos", mean_pos_cost.item())
+                logger.log_tabular("Cost/neg", mean_neg_cost.item())
+                logger.log_tabular("Cost/union", mean_union_cost.item())
 
                 logger.log_tabular(
                     "Norm/cost_model",
