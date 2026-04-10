@@ -209,8 +209,25 @@ class OSILDataBuffer(OnPolicyDataBuffer):
 
 
 @struct.dataclass
+class SafeCLDataBuffer(OnPolicyDataBuffer):
+    union_weight: jnp.ndarray
+
+    @staticmethod
+    def update_union_weight(obj, idx, weight):
+        weight = jnp.array(weight, dtype=obj.union_weight.dtype)
+        union_weight = update_arr_jit(obj.union_weight, idx, weight)
+        return obj.replace(union_weight=union_weight)
+
+    @staticmethod
+    def sample_batch(obj, p_idx, n_idx, u_idx):
+        batch = super().sample_batch(obj, p_idx, n_idx, u_idx)
+        union_weight = sample_arr(obj.union_weight, u_idx)
+        return batch.replace(union_weight=union_weight)
+
+
+@struct.dataclass
 class ILIDDataBuffer(OnPolicyDataBuffer):
-    union_weight: jnp.ndarray = None
+    union_weight: jnp.ndarray
 
     @staticmethod
     def sample_batch(obj, p_idx, n_idx, u_idx):
@@ -547,7 +564,7 @@ class OSILBuffer(OnPolicyBuffer):
 class ILIDBuffer(OnPolicyBuffer):
     def to_jax_ndarray(self):
         super().to_jax_ndarray()
-        self._union_weight = np.zeros((self.union_capacity,), dtype=self.dtype)
+        self._union_weight = jnp.zeros((self.union_capacity,), dtype=self.dtype)
 
     def get_data_buffer(self):
         return super().get_data_buffer(ILIDDataBuffer, union_weight=self._union_weight)
@@ -565,7 +582,7 @@ class SafeCLBuffer(OnPolicyBuffer):
         horizon,
         batch_size,
         ep_len=1000,
-        priorities_alpha=1,
+        priorities_alpha=1.0,
     ):
         super().__init__(
             rngs,
@@ -579,17 +596,22 @@ class SafeCLBuffer(OnPolicyBuffer):
             ep_len,
             priorities_alpha,
         )
-        self._union_labels = np.zeros((self.union_capacity,), dtype=self.dtype)
+        self._union_weight = np.zeros((self.union_capacity,), dtype=self.dtype)
 
     def to_jax_ndarray(self):
         super().to_jax_ndarray()
-        self._union_labels = jnp.array(self._union_labels, dtype=self.dtype)
+        self._union_weight = jnp.array(self._union_weight, dtype=self.dtype)
+
+    def get_data_buffer(self):
+        return super().get_data_buffer(
+            SafeCLDataBuffer, union_weight=self._union_weight
+        )
 
     def update_labels(self, idxs, labels):
         labels = jnp.array(labels, dtype=self.dtype)
-        self._union_labels = update_arr_jit(self._union_labels, idxs, labels)
+        self._union_weight = update_arr_jit(self._union_weight, idxs, labels)
 
     def sample_batch(self, p_idx, n_idx, u_idx):
         batch = super().sample_batch(p_idx, n_idx, u_idx)
-        label = sample_arr(self._union_labels, u_idx)
+        label = sample_arr(self._union_weight, u_idx)
         return (*batch, label)
