@@ -703,7 +703,7 @@ def main(args, cfg_env=None):
 
     steps = 0
     while steps < config["total_iteration"]:
-        do_warmup = (steps % config_data.warmup_steps) == 0
+        do_warmup = steps >= config_data.warmup_steps
 
         val, num_itr = train_n_steps(
             curriculum_embedding_model=curriculum_embedding_model,
