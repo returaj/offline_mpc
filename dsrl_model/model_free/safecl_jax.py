@@ -46,7 +46,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "update_bc_freq": 1,
     "update_embd_freq": int(1e3),
-    "warmup_steps": int(1e4),
+    "warmup_steps": int(3e4),
     "value_temp": 0.1,
     "value_limit": 0.85,
     "update_tau": 0.01,
