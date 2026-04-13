@@ -21,6 +21,7 @@ from jax import debug
 from dsrl_model.utils.buffer_jax import SafeCLBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
+    get_nonpref_mean_value,
     get_normalized_data,
     get_pos_neg_and_union_data,
 )
@@ -40,7 +41,7 @@ default_cfg = {
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
     "embd_size": 128,
-    "max_grad_norm": 10.0,
+    "max_grad_norm": 5.0,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
@@ -169,10 +170,11 @@ def get_union_trainable(
     embedding_model,
     data,
     score_limit,
+    env_name,
 ):
     num_models = 5
     dtype = data.union_obs.dtype
-    batch = data.union_obs.shape[0]
+    batch, horizon, _ = data.union_obs.shape
 
     # Batch X Horizon X obs_act_dim
     target_union = jnp.concat([data.union_obs, data.union_act], axis=-1)
@@ -206,6 +208,14 @@ def get_union_trainable(
     mean_trainable_cost, mean_non_trainable_cost = get_trainable_mean_values(
         data.union_cost, trainable_mask
     )
+
+    mean_trainable_nonpref = get_nonpref_mean_value(
+        mean_trainable_reward, mean_trainable_cost, horizon, env_name
+    )
+    mean_non_trainable_nonpref = get_nonpref_mean_value(
+        mean_non_trainable_reward, mean_non_trainable_cost, horizon, env_name
+    )
+
     return (
         trainable_mask,
         union_score,
@@ -216,6 +226,8 @@ def get_union_trainable(
         mean_non_trainable_reward,
         mean_trainable_cost,
         mean_non_trainable_cost,
+        mean_trainable_nonpref,
+        mean_non_trainable_nonpref,
     )
 
 
@@ -380,6 +392,7 @@ def train_step(
         embedding_model=embedding_model_target,
         data=batch_data,
         score_limit=config.value_limit,
+        env_name=config.env_name,
     )
 
     embedding_loss, embedding_grads, *embedding_aux = embedding_loss_grad_fun(
@@ -504,7 +517,7 @@ def train_n_steps(
             policy_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 25
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 27
     init_carry = (
         init_val,
         key2,
@@ -562,6 +575,10 @@ def main(args, cfg_env=None):
     batch_size = args.batch_size or config.get("batch_size")
     config["batch_size"] = batch_size
 
+    # env name
+    env_name = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
+    config["env_name"] = env_name
+
     config_data = make_static_config_from_dict(name="State", d=config)()
 
     # evaluation environment
@@ -616,8 +633,7 @@ def main(args, cfg_env=None):
     )
 
     # data
-    agent_task = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
-    ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[agent_task]
+    ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[env_name]
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
@@ -728,6 +744,8 @@ def main(args, cfg_env=None):
             mean_non_trainable_reward,
             mean_trainable_cost,
             mean_non_trainable_cost,
+            mean_trainable_nonpref,
+            mean_non_trainable_nonpref,
             embedding_loss,
             embedding_pos_loss,
             embedding_neg_loss,
@@ -769,6 +787,13 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_random_score", embedding_random_score.item())
         logger.log_tabular("Mean/union_score", mean_score.item())
         logger.log_tabular("Mean/union_std", std_score.item())
+
+        logger.log_tabular(
+            "NonPrefScore/union_trainable", mean_trainable_nonpref.item()
+        )
+        logger.log_tabular(
+            "NonPrefScore/union_non_trainable", mean_non_trainable_nonpref.item()
+        )
 
         logger.log_tabular("Percentage/union_trainable", trainable_percent.item())
 

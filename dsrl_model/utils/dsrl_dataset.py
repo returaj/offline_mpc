@@ -7,6 +7,34 @@ import numpy as np
 EP = 1e-7
 
 
+def normalize_nonpref_reward(arr, traj_len, env_name):
+    """
+    max_reward: gets a score of 0.0
+    min_reward: gets a score of 1.0
+    """
+    norm_val = traj_len / dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[env_name]
+    min_reward = norm_val * dsrl_infos.MIN_EPISODE_REWARD[env_name]
+    max_reward = norm_val * dsrl_infos.MAX_EPISODE_REWARD[env_name]
+    return (max_reward - arr) / (max_reward - min_reward)
+
+
+def normalize_nonpref_cost(arr, traj_len, env_name):
+    """
+    min_cost: gets a score of 0.0
+    max_cost: gets a score of 1.0
+    """
+    norm_val = traj_len / dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[env_name]
+    min_cost = norm_val * dsrl_infos.MIN_EPISODE_COST[env_name]
+    max_cost = norm_val * dsrl_infos.MAX_EPISODE_COST[env_name]
+    return (arr - min_cost) / (max_cost - min_cost)
+
+
+def get_nonpref_mean_value(reward_arr, cost_arr, traj_len, env_name):
+    reward_score = normalize_nonpref_reward(reward_arr, traj_len, env_name)
+    cost_score = normalize_nonpref_cost(cost_arr, traj_len, env_name)
+    return reward_score + cost_score
+
+
 def get_post_processed_dataset(env, data, config, task):
     density = config["density"]
     cbins, rbins = 10, 50
