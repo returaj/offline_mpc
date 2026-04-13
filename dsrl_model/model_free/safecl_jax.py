@@ -169,8 +169,7 @@ def get_union_trainable(
     curriculum_embedding_model,
     embedding_model,
     data,
-    score_limit,
-    env_name,
+    config,
 ):
     num_models = 5
     dtype = data.union_obs.dtype
@@ -197,7 +196,7 @@ def get_union_trainable(
     # Batch
     union_score = jnp.mean(union_scores, axis=0)
 
-    trainable_mask = (union_score > score_limit).astype(dtype)
+    trainable_mask = (union_score > config.value_limit).astype(dtype)
     trainable_count = trainable_mask.sum()
     trainable_percent = trainable_count / batch
 
@@ -210,10 +209,20 @@ def get_union_trainable(
     )
 
     mean_trainable_nonpref = (trainable_percent > 0.0) * get_nonpref_mean_value(
-        mean_trainable_reward, mean_trainable_cost, horizon, env_name
+        mean_trainable_reward,
+        mean_trainable_cost,
+        horizon,
+        config.env_name,
+        rscale=config.nonpref_reward_scale,
+        cscale=config.nonpref_cost_scale,
     )
     mean_non_trainable_nonpref = get_nonpref_mean_value(
-        mean_non_trainable_reward, mean_non_trainable_cost, horizon, env_name
+        mean_non_trainable_reward,
+        mean_non_trainable_cost,
+        horizon,
+        config.env_name,
+        rscale=config.nonpref_reward_scale,
+        cscale=config.nonpref_cost_scale,
     )
 
     return (
@@ -391,8 +400,7 @@ def train_step(
         curriculum_embedding_model=curriculum_embedding_model,
         embedding_model=embedding_model_target,
         data=batch_data,
-        score_limit=config.value_limit,
-        env_name=config.env_name,
+        config=config,
     )
 
     embedding_loss, embedding_grads, *embedding_aux = embedding_loss_grad_fun(
@@ -578,6 +586,14 @@ def main(args, cfg_env=None):
     # env name
     env_name = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
     config["env_name"] = env_name
+
+    # nonpref_reward_scale and nonpref_cost_scale
+    config["nonpref_reward_scale"] = 1.0
+    config["nonpref_cost_scale"] = 1.0
+    if args.data_inpaint == "cost_only":
+        config["nonpref_reward_scale"] = 0.0
+    if args.data_inpaint == "reward_only":
+        config["nonpref_cost_scale"] = 0.0
 
     config_data = make_static_config_from_dict(name="State", d=config)()
 

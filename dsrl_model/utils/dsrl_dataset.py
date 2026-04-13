@@ -29,10 +29,10 @@ def normalize_nonpref_cost(arr, traj_len, env_name):
     return (arr - min_cost) / (max_cost - min_cost)
 
 
-def get_nonpref_mean_value(reward_arr, cost_arr, traj_len, env_name):
-    reward_score = normalize_nonpref_reward(reward_arr, traj_len, env_name)
-    cost_score = normalize_nonpref_cost(cost_arr, traj_len, env_name)
-    return reward_score + cost_score
+def get_nonpref_mean_value(reward_arr, cost_arr, traj_len, env_name, rscale, cscale):
+    nonpref_reward_score = normalize_nonpref_reward(reward_arr, traj_len, env_name)
+    nonpref_cost_score = normalize_nonpref_cost(cost_arr, traj_len, env_name)
+    return rscale * nonpref_reward_score + cscale * nonpref_cost_score
 
 
 def get_post_processed_dataset(env, data, config, task):
