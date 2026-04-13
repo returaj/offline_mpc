@@ -2,6 +2,7 @@ import argparse
 from distutils.util import strtobool
 
 import gymnasium
+from flax import struct
 
 
 class ActionRepeater(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
@@ -37,6 +38,29 @@ def get_params_norm(params, grads=False):
         else:
             total_norm += p.data.norm(2).item()
     return total_norm
+
+
+def make_static_config_from_dict(name: str, d: dict):
+    annotations = {}
+    defaults = {}
+
+    for k, v in d.items():
+        annotations[k] = type(v)
+        defaults[k] = struct.field(
+            default=v,
+            pytree_node=False,  # made it fixed / immutable ?
+        )
+
+    cls = type(
+        name,
+        (),
+        {
+            "__annotations__": annotations,
+            **defaults,
+        },
+    )
+
+    return struct.dataclass(cls)
 
 
 def single_agent_args():
@@ -127,6 +151,12 @@ def single_agent_args():
             "help": "Default common learning rate for the models",
         },
         {
+            "name": "--lmbda",
+            "type": float,
+            "default": None,  # 1e-3 performs better
+            "help": "hyperparameter lambda value",
+        },
+        {
             "name": "--cost-weight-temp",
             "type": float,
             "default": None,
@@ -137,6 +167,12 @@ def single_agent_args():
             "type": float,
             "default": None,
             "help": "Use default value for value_weight_temp",
+        },
+        {
+            "name": "--value-weight-limit",
+            "type": float,
+            "default": None,
+            "help": "Use default value for value_weight_limit",
         },
         {
             "name": "--update-priority-buffer",
@@ -247,6 +283,18 @@ def single_agent_args():
             "help": "weighted temperature hyper-parameter for BC",
         },
         {
+            "name": "--use-osil-weight",
+            "type": lambda x: bool(strtobool(x)),
+            "default": True,
+            "help": "use osil-style value weight in policy learning",
+        },
+        {
+            "name": "--num-preferred",
+            "type": int,
+            "default": 0,
+            "help": "number of preferred trajectories D_P",
+        },
+        {
             "name": "--num-non-preferred",
             "type": int,
             "default": 50,
@@ -275,6 +323,18 @@ def single_agent_args():
             "type": lambda x: bool(strtobool(x)),
             "default": False,
             "help": "use von Mises Fisher hypershere samples for multimode representation",
+        },
+        {
+            "name": "--data-inpaint",
+            "type": str,
+            "default": None,
+            "help": "set data inpaint tuple from full, reward_only, cost_only",
+        },
+        {
+            "name": "--preferred-label",
+            "type": float,
+            "default": 0.0,
+            "help": "preferred label score for training safecl.",
         },
     ]
     # Create argument parser

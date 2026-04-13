@@ -1005,7 +1005,7 @@ class SafeDiceTanhMixtureActor(nn.Module):
         # logprob = pretanh_logprob - (1.0 - actions.pow(2)).clamp(
         #     min=self.eps
         # ).log().sum(-1)
-        return pretanh_logprob + jacobian_det
+        return pretanh_logprob - jacobian_det
 
     def action(self, obs, deterministic=True):
         x = self.pre_encoder(obs)

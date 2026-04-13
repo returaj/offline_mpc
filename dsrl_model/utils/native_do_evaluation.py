@@ -115,8 +115,9 @@ def load_flax_model(obs_dim, act_dim, hidden_size, path, device):
     del device
     restored_pure_dict = joblib.load(path)
 
+    rngs = nnx.Rngs(default=0, params=0, dropout=0, random_sample=0)
     model = SafeDiceTanhMixtureActor(
-        rngs=nnx.Rngs(0), obs_dim=obs_dim, act_dim=act_dim, hidden_size=hidden_size
+        rngs=rngs, obs_dim=obs_dim, act_dim=act_dim, hidden_size=hidden_size
     )
     abstract_model = nnx.eval_shape(lambda: model)
     graphdef, abstract_state = nnx.split(abstract_model)

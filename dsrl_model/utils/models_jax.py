@@ -35,6 +35,16 @@ def l2_normalize(x, axis=None, eps=EPS):
     return x * jax.lax.rsqrt((x * x).sum(axis=axis, keepdims=True) + eps)
 
 
+def log1pexp(x, eps=EPS):
+    # safe implementation of L = log(1 + exp(x))
+    # x > 0: L = x + log(1 + exp(-x))
+    # x <=0: L = log(1 + exp(x))
+    # combined: L = Relu(x) + log(1 + exp(-|x|)) = jax.nn.softplus(x)
+    abs_x = jnp.abs(x)
+    pos_x = jax.nn.relu(x)
+    return pos_x + jnp.log(1 + jnp.exp(-abs_x))
+
+
 def get_tree_norm(tree):
     square_tree = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), tree)
     total_square = jax.tree_util.tree_reduce(lambda acc, x: acc + x, square_tree)
@@ -53,6 +63,15 @@ def bce_loss(logits, labels, weights=1.0):
     return jnp.mean(loss)
 
 
+class Scalar(nnx.Module):
+    def __init__(self, val):
+        dtype = jnp.float32
+        self.val = nnx.Param(jnp.array(val, dtype=dtype))
+
+    def __call__(self):
+        return self.val
+
+
 class SafeDiceTanhMixtureActor(nnx.Module):
     def __init__(
         self,
@@ -61,8 +80,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         act_dim,
         hidden_size=256,
         num_components=2,
-        mean_range=(-7.0, 7.0),
-        logstd_range=(-5.0, 2.0),
+        mean_range=(-5.0, 5.0),
+        logstd_range=(-5.0, 1.0),
         eps=EPS,
         mdn_temperature=1.0,
     ):
@@ -87,7 +106,7 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         self.means = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
         self.logstds = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
 
-    def __call__(self, obs):
+    def get_pretanh_action_dist(self, obs):
         x = self.pre_encoder(obs)
 
         mixture_logits = self.logits(x) / self.mdn_temp
@@ -102,12 +121,44 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         component_dist = distrax.Independent(component_dist, 1)
         pretanh_action_dist = distrax.MixtureSameFamily(mixture_dist, component_dist)
 
-        mixture_sample = gumbel_softmax(self.rngs(), mixture_logits, tau=1.0, hard=True)
-        component_sample = component_dist.sample(seed=self.rngs())
-        pretanh_actions = jnp.einsum("ij,ijk->ik", mixture_sample, component_sample)
-        actions = jax.nn.tanh(pretanh_actions)
+        return pretanh_action_dist
 
-        return actions, pretanh_actions, pretanh_action_dist
+    def __call__(self, obs):
+        pretanh_action_dist = self.get_pretanh_action_dist(obs)
+
+        pretanh_actions = pretanh_action_dist.sample(seed=self.rngs())
+        actions = jnp.tanh(pretanh_actions)
+
+        # mixture_sample = gumbel_softmax(self.rngs(), mixture_logits, tau=1.0, hard=True)
+        # component_sample = component_dist.sample(seed=self.rngs())
+        # pretanh_actions = jnp.einsum("ij,ijk->ik", mixture_sample, component_sample)
+        # actions = jax.nn.tanh(pretanh_actions)
+
+        pretanh_logp = pretanh_action_dist.log_prob(pretanh_actions)
+        # jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
+        jacobian_det = jnp.sum(
+            2.0
+            * (jnp.log(2.0) - pretanh_actions - nnx.softplus(-2.0 * pretanh_actions)),
+            axis=-1,
+        )
+        log_prob = pretanh_logp - jacobian_det
+
+        return actions, log_prob, pretanh_actions, pretanh_action_dist
+
+    def get_log_prob(self, obs, act):
+        act = jnp.clip(act, -1.0 + self.eps, 1.0 - self.eps)
+        pretanh_act = jnp.atanh(act)
+
+        pretanh_dist = self.get_pretanh_action_dist(obs)
+        pretanh_logp = pretanh_dist.log_prob(pretanh_act)
+        # jacobian_det = jnp.sum(jnp.log(1 - actions**2 + self.eps), axis=-1)
+        jacobian_det = jnp.sum(
+            2.0 * (jnp.log(2.0) - pretanh_act - nnx.softplus(-2.0 * pretanh_act)),
+            axis=-1,
+        )
+        log_prob = pretanh_logp - jacobian_det
+
+        return log_prob
 
     @functools.partial(jax.jit, static_argnums=0)
     def action_w_key(self, key, obs, deterministic=False):
@@ -145,7 +196,7 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
 
 class ExpCostModel(nnx.Module):
-    def __init__(self, rngs, x_dims, hidden_size=256):
+    def __init__(self, rngs, x_dims, hidden_size=256, clip_range=(0.0, 1.0)):
         sizes = [x_dims, hidden_size, hidden_size, 1]
         layers = list()
         for j in range(len(sizes) - 1):
@@ -153,10 +204,59 @@ class ExpCostModel(nnx.Module):
             affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
             layers += [affine_layer, act]
         self.model = nnx.Sequential(*layers)
+        self.min, self.max = clip_range
 
     def __call__(self, x):
         x = jnp.squeeze(self.model(x), axis=-1)
-        return jax.nn.sigmoid(x)
+        ret = jax.nn.sigmoid(x)
+        ret = jnp.clip(ret, min=self.min, max=self.max)
+        return ret
+
+
+class ContrastiveCostModel(nnx.Module):
+    def __init__(self, rngs, x_dims, hidden_size=256):
+        sizes = [x_dims, hidden_size, hidden_size, 128]
+        layers = list()
+        for j in range(len(sizes) - 1):
+            act = nnx.elu if j < len(sizes) - 2 else jax.nn.identity
+            affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
+            layers += [affine_layer, act]
+        self.encoder = nnx.Sequential(*layers)
+        self.projection = nnx.Linear(sizes[-1], 1, rngs=rngs)
+
+    def __call__(self, x):
+        z = l2_normalize(self.encoder(x), axis=-1)
+        proj_z = jnp.squeeze(self.projection(z), axis=-1)
+        cost = jax.nn.sigmoid(proj_z)
+        return z, cost
+
+
+class TdmpcValue(nnx.Module):
+    def __init__(self, rngs, x_dim, hidden_size=256):
+        zero_init = nnx.initializers.zeros
+
+        self.model = nnx.Sequential(
+            nnx.Linear(x_dim, hidden_size, rngs=rngs),
+            nnx.LayerNorm(hidden_size, rngs=rngs),
+            nnx.tanh,
+            nnx.Linear(hidden_size, hidden_size, rngs=rngs),
+            nnx.elu,
+            nnx.Linear(
+                hidden_size, 1, kernel_init=zero_init, bias_init=zero_init, rngs=rngs
+            ),
+        )
+
+    def __call__(self, x):
+        return jnp.squeeze(self.model(x), axis=-1)
+
+
+class EnsembleValue(nnx.Module):
+    def __init__(self, rngs, x_dim, hidden_size=256):
+        self.v1 = TdmpcValue(rngs, x_dim, hidden_size)
+        self.v2 = TdmpcValue(rngs, x_dim, hidden_size)
+
+    def __call__(self, x):
+        return self.v1(x), self.v2(x)
 
 
 def positionalencoding1d(d_model, length):
@@ -201,15 +301,13 @@ class TransformerBlock(nnx.Module):
 
     def __call__(self, x, mask=None, training=False):
         # x shape: batch x horizon x d_model
-        attn_x = self.dp1(self.attn(x, mask=mask), deterministic=not training)
+        attn_x = self.dp1(self.attn(self.ln1(x), mask=mask), deterministic=not training)
         # residual connection
         x = x + attn_x
-        x = self.ln1(x)
 
-        ff_x = self.dp2(self.ff(x), deterministic=not training)
+        ff_x = self.dp2(self.ff(self.ln2(x)), deterministic=not training)
         # residual connection
         x = x + ff_x
-        x = self.ln2(x)
         return x
 
 
