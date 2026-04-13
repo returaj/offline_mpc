@@ -209,7 +209,7 @@ def get_union_trainable(
         data.union_cost, trainable_mask
     )
 
-    mean_trainable_nonpref = get_nonpref_mean_value(
+    mean_trainable_nonpref = (trainable_percent > 0.0) * get_nonpref_mean_value(
         mean_trainable_reward, mean_trainable_cost, horizon, env_name
     )
     mean_non_trainable_nonpref = get_nonpref_mean_value(
