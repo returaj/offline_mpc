@@ -122,6 +122,25 @@ def kernel_density_entropy(samples, mask, sigma=0.2):
     return entropy
 
 
+def get_multimodel_score(union, target_z, embedding_model):
+    num_models = 5
+
+    @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
+    def multimodel(carry):
+        x, target_z, model = carry
+        # Batch X embd_dim
+        z = model(x)
+        # Batch
+        score = jnp.einsum("ij,ij->i", z, target_z)
+        return carry, score
+
+    # 5 X Batch
+    _, union_scores = multimodel((union, target_z, embedding_model))
+    # use mean of 5 models to estimate the union score
+    union_score = jnp.mean(union_scores, axis=0)
+    return union_score
+
+
 @nnx.jit
 def polyak_update(target_model, curr_model, tau):
     target_param = nnx.state(target_model, nnx.Param)
@@ -171,7 +190,6 @@ def get_union_trainable(
     data,
     config,
 ):
-    num_models = 5
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
@@ -181,20 +199,13 @@ def get_union_trainable(
     # Batch X embd_dim
     target_union_z = curriculum_embedding_model(target_union, training=False)
 
-    @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
-    def multimodel(carry):
-        x, target_z, model = carry
-        # Batch X embd_dim
-        z = model(x)
-        # Batch
-        score = jnp.einsum("ij,ij->i", z, target_z)
-        return carry, score
+    # # multimodel estimation of the union score
+    # union_score = get_multimodel_score(target_union, target_union_z, embedding_model)
 
-    # 5 X Batch
-    _, union_scores = multimodel((target_union, target_union_z, embedding_model))
-    # use mean of 5 models to estimate the union score
+    # Batch X embd_dim
+    union_z = embedding_model(target_union, training=False)
     # Batch
-    union_score = jnp.mean(union_scores, axis=0)
+    union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
 
     trainable_mask = (union_score > config.value_limit).astype(dtype)
     trainable_count = trainable_mask.sum()
