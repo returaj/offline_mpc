@@ -45,7 +45,7 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "stale_embd_freq": int(1e2),
+    "stale_embd_freq": int(5e2),
     "update_embd_freq": int(1e3),
     "warmup_steps": int(3e4),
     "loss_decay": 0.99,
@@ -442,7 +442,7 @@ def train_step(
     policy_loss_ema = (
         config.loss_decay * policy_loss_ema + (1 - config.loss_decay) * policy_loss
     )
-    policy_improved = (policy_loss_ema - policy_loss) > 0.01 * policy_loss_ema
+    policy_improved = (policy_loss_ema - policy_loss) > 0.1 * policy_loss_ema
 
     embedding_cond = policy_improved & (last_update_step > config.stale_embd_freq)
     embedding_model_target = polyak_update(
