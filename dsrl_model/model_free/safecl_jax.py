@@ -45,9 +45,10 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "update_bc_freq": 1,
+    "stale_embd_freq": int(5e2),
     "update_embd_freq": int(1e3),
     "warmup_steps": int(3e4),
+    "loss_decay": 0.99,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "update_tau": 0.01,
@@ -122,6 +123,25 @@ def kernel_density_entropy(samples, mask, sigma=0.2):
     return entropy
 
 
+def get_multimodel_score(union, target_z, embedding_model):
+    num_models = 5
+
+    @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
+    def multimodel(carry):
+        x, target_z, model = carry
+        # Batch X embd_dim
+        z = model(x)
+        # Batch
+        score = jnp.einsum("ij,ij->i", z, target_z)
+        return carry, score
+
+    # 5 X Batch
+    _, union_scores = multimodel((union, target_z, embedding_model))
+    # use mean of 5 models to estimate the union score
+    union_score = jnp.mean(union_scores, axis=0)
+    return union_score
+
+
 @nnx.jit
 def polyak_update(target_model, curr_model, tau):
     target_param = nnx.state(target_model, nnx.Param)
@@ -171,7 +191,6 @@ def get_union_trainable(
     data,
     config,
 ):
-    num_models = 5
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
@@ -181,20 +200,13 @@ def get_union_trainable(
     # Batch X embd_dim
     target_union_z = curriculum_embedding_model(target_union, training=False)
 
-    @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
-    def multimodel(carry):
-        x, target_z, model = carry
-        # Batch X embd_dim
-        z = model(x)
-        # Batch
-        score = jnp.einsum("ij,ij->i", z, target_z)
-        return carry, score
+    # # multimodel estimation of the union score
+    # union_score = get_multimodel_score(target_union, target_union_z, embedding_model)
 
-    # 5 X Batch
-    _, union_scores = multimodel((target_union, target_union_z, embedding_model))
-    # use mean of 5 models to estimate the union score
+    # Batch X embd_dim
+    union_z = embedding_model(target_union, training=False)
     # Batch
-    union_score = jnp.mean(union_scores, axis=0)
+    union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
 
     trainable_mask = (union_score > config.value_limit).astype(dtype)
     trainable_count = trainable_mask.sum()
@@ -389,12 +401,13 @@ def train_step(
     policy_model,
     policy_optimizer,
     batch_data,
+    policy_loss_ema,
     config,
     has_positive,
     has_negative,
     do_warmup,
     key,
-    steps,
+    last_update_step,
 ):
     union_trainable, union_score, *trainable_aux = get_union_trainable(
         curriculum_embedding_model=curriculum_embedding_model,
@@ -416,7 +429,6 @@ def train_step(
     )
     embedding_optimizer.update(embedding_grads)
 
-    policy_cond = (steps % config.update_bc_freq) == 0
     policy_loss, policy_grads, *policy_aux = policy_loss_grad_fun(
         policy_model=policy_model,
         data=batch_data,
@@ -425,13 +437,14 @@ def train_step(
         gamma=config.gamma,
         score_limit=config.value_limit,
     )
-    policy_grads = jax.tree.map(
-        lambda g: jnp.where(policy_cond, g, jnp.zeros_like(g)),
-        policy_grads,
-    )
     policy_optimizer.update(policy_grads)
 
-    embedding_cond = (steps % config.update_embd_freq) == 0
+    policy_loss_ema = (
+        config.loss_decay * policy_loss_ema + (1 - config.loss_decay) * policy_loss
+    )
+    policy_improved = (policy_loss_ema - policy_loss) > 0.1 * policy_loss_ema
+
+    embedding_cond = policy_improved & (last_update_step > config.stale_embd_freq)
     embedding_model_target = polyak_update(
         embedding_model_target, embedding_model, embedding_cond * config.update_tau
     )
@@ -445,6 +458,8 @@ def train_step(
     mean_union_cost = batch_data.union_cost.sum(-1).mean()
 
     return (
+        policy_loss_ema,
+        1.0 * embedding_cond,
         *trainable_aux,
         embedding_loss,
         *embedding_aux,
@@ -468,6 +483,7 @@ def train_n_steps(
     policy_model,
     policy_optimizer,
     data_buffer,
+    policy_loss_ema,
     config,
     has_positive,
     has_negative,
@@ -484,6 +500,9 @@ def train_n_steps(
 
     def body_fun(i, carry):
         (
+            last_update_step,
+            num_embd_updates,
+            policy_loss_ema,
             _,
             key,
             embedding_model_target,
@@ -499,7 +518,7 @@ def train_n_steps(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        val = train_step(
+        new_policy_loss_ema, is_embd_update, *val = train_step(
             curriculum_embedding_model=curriculum_embedding_model,
             embedding_model_target=embedding_model_target,
             embedding_model=embedding_model,
@@ -507,16 +526,22 @@ def train_n_steps(
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             batch_data=batch_data,
+            policy_loss_ema=policy_loss_ema,
             config=config,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
             key=subkey,
-            steps=i,
+            last_update_step=last_update_step,
         )
 
+        last_update_step = jnp.where(is_embd_update, 0.0, last_update_step + 1.0)
+
         return (
-            val,
+            last_update_step,
+            num_embd_updates + is_embd_update,
+            new_policy_loss_ema,
+            tuple(val),
             key,
             embedding_model_target,
             embedding_model,
@@ -527,6 +552,9 @@ def train_n_steps(
 
     init_val = (jnp.zeros((), dtype=jnp.float32),) * 27
     init_carry = (
+        0.0,  # last update is set to 0.
+        0.0,  # number of embd update initially is 0
+        policy_loss_ema,
         init_val,
         key2,
         embedding_model_target,
@@ -535,9 +563,11 @@ def train_n_steps(
         policy_model,
         policy_optimizer,
     )
-    val, *_ = nnx.fori_loop(0, num_steps, body_fun, init_carry)
+    _, num_embd_updates, policy_loss_ema, val, *_ = nnx.fori_loop(
+        0, num_steps, body_fun, init_carry
+    )
 
-    return val, num_steps
+    return num_embd_updates, policy_loss_ema, val, num_steps
 
 
 def main(args, cfg_env=None):
@@ -733,11 +763,12 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start embedding, cost and bc_policy model training.")
 
+    policy_loss_ema = jnp.array(1e9, dtype=jnp.float32)
     steps = 0
     while steps < config["total_iteration"]:
         do_warmup = steps >= config_data.warmup_steps
 
-        val, num_itr = train_n_steps(
+        num_embd_updates, policy_loss_ema, val, num_itr = train_n_steps(
             curriculum_embedding_model=curriculum_embedding_model,
             embedding_model_target=embedding_model_target,
             embedding_model=embedding_model,
@@ -745,6 +776,7 @@ def main(args, cfg_env=None):
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             data_buffer=data_buffer,
+            policy_loss_ema=policy_loss_ema,
             config=config_data,
             has_positive=has_positive,
             has_negative=has_negative,
@@ -796,6 +828,9 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_policy", policy_loss.item())
         logger.log_tabular("Loss/Loss_policy_pos", policy_pos_loss.item())
         logger.log_tabular("Loss/Loss_policy_union", policy_union_loss.item())
+        logger.log_tabular("Loss/Loss_policy_ema", policy_loss_ema.item())
+
+        logger.log_tabular("Num/target_embedding_updates", num_embd_updates.item())
 
         logger.log_tabular("Mean/embd_pos_score", embedding_pos_score.item())
         logger.log_tabular("Mean/embd_neg_score", embedding_neg_score.item())
