@@ -26,6 +26,7 @@ from dsrl_model.utils.dsrl_dataset import (
     get_pos_neg_and_union_data,
 )
 from dsrl_model.utils.models_jax import (
+    EnsembleValue,
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     get_tree_norm,
@@ -105,6 +106,11 @@ class UnionTrainableAux:
 
 
 @struct.dataclass
+class ValueAux:
+    loss: float = 0.0
+
+
+@struct.dataclass
 class EmbeddingAux:
     loss: float = 0.0
     pos_loss: float = 0.0
@@ -120,8 +126,7 @@ class EmbeddingAux:
 @struct.dataclass
 class PolicyAux:
     loss: float = 0.0
-    pos_loss: float = 0.0
-    union_loss: float = 0.0
+    value: float = 0.0
 
 
 def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
@@ -393,50 +398,61 @@ def embedding_grad_aux_fun(
     return grads, embd_aux
 
 
+def value_grad_aux_fun(
+    value_model,
+    preferred_score,
+    data,
+):
+    def xql_rescale_loss(value_model, obs):
+        # Batch
+        v1, v2 = value_model(obs)
+        v1_z, v2_z = (preferred_score - v1), (preferred_score - v2)
+
+        max_z = jnp.maximum(v1_z, v2_z).max()
+        max_z = jnp.where(max_z < -1.0, -1.0, max_z)
+        # scale by e^max_z
+        # Detach the gradients is important as loss function is getting changed
+        max_z = jax.lax.stop_gradient(max_z)
+        loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
+        loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
+        return jnp.mean(loss_v1 + loss_v2)
+
+    def loss_fun(value_model):
+        # Batch X obs_dim
+        obs = data.union_obs[:, 0]
+        union_loss = xql_rescale_loss(value_model, obs)
+        return union_loss
+
+    grad_fun = nnx.value_and_grad(loss_fun, has_aux=False)
+    loss, grads = grad_fun(value_model)
+    return grads, ValueAux(loss=loss)
+
+
 def policy_grad_aux_fun(
     policy_model,
+    value_model,
     data,
-    union_score,
-    has_positive,
-    gamma,
-    score_limit,
+    preferred_score,
 ):
-    dtype = data.union_obs.dtype
-    batch, horizon, _ = data.union_obs.shape
-
-    # Batch_Horizon X obs/act_dim
-    target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
-    target_pos_act = data.pos_act.reshape(batch * horizon, -1)
-
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    # Batch X obs/act_dim
+    target_union_obs = data.union_obs[:, 0]
+    target_union_act = data.union_act[:, 0]
 
     # Batch
-    non_trainable = (union_score < score_limit).astype(dtype)
+    v_union = jnp.minimum(*value_model(target_union_obs))
+    weight_union = jnp.exp(preferred_score - v_union)
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
-        flat_union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
-        batch_horizon_union_loss = flat_union_loss.reshape(batch, horizon)
-        batch_union_loss = discounted_sum(batch_horizon_union_loss.T, gamma)
-        union_loss = jnp.mean(non_trainable * batch_union_loss)
-
-        pred_pos_act, *_ = policy_model(target_pos_obs)
-        flat_pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
-        batch_horizon_pos_loss = flat_pos_loss.reshape(batch, horizon)
-        batch_pos_loss = discounted_sum(batch_horizon_pos_loss.T, gamma)
-        pos_loss = has_positive * batch_pos_loss.mean()
-
-        loss = pos_loss + union_loss
+        union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        loss = jnp.mean(weight_union * union_loss)
         return loss, PolicyAux(
             loss=loss,
-            pos_loss=pos_loss,
-            union_loss=union_loss,
+            value=v_union.mean(),
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, policy_aux), grads = grad_fun(policy_model)
-    grads = jax.tree.map(lambda g: g / horizon, grads)
 
     return grads, policy_aux
 
@@ -446,6 +462,8 @@ def train_step(
     embedding_model_target,
     embedding_model,
     embedding_optimizer,
+    value_model,
+    value_optimizer,
     policy_model,
     policy_optimizer,
     batch_data,
@@ -477,13 +495,18 @@ def train_step(
     )
     embedding_optimizer.update(embedding_grads)
 
+    value_grads, value_aux = value_grad_aux_fun(
+        value_model=value_model,
+        preferred_score=-union_score,  # negative union score
+        data=batch_data,
+    )
+    value_optimizer.update(value_grads)
+
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=policy_model,
+        value_model=value_model,
         data=batch_data,
-        union_score=union_score,
-        has_positive=has_positive,
-        gamma=config.gamma,
-        score_limit=config.value_limit,
+        preferred_score=-union_score,
     )
     policy_optimizer.update(policy_grads)
 
@@ -511,6 +534,7 @@ def train_step(
         1.0 * embedding_cond,
         trainable_aux,
         embedding_aux,
+        value_aux,
         policy_aux,
         data_aux,
     )
@@ -522,6 +546,8 @@ def train_n_steps(
     embedding_model_target,
     embedding_model,
     embedding_optimizer,
+    value_model,
+    value_optimizer,
     policy_model,
     policy_optimizer,
     data_buffer,
@@ -550,6 +576,8 @@ def train_n_steps(
             embedding_model_target,
             embedding_model,
             embedding_optimizer,
+            value_model,
+            value_optimizer,
             policy_model,
             policy_optimizer,
         ) = carry
@@ -565,6 +593,8 @@ def train_n_steps(
             embedding_model_target=embedding_model_target,
             embedding_model=embedding_model,
             embedding_optimizer=embedding_optimizer,
+            value_model=value_model,
+            value_optimizer=value_optimizer,
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             batch_data=batch_data,
@@ -588,11 +618,19 @@ def train_n_steps(
             embedding_model_target,
             embedding_model,
             embedding_optimizer,
+            value_model,
+            value_optimizer,
             policy_model,
             policy_optimizer,
         )
 
-    init_val_aux = (UnionTrainableAux(), EmbeddingAux(), PolicyAux(), DataAux())
+    init_val_aux = (
+        UnionTrainableAux(),
+        EmbeddingAux(),
+        ValueAux(),
+        PolicyAux(),
+        DataAux(),
+    )
     init_carry = (
         0.0,  # last update is set to 0.
         0.0,  # number of embd update initially is 0
@@ -602,6 +640,8 @@ def train_n_steps(
         embedding_model_target,
         embedding_model,
         embedding_optimizer,
+        value_model,
+        value_optimizer,
         policy_model,
         policy_optimizer,
     )
@@ -720,6 +760,21 @@ def main(args, cfg_env=None):
         num_attentions=3,
     )
 
+    value_model = EnsembleValue(
+        rngs=rngs,
+        x_dim=obs_space.shape[0],
+        hidden_size=config["hidden_size"],
+    )
+    value_optimizer = nnx.Optimizer(
+        model=value_model,
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
+    )
+
     # data
     ep_len = dsrl_infos.DEFAULT_MAX_EPISODE_STEPS[env_name]
     data = get_dataset_in_d4rl_format(
@@ -816,6 +871,7 @@ def main(args, cfg_env=None):
             num_itr,
             train_aux,
             embd_aux,
+            value_aux,
             policy_aux,
             data_aux,
         ) = train_n_steps(
@@ -823,6 +879,8 @@ def main(args, cfg_env=None):
             embedding_model_target=embedding_model_target,
             embedding_model=embedding_model,
             embedding_optimizer=embedding_optimizer,
+            value_model=value_model,
+            value_optimizer=value_optimizer,
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             data_buffer=data_buffer,
@@ -845,9 +903,9 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_embd_neg", embd_aux.neg_loss.item())
         logger.log_tabular("Loss/Loss_embd_union", embd_aux.union_loss.item())
         logger.log_tabular("Loss/Loss_embd_random_loss", embd_aux.random_loss.item())
+        logger.log_tabular("Loss/Loss_value", value_aux.loss.item())
         logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
-        logger.log_tabular("Loss/Loss_policy_pos", policy_aux.pos_loss.item())
-        logger.log_tabular("Loss/Loss_policy_union", policy_aux.union_loss.item())
+        logger.log_tabular("Loss/Loss_policy_value", policy_aux.value.item())
         logger.log_tabular("Loss/Loss_policy_ema", policy_loss_ema.item())
 
         logger.log_tabular("Num/target_embedding_updates", num_embd_updates.item())
@@ -891,6 +949,10 @@ def main(args, cfg_env=None):
             get_tree_norm(nnx.state(embedding_model, nnx.Param)),
         )
         logger.log_tabular(
+            "Norm/value_model",
+            get_tree_norm(nnx.state(value_model, nnx.Param)),
+        )
+        logger.log_tabular(
             "Norm/policy_model",
             get_tree_norm(nnx.state(policy_model, nnx.Param)),
         )
@@ -901,6 +963,11 @@ def main(args, cfg_env=None):
                 itr=steps,
                 nn_model_saver_element=embedding_model,
                 prefix="embedding",
+            )
+            logger.nn_model_save(
+                itr=steps,
+                nn_model_saver_element=value_model,
+                prefix="value",
             )
             logger.nn_model_save(
                 itr=steps,
@@ -918,6 +985,9 @@ def main(args, cfg_env=None):
     )
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
+    )
+    logger.nn_model_save(
+        itr=steps, nn_model_saver_element=value_model, prefix="value"
     )
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=policy_model, prefix="bc_policy"
