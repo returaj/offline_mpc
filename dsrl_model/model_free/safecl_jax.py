@@ -413,6 +413,8 @@ def value_grad_aux_fun(
 ):
     # Value model learns the preferred state-action pair score
 
+    batch = data.union_obs.shape[0]
+
     # Batch X obs/act_dim
     target_pos = jnp.concat([data.pos_obs[:, 0], data.pos_act[:, 0]], axis=-1)
     target_neg = jnp.concat([data.neg_obs[:, 0], data.neg_act[:, 0]], axis=-1)
@@ -440,7 +442,9 @@ def value_grad_aux_fun(
         pos_loss = has_positive * xql_rescale_loss(value_model, -pos_score, target_pos)
         neg_loss = has_negative * xql_rescale_loss(value_model, -neg_score, target_neg)
         union_loss = xql_rescale_loss(value_model, -union_score, target_union)
-        loss = pos_loss + neg_loss + union_loss
+        # pos and neg loss should be one among the batch
+        # if not it will have very high weight and may skew the value learning
+        loss = 1 / batch * (pos_loss + neg_loss) + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
@@ -461,9 +465,12 @@ def policy_grad_aux_fun(
 ):
     batch, horizon, _ = data.union_obs.shape
 
-    # BH X obs/act_dim
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    # B X obs/act_dim
+    # only consider the first state-action pair as
+    # our value function may not be trained enough to
+    # judge the state-action pair for later trajectory pair
+    target_union_obs = data.union_obs[:, 0]
+    target_union_act = data.union_act[:, 0]
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
