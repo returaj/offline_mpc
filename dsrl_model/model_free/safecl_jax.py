@@ -110,6 +110,7 @@ class ValueAux:
     loss: float = 0.0
     pos_loss: float = 0.0
     neg_loss: float = 0.0
+    random_loss: float = 0.0
     union_loss: float = 0.0
 
 
@@ -410,6 +411,7 @@ def value_grad_aux_fun(
     config,
     has_positive,
     has_negative,
+    key,
 ):
     # Value model learns the preferred state-action pair score
 
@@ -418,7 +420,17 @@ def value_grad_aux_fun(
     # Batch X obs/act_dim
     target_pos = jnp.concat([data.pos_obs[:, 0], data.pos_act[:, 0]], axis=-1)
     target_neg = jnp.concat([data.neg_obs[:, 0], data.neg_act[:, 0]], axis=-1)
-    target_union = jnp.concat([data.union_obs[:, 0], data.union_act[:, 0]], axis=-1)
+
+    # union data
+    target_union_obs, target_union_act = data.union_obs[:, 0], data.union_act[:, 0]
+    target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
+
+    # random data
+    key1, key2 = jax.random.split(key, num=2)
+    mix_p1 = jax.random.uniform(key=key1, shape=target_union_act.shape)
+    target_shuffle_act = jax.random.permutation(key2, target_union_act, axis=0)
+    target_random_act = mix_p1 * target_shuffle_act + (1 - mix_p1) * target_union_act
+    target_random = jnp.concat([target_union_obs, target_random_act], axis=-1)
 
     neg_score = jnp.ones_like(union_score)
     pos_score = config.pos_label * neg_score
@@ -441,14 +453,16 @@ def value_grad_aux_fun(
         # negative score is preferred score
         pos_loss = has_positive * xql_rescale_loss(value_model, -pos_score, target_pos)
         neg_loss = has_negative * xql_rescale_loss(value_model, -neg_score, target_neg)
+        random_loss = xql_rescale_loss(value_model, -neg_score, target_random)
         union_loss = xql_rescale_loss(value_model, -union_score, target_union)
         # pos and neg loss should be one among the batch
         # if not it will have very high weight and may skew the value learning
-        loss = 1 / batch * (pos_loss + neg_loss) + union_loss
+        loss = random_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
             neg_loss=neg_loss,
+            random_loss=random_loss,
             union_loss=union_loss,
         )
 
@@ -469,8 +483,10 @@ def policy_grad_aux_fun(
     # only consider the first state-action pair as
     # our value function may not be trained enough to
     # judge the state-action pair for later trajectory pair
-    target_union_obs = data.union_obs[:, 0]
-    target_union_act = data.union_act[:, 0]
+
+    # BH X obs/act_dim
+    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+    target_union_act = data.union_act.reshape(batch * horizon, -1)
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
@@ -516,6 +532,8 @@ def train_step(
     key,
     last_update_step,
 ):
+    key1, key2 = jax.random.split(key, num=2)
+
     union_trainable, union_score, trainable_aux = get_union_trainable(
         curriculum_embedding_model=curriculum_embedding_model,
         embedding_model=embedding_model_target,
@@ -532,7 +550,7 @@ def train_step(
         has_negative=has_negative,
         pos_label=config.pos_label,
         union_scale=1.0 * do_warmup,  # convert into float type
-        key=key,
+        key=key1,
     )
     embedding_optimizer.update(embedding_grads)
 
@@ -543,6 +561,7 @@ def train_step(
         config=config,
         has_positive=has_positive,
         has_negative=has_negative,
+        key=key2,
     )
     value_optimizer.update(value_grads)
 
@@ -950,6 +969,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_value", value_aux.loss.item())
         logger.log_tabular("Loss/Loss_value_pos", value_aux.pos_loss.item())
         logger.log_tabular("Loss/Loss_value_neg", value_aux.neg_loss.item())
+        logger.log_tabular("Loss/Loss_value_random", value_aux.random_loss.item())
         logger.log_tabular("Loss/Loss_value_union", value_aux.union_loss.item())
         logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
         logger.log_tabular("Loss/Loss_policy_q", policy_aux.q.item())
