@@ -453,12 +453,10 @@ def value_grad_aux_fun(
 
     def loss_fun(value_model):
         # negative score is preferred score
-        pos_loss, pos_value = has_positive * xql_rescale_loss(
-            value_model, -pos_score, target_pos
-        )
-        neg_loss, neg_value = has_negative * xql_rescale_loss(
-            value_model, -neg_score, target_neg
-        )
+        pos_loss, pos_value = xql_rescale_loss(value_model, -pos_score, target_pos)
+        pos_loss, pos_value = has_positive * pos_loss, has_positive * pos_value
+        neg_loss, neg_value = xql_rescale_loss(value_model, -neg_score, target_neg)
+        neg_loss, neg_value = has_negative * neg_loss, has_negative * neg_value
         random_loss, random_value = xql_rescale_loss(
             value_model, -neg_score, target_random
         )
