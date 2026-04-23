@@ -441,7 +441,7 @@ def value_grad_aux_fun(
     def xql_rescale_loss(value_model, score, x, scale):
         # Batch
         v1, v2 = value_model(x)
-        v1_z, v2_z = (score - v1), (score - v2)
+        v1_z, v2_z = (score - v1) / config.value_temp, (score - v2) / config.value_temp
 
         max_z = jnp.maximum(v1_z, v2_z).max()
         max_z = jnp.where(max_z < -1.0, -1.0, max_z)
@@ -467,11 +467,9 @@ def value_grad_aux_fun(
             value_model, -neg_score, target_random, 1.0
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, -union_score, target_union, union_scale
+            value_model, -union_score, target_union, 1.0
         )
-        # pos and neg loss should be one among the batch
-        # if not it will have very high weight and may skew the value learning
-        loss = pos_loss + random_loss + union_loss
+        loss = pos_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
@@ -517,7 +515,7 @@ def policy_grad_aux_fun(
         v = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
-        weight = jnp.exp(jnp.clip((q - v) / config.value_temp, max=5.0))
+        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
 
         loss = jnp.mean(weight * union_loss)
         return loss, PolicyAux(
