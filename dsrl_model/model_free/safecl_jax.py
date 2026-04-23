@@ -411,8 +411,9 @@ def value_grad_aux_fun(
     union_score,
     data,
     config,
-    has_positive,
-    has_negative,
+    pos_scale,
+    neg_scale,
+    union_scale,
     key,
 ):
     # Value model learns the preferred state-action pair score
@@ -437,7 +438,7 @@ def value_grad_aux_fun(
     neg_score = jnp.ones_like(union_score)
     pos_score = config.pos_label * neg_score
 
-    def xql_rescale_loss(value_model, score, x):
+    def xql_rescale_loss(value_model, score, x, scale):
         # Batch
         v1, v2 = value_model(x)
         v1_z, v2_z = (score - v1), (score - v2)
@@ -449,19 +450,24 @@ def value_grad_aux_fun(
         max_z = jax.lax.stop_gradient(max_z)
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
-        return jnp.mean(loss_v1 + loss_v2), jnp.minimum(v1, v2).mean()
+
+        loss = scale * jnp.mean(loss_v1 + loss_v2)
+        value = scale * jnp.minimum(v1, v2).mean()
+        return loss, value
 
     def loss_fun(value_model):
         # negative score is preferred score
-        pos_loss, pos_value = xql_rescale_loss(value_model, -pos_score, target_pos)
-        pos_loss, pos_value = has_positive * pos_loss, has_positive * pos_value
-        neg_loss, neg_value = xql_rescale_loss(value_model, -neg_score, target_neg)
-        neg_loss, neg_value = has_negative * neg_loss, has_negative * neg_value
+        pos_loss, pos_value = xql_rescale_loss(
+            value_model, -pos_score, target_pos, pos_scale
+        )
+        neg_loss, neg_value = xql_rescale_loss(
+            value_model, -neg_score, target_neg, neg_scale
+        )
         random_loss, random_value = xql_rescale_loss(
-            value_model, -neg_score, target_random
+            value_model, -neg_score, target_random, 1.0
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, -union_score, target_union
+            value_model, -union_score, target_union, union_scale
         )
         # pos and neg loss should be one among the batch
         # if not it will have very high weight and may skew the value learning
@@ -487,6 +493,7 @@ def policy_grad_aux_fun(
     policy_model,
     value_model,
     data,
+    do_warmup,
     config,
 ):
     batch, horizon, _ = data.union_obs.shape
@@ -504,10 +511,10 @@ def policy_grad_aux_fun(
         pred_union_act, *_ = policy_model(target_union_obs)
         union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
 
-        q = jnp.minimum(
+        q = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
         )
-        v = jnp.minimum(
+        v = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
         weight = jnp.exp(jnp.clip((q - v) / config.value_temp, max=5.0))
@@ -571,8 +578,9 @@ def train_step(
         union_score=union_score,
         data=batch_data,
         config=config,
-        has_positive=has_positive,
-        has_negative=has_negative,
+        pos_scale=1.0 * has_positive,
+        neg_scale=1.0 * has_negative,
+        union_scale=1.0 * do_warmup,
         key=key2,
     )
     value_optimizer.update(value_grads)
@@ -581,6 +589,7 @@ def train_step(
         policy_model=policy_model,
         value_model=value_model,
         data=batch_data,
+        do_warmup=1.0 * do_warmup,
         config=config,
     )
     policy_optimizer.update(policy_grads)
