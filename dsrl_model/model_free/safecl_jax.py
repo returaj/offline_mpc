@@ -1,5 +1,3 @@
-# ruff: noqa
-
 import os
 import random
 import re
@@ -112,6 +110,10 @@ class ValueAux:
     neg_loss: float = 0.0
     random_loss: float = 0.0
     union_loss: float = 0.0
+    pos_value: float = 0.0
+    neg_value: float = 0.0
+    random_value: float = 0.0
+    union_value: float = 0.0
 
 
 @struct.dataclass
@@ -447,23 +449,35 @@ def value_grad_aux_fun(
         max_z = jax.lax.stop_gradient(max_z)
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
-        return jnp.mean(loss_v1 + loss_v2)
+        return jnp.mean(loss_v1 + loss_v2), jnp.minimum(v1, v2).mean()
 
     def loss_fun(value_model):
         # negative score is preferred score
-        pos_loss = has_positive * xql_rescale_loss(value_model, -pos_score, target_pos)
-        neg_loss = has_negative * xql_rescale_loss(value_model, -neg_score, target_neg)
-        random_loss = xql_rescale_loss(value_model, -neg_score, target_random)
-        union_loss = xql_rescale_loss(value_model, -union_score, target_union)
+        pos_loss, pos_value = has_positive * xql_rescale_loss(
+            value_model, -pos_score, target_pos
+        )
+        neg_loss, neg_value = has_negative * xql_rescale_loss(
+            value_model, -neg_score, target_neg
+        )
+        random_loss, random_value = xql_rescale_loss(
+            value_model, -neg_score, target_random
+        )
+        union_loss, union_value = xql_rescale_loss(
+            value_model, -union_score, target_union
+        )
         # pos and neg loss should be one among the batch
         # if not it will have very high weight and may skew the value learning
-        loss = random_loss + union_loss
+        loss = pos_loss + random_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
             neg_loss=neg_loss,
             random_loss=random_loss,
             union_loss=union_loss,
+            pos_value=pos_value,
+            neg_value=neg_value,
+            random_value=random_value,
+            union_value=union_value,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -485,8 +499,8 @@ def policy_grad_aux_fun(
     # judge the state-action pair for later trajectory pair
 
     # BH X obs/act_dim
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    target_union_obs = data.union_obs[:, 0]
+    target_union_act = data.union_act[:, 0]
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
@@ -733,9 +747,9 @@ def main(args, cfg_env=None):
     has_positive = float(args.num_preferred > 0)
     has_negative = float(args.num_non_preferred > 0)
 
-    assert has_positive or has_negative, (
-        "Both preferred and non-preferred trajectory dataset cannot be empty together."
-    )
+    assert (
+        has_positive or has_negative
+    ), "Both preferred and non-preferred trajectory dataset cannot be empty together."
 
     trajectory_cfg["num_positive_trajectories"] = args.num_preferred
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
@@ -859,9 +873,9 @@ def main(args, cfg_env=None):
     union_costs = union_data["costs"]
 
     ep_len = ep_len // config["action_repeat"] + (ep_len % config["action_repeat"] > 0)
-    assert union_observations.shape[1] == ep_len, (
-        f"{union_observations.shape[1]} episode length is different from {ep_len}"
-    )
+    assert (
+        union_observations.shape[1] == ep_len
+    ), f"{union_observations.shape[1]} episode length is different from {ep_len}"
 
     pos_data_size = 1
     if has_positive:
@@ -971,6 +985,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_value_neg", value_aux.neg_loss.item())
         logger.log_tabular("Loss/Loss_value_random", value_aux.random_loss.item())
         logger.log_tabular("Loss/Loss_value_union", value_aux.union_loss.item())
+
         logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
         logger.log_tabular("Loss/Loss_policy_q", policy_aux.q.item())
         logger.log_tabular("Loss/Loss_policy_v", policy_aux.v.item())
@@ -985,6 +1000,10 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_neg_score", embd_aux.neg_score.item())
         logger.log_tabular("Mean/embd_union_score", embd_aux.union_score.item())
         logger.log_tabular("Mean/embd_random_score", embd_aux.random_score.item())
+        logger.log_tabular("Mean/pos_value", value_aux.pos_value.item())
+        logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
+        logger.log_tabular("Mean/random_value", value_aux.random_value.item())
+        logger.log_tabular("Mean/union_value", value_aux.union_value.item())
 
         logger.log_tabular(
             "NonPrefScore/union_trainable", train_aux.trainable_nonpref.item()
