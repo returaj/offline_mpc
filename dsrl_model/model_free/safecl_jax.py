@@ -502,8 +502,8 @@ def policy_grad_aux_fun(
     # judge the state-action pair for later trajectory pair
 
     # BH X obs/act_dim
-    target_union_obs = data.union_obs[:, 0]
-    target_union_act = data.union_act[:, 0]
+    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+    target_union_act = data.union_act.reshape(batch * horizon, -1)
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
