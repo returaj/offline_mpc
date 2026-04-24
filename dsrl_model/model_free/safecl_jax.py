@@ -301,7 +301,8 @@ def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, co
         cscale=config.nonpref_cost_scale,
     )
 
-    union_weight = jnp.maximum(data.union_weight, sink_mask * weight)
+    union_weight = jnp.where(sink_mask, weight, weight * union_score)
+    union_weight = jnp.maximum(data.union_weight, union_weight)
 
     union_aux = UnionSinkAux(
         mean_score=union_score.mean(),
@@ -475,9 +476,7 @@ def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_sc
     return grads, aux
 
 
-def policy_grad_aux_fun(
-    policy_model, value_model, data, do_warmup, config
-):
+def policy_grad_aux_fun(policy_model, value_model, data, do_warmup, config):
     # B X obs/act_dim
     # only consider the first state-action pair as
     # our value function may not be trained enough to
