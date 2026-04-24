@@ -342,6 +342,12 @@ def single_agent_args():
             "default": 0.0,
             "help": "non-preferred label score for training safecl.",
         },
+        {
+            "name": "--embd-freq",
+            "type": int,
+            "default": None,
+            "help": "update the target embedding network frequency.",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

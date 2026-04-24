@@ -693,6 +693,7 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
+    config["stale_embd_freq"] = args.embd_freq or config["stale_embd_freq"]
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
     config["lr"] = args.lr
