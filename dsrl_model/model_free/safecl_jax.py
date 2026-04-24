@@ -46,7 +46,7 @@ default_cfg = {
     "train_horizon": 500,  # 20
     "stale_embd_freq": int(5e2),
     "warmup_steps": int(3e4),
-    "decay": 0.998,
+    "decay": 0.999,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "update_tau": 0.01,
@@ -416,9 +416,7 @@ def embedding_grad_aux_fun(
     return grads, embd_aux
 
 
-def value_grad_aux_fun(
-    value_model, union_sink_mask, union_score, data, config, pos_scale, neg_scale
-):
+def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_scale):
     # Value model learns the preferred state-action pair score
     pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
 
@@ -430,13 +428,11 @@ def value_grad_aux_fun(
     target_union_obs, target_union_act = data.union_obs[:, 0], data.union_act[:, 0]
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
-    full_mask = jnp.ones_like(union_sink_mask)
-
     pos_score = pref_sign * config.pos_label * jnp.ones_like(union_score)
     neg_score = pref_sign * config.neg_label * jnp.ones_like(union_score)
     union_score = pref_sign * union_score
 
-    def xql_rescale_loss(value_model, mask, score, x, scale):
+    def xql_rescale_loss(value_model, score, x, scale):
         # Batch
         v1, v2 = value_model(x)
         v1_z, v2_z = (score - v1) / config.value_temp, (score - v2) / config.value_temp
@@ -449,19 +445,19 @@ def value_grad_aux_fun(
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
 
-        loss = scale * (mask * (loss_v1 + loss_v2)).mean()
-        value = scale * (mask * jnp.minimum(v1, v2)).mean()
+        loss = scale * (loss_v1 + loss_v2).mean()
+        value = scale * jnp.minimum(v1, v2).mean()
         return loss, value
 
     def loss_fun(value_model):
         pos_loss, pos_value = xql_rescale_loss(
-            value_model, full_mask, pos_score, target_pos, pos_scale
+            value_model, pos_score, target_pos, pos_scale
         )
         neg_loss, neg_value = xql_rescale_loss(
-            value_model, full_mask, neg_score, target_neg, neg_scale
+            value_model, neg_score, target_neg, neg_scale
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, union_sink_mask, union_score, target_union, 1.0
+            value_model, union_score, target_union, 1.0
         )
         loss = pos_loss + union_loss
         return loss, ValueAux(
@@ -480,7 +476,7 @@ def value_grad_aux_fun(
 
 
 def policy_grad_aux_fun(
-    policy_model, value_model, union_sink_mask, data, do_warmup, config
+    policy_model, value_model, data, do_warmup, config
 ):
     # B X obs/act_dim
     # only consider the first state-action pair as
@@ -499,7 +495,7 @@ def policy_grad_aux_fun(
         v = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
-        weight = union_sink_mask * jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
+        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
 
         loss = jnp.mean(weight * union_loss)
         return loss, PolicyAux(
@@ -541,7 +537,6 @@ def train_step(
 
     value_grads, value_aux = value_grad_aux_fun(
         value_model=state.models.value,
-        union_sink_mask=union_sink_mask,
         union_score=union_weight,
         data=batch_data,
         config=config,
@@ -553,7 +548,6 @@ def train_step(
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=state.models.policy,
         value_model=state.models.value,
-        union_sink_mask=union_sink_mask,
         data=batch_data,
         do_warmup=1.0 * do_warmup,
         config=config,
@@ -638,7 +632,8 @@ def train_n_steps(
             data_buffer, union_idxs[i], union_weight
         )
 
-        weight = weight * config.decay**is_embd_update
+        decay_factor = config.decay ** (do_warmup * is_embd_update)
+        weight = weight * decay_factor
 
         return (
             key,
@@ -699,7 +694,6 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
-    config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
     config["lr"] = args.lr

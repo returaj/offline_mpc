@@ -333,13 +333,13 @@ def single_agent_args():
         {
             "name": "--preferred-label",
             "type": float,
-            "default": 0.0,
+            "default": 1.0,
             "help": "preferred label score for training safecl.",
         },
         {
             "name": "--non-preferred-label",
             "type": float,
-            "default": 1.0,
+            "default": 0.0,
             "help": "non-preferred label score for training safecl.",
         },
     ]
