@@ -45,9 +45,8 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "stale_embd_freq": int(5e2),
-    "update_embd_freq": int(1e3),
     "warmup_steps": int(3e4),
-    "loss_decay": 0.99,
+    "decay": 0.998,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "update_tau": 0.01,
@@ -541,13 +540,12 @@ def train_step(
     policy_model,
     policy_optimizer,
     batch_data,
-    policy_loss_ema,
     config,
     has_positive,
     has_negative,
     do_warmup,
     key,
-    last_update_step,
+    step,
 ):
     key1, key2 = jax.random.split(key, num=2)
 
@@ -592,12 +590,7 @@ def train_step(
     )
     policy_optimizer.update(policy_grads)
 
-    policy_loss_ema = (
-        config.loss_decay * policy_loss_ema + (1 - config.loss_decay) * policy_aux.loss
-    )
-    policy_improved = (policy_loss_ema - policy_aux.loss) > 0.1 * policy_loss_ema
-
-    embedding_cond = policy_improved & (last_update_step > config.stale_embd_freq)
+    embedding_cond = step % config.stale_embd_freq == 0
     embedding_model_target = polyak_update(
         embedding_model_target, embedding_model, embedding_cond * config.update_tau
     )
@@ -612,7 +605,6 @@ def train_step(
     )
 
     return (
-        policy_loss_ema,
         1.0 * embedding_cond,
         trainable_aux,
         embedding_aux,
@@ -633,7 +625,6 @@ def train_n_steps(
     policy_model,
     policy_optimizer,
     data_buffer,
-    policy_loss_ema,
     config,
     has_positive,
     has_negative,
@@ -650,9 +641,7 @@ def train_n_steps(
 
     def body_fun(i, carry):
         (
-            last_update_step,
             num_embd_updates,
-            policy_loss_ema,
             _,
             key,
             embedding_model_target,
@@ -670,7 +659,7 @@ def train_n_steps(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        new_policy_loss_ema, is_embd_update, *val_aux = train_step(
+        is_embd_update, *val_aux = train_step(
             curriculum_embedding_model=curriculum_embedding_model,
             embedding_model_target=embedding_model_target,
             embedding_model=embedding_model,
@@ -680,21 +669,16 @@ def train_n_steps(
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             batch_data=batch_data,
-            policy_loss_ema=policy_loss_ema,
             config=config,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
             key=subkey,
-            last_update_step=last_update_step,
+            step=i + 1,
         )
 
-        last_update_step = jnp.where(is_embd_update, 0.0, last_update_step + 1.0)
-
         return (
-            last_update_step,
             num_embd_updates + is_embd_update,
-            new_policy_loss_ema,
             tuple(val_aux),
             key,
             embedding_model_target,
@@ -714,9 +698,7 @@ def train_n_steps(
         DataAux(),
     )
     init_carry = (
-        0.0,  # last update is set to 0.
         0.0,  # number of embd update initially is 0
-        policy_loss_ema,
         init_val_aux,
         key2,
         embedding_model_target,
@@ -727,11 +709,9 @@ def train_n_steps(
         policy_model,
         policy_optimizer,
     )
-    _, num_embd_updates, policy_loss_ema, val_aux, *_ = nnx.fori_loop(
-        0, num_steps, body_fun, init_carry
-    )
+    num_embd_updates, val_aux, *_ = nnx.fori_loop(0, num_steps, body_fun, init_carry)
 
-    return num_embd_updates, policy_loss_ema, num_steps, *val_aux
+    return num_embd_updates, num_steps, *val_aux
 
 
 def main(args, cfg_env=None):
@@ -942,14 +922,12 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start embedding, cost and bc_policy model training.")
 
-    policy_loss_ema = jnp.array(1e9, dtype=jnp.float32)
     steps = 0
     while steps < config["total_iteration"]:
         do_warmup = steps >= config_data.warmup_steps
 
         (
             num_embd_updates,
-            policy_loss_ema,
             num_itr,
             train_aux,
             embd_aux,
@@ -966,7 +944,6 @@ def main(args, cfg_env=None):
             policy_model=policy_model,
             policy_optimizer=policy_optimizer,
             data_buffer=data_buffer,
-            policy_loss_ema=policy_loss_ema,
             config=config_data,
             has_positive=has_positive,
             has_negative=has_negative,
@@ -995,7 +972,6 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_policy_q", policy_aux.q.item())
         logger.log_tabular("Loss/Loss_policy_v", policy_aux.v.item())
         logger.log_tabular("Loss/Loss_policy_weight", policy_aux.weight.item())
-        logger.log_tabular("Loss/Loss_policy_ema", policy_loss_ema.item())
 
         logger.log_tabular("Num/target_embedding_updates", num_embd_updates.item())
 
