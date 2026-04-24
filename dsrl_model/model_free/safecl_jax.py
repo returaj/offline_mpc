@@ -70,13 +70,29 @@ trajectory_data = {
     "cost_only": ((0.0, 1.0, 0.0, 0.5),),
 }
 
-labels_cfg = {
-    "num_modes": 3,
-    "concentration_factor": 3.5,
-    "labels": [3.0, 2.0, 1.0, 0.0] + [-1.0],  # -1 denotes invalid label
-    "range": [1.0, 0.75, 0.5, 0.25, -0.25] + [-2.0],  # -2 denotes invalid range
-    "distance": [1.0, 0.5, 0.25, 0.0] + [-2.0],  # -2 denotes invalid distance
-}
+
+class Models(nnx.Module):
+    def __init__(
+        self, curriculum_embedding, embedding_target, embedding, value, policy
+    ):
+        self.curriculum_embedding = curriculum_embedding
+        self.embedding_target = embedding_target
+        self.embedding = embedding
+        self.value = value
+        self.policy = policy
+
+
+class Optimizers(nnx.Module):
+    def __init__(self, embedding, value, policy):
+        self.embedding = embedding
+        self.value = value
+        self.policy = policy
+
+
+class TrainingState(nnx.Module):
+    def __init__(self, models, optimizers):
+        self.models = models
+        self.optimizers = optimizers
 
 
 @struct.dataclass
@@ -90,16 +106,16 @@ class DataAux:
 
 
 @struct.dataclass
-class UnionTrainableAux:
+class UnionSinkAux:
     mean_score: float = 0.0
     std_score: float = 0.0
-    trainable_percent: float = 0.0
-    trainable_reward: float = 0.0
-    non_trainable_reward: float = 0.0
-    trainable_cost: float = 0.0
-    non_trainable_cost: float = 0.0
-    trainable_nonpref: float = 0.0
-    non_trainable_nonpref: float = 0.0
+    sink_percent: float = 0.0
+    sink_reward: float = 0.0
+    source_reward: float = 0.0
+    sink_cost: float = 0.0
+    source_cost: float = 0.0
+    sink_nonpref: float = 0.0
+    source_nonpref: float = 0.0
 
 
 @struct.dataclass
@@ -107,11 +123,9 @@ class ValueAux:
     loss: float = 0.0
     pos_loss: float = 0.0
     neg_loss: float = 0.0
-    random_loss: float = 0.0
     union_loss: float = 0.0
     pos_value: float = 0.0
     neg_value: float = 0.0
-    random_value: float = 0.0
     union_value: float = 0.0
 
 
@@ -229,7 +243,7 @@ def range_loss(scores, target_scores, scale):
     return scale * loss
 
 
-def get_trainable_mean_values(value_arr, trainable_mask):
+def get_sink_source_mean_values(value_arr, trainable_mask):
     batch = trainable_mask.shape[0]
     trainable_count = trainable_mask.sum()
     batch_horizon_value = jnp.sum(value_arr, axis=-1)
@@ -240,12 +254,7 @@ def get_trainable_mean_values(value_arr, trainable_mask):
     return mean_trainable_value, mean_non_trainable_value
 
 
-def get_union_trainable(
-    curriculum_embedding_model,
-    embedding_model,
-    data,
-    config,
-):
+def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, config):
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
@@ -263,58 +272,60 @@ def get_union_trainable(
     # Batch
     union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
 
-    trainable_mask = (union_score > config.value_limit).astype(dtype)
-    trainable_count = trainable_mask.sum()
-    trainable_percent = trainable_count / batch
+    sink_mask = (union_score > config.value_limit).astype(dtype)
+    sink_count = sink_mask.sum()
+    sink_percent = sink_count / batch
 
     # Batch
-    mean_trainable_reward, mean_non_trainable_reward = get_trainable_mean_values(
-        data.union_reward, trainable_mask
+    mean_sink_reward, mean_source_reward = get_sink_source_mean_values(
+        data.union_reward, sink_mask
     )
-    mean_trainable_cost, mean_non_trainable_cost = get_trainable_mean_values(
-        data.union_cost, trainable_mask
+    mean_sink_cost, mean_source_cost = get_sink_source_mean_values(
+        data.union_cost, sink_mask
     )
 
-    mean_trainable_nonpref = (trainable_percent > 0.0) * get_nonpref_mean_value(
-        mean_trainable_reward,
-        mean_trainable_cost,
+    mean_sink_nonpref = (sink_percent > 0.0) * get_nonpref_mean_value(
+        mean_sink_reward,
+        mean_sink_cost,
         horizon,
         config.env_name,
         rscale=config.nonpref_reward_scale,
         cscale=config.nonpref_cost_scale,
     )
-    mean_non_trainable_nonpref = get_nonpref_mean_value(
-        mean_non_trainable_reward,
-        mean_non_trainable_cost,
+    mean_source_nonpref = get_nonpref_mean_value(
+        mean_source_reward,
+        mean_source_cost,
         horizon,
         config.env_name,
         rscale=config.nonpref_reward_scale,
         cscale=config.nonpref_cost_scale,
     )
 
-    union_aux = UnionTrainableAux(
+    union_weight = jnp.maximum(data.union_weight, sink_mask * weight)
+
+    union_aux = UnionSinkAux(
         mean_score=union_score.mean(),
         std_score=union_score.std(),
-        trainable_percent=trainable_percent,
-        trainable_reward=mean_trainable_reward,
-        non_trainable_reward=mean_non_trainable_reward,
-        trainable_cost=mean_trainable_cost,
-        non_trainable_cost=mean_non_trainable_cost,
-        trainable_nonpref=mean_trainable_nonpref,
-        non_trainable_nonpref=mean_non_trainable_nonpref,
+        sink_percent=sink_percent,
+        sink_reward=mean_sink_reward,
+        source_reward=mean_source_reward,
+        sink_cost=mean_sink_cost,
+        source_cost=mean_source_cost,
+        sink_nonpref=mean_sink_nonpref,
+        source_nonpref=mean_source_nonpref,
     )
 
-    return trainable_mask, union_score, union_aux
+    return sink_mask, union_weight, union_aux
 
 
 def embedding_grad_aux_fun(
     curriculum_embedding_model,
     embedding_model,
     data,
-    union_trainable,
+    union_sink_mask,
+    config,
     has_positive,
     has_negative,
-    pos_label,
     union_scale,
     key,
 ):
@@ -337,8 +348,9 @@ def embedding_grad_aux_fun(
     target_random = mix_p1 * target_shuffle_union + (1 - mix_p1) * target_union
 
     # Batch
-    target_pos_score = pos_label * jnp.ones(shape=(batch,), dtype=dtype)
-    target_neg_score = jnp.ones(shape=(batch,), dtype=dtype)
+    target_pos_score = config.pos_label * jnp.ones(shape=(batch,), dtype=dtype)
+    target_neg_score = config.neg_label * jnp.ones(shape=(batch,), dtype=dtype)
+    target_union_score = jnp.ones(shape=(batch,), dtype=dtype)
     target_random_score = jnp.zeros(shape=(batch,), dtype=dtype)
 
     # Batch X embd_dim
@@ -368,14 +380,13 @@ def embedding_grad_aux_fun(
 
         union_z = embedding_model(target_union)
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
-        union_loss = range_loss(union_score, target_neg_score, union_scale)
-        trainable_scores = (union_trainable > 0).astype(dtype)
-        trainable_count = jnp.clip(trainable_scores.sum(), min=1.0)
+        union_loss = range_loss(union_score, target_union_score, union_scale)
+        union_sink_count = jnp.clip(union_sink_mask.sum(), min=1.0)
         union_mean_loss = (
-            jnp.einsum("i,i->", trainable_scores, union_loss) / trainable_count
+            jnp.einsum("i,i->", union_sink_mask, union_loss) / union_sink_count
         )
         union_mean_score = (
-            jnp.einsum("i,i->", trainable_scores, union_score) / trainable_count
+            jnp.einsum("i,i->", union_sink_mask, union_score) / union_sink_count
         )
 
         random_z = embedding_model(target_random)
@@ -406,18 +417,10 @@ def embedding_grad_aux_fun(
 
 
 def value_grad_aux_fun(
-    value_model,
-    union_score,
-    data,
-    config,
-    pos_scale,
-    neg_scale,
-    union_scale,
-    key,
+    value_model, union_sink_mask, union_score, data, config, pos_scale, neg_scale
 ):
     # Value model learns the preferred state-action pair score
-
-    batch = data.union_obs.shape[0]
+    pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
 
     # Batch X obs/act_dim
     target_pos = jnp.concat([data.pos_obs[:, 0], data.pos_act[:, 0]], axis=-1)
@@ -427,17 +430,13 @@ def value_grad_aux_fun(
     target_union_obs, target_union_act = data.union_obs[:, 0], data.union_act[:, 0]
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
-    # random data
-    key1, key2 = jax.random.split(key, num=2)
-    mix_p1 = jax.random.uniform(key=key1, shape=target_union_act.shape)
-    target_shuffle_act = jax.random.permutation(key2, target_union_act, axis=0)
-    target_random_act = mix_p1 * target_shuffle_act + (1 - mix_p1) * target_union_act
-    target_random = jnp.concat([target_union_obs, target_random_act], axis=-1)
+    full_mask = jnp.ones_like(union_sink_mask)
 
-    neg_score = jnp.ones_like(union_score)
-    pos_score = config.pos_label * neg_score
+    pos_score = pref_sign * config.pos_label * jnp.ones_like(union_score)
+    neg_score = pref_sign * config.neg_label * jnp.ones_like(union_score)
+    union_score = pref_sign * union_score
 
-    def xql_rescale_loss(value_model, score, x, scale):
+    def xql_rescale_loss(value_model, mask, score, x, scale):
         # Batch
         v1, v2 = value_model(x)
         v1_z, v2_z = (score - v1) / config.value_temp, (score - v2) / config.value_temp
@@ -450,34 +449,28 @@ def value_grad_aux_fun(
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
 
-        loss = scale * jnp.mean(loss_v1 + loss_v2)
-        value = scale * jnp.minimum(v1, v2).mean()
+        loss = scale * (mask * (loss_v1 + loss_v2)).mean()
+        value = scale * (mask * jnp.minimum(v1, v2)).mean()
         return loss, value
 
     def loss_fun(value_model):
-        # negative score is preferred score
         pos_loss, pos_value = xql_rescale_loss(
-            value_model, -pos_score, target_pos, pos_scale
+            value_model, full_mask, pos_score, target_pos, pos_scale
         )
         neg_loss, neg_value = xql_rescale_loss(
-            value_model, -neg_score, target_neg, neg_scale
-        )
-        random_loss, random_value = xql_rescale_loss(
-            value_model, -neg_score, target_random, 1.0
+            value_model, full_mask, neg_score, target_neg, neg_scale
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, -union_score, target_union, 1.0
+            value_model, union_sink_mask, union_score, target_union, 1.0
         )
         loss = pos_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
             neg_loss=neg_loss,
-            random_loss=random_loss,
             union_loss=union_loss,
             pos_value=pos_value,
             neg_value=neg_value,
-            random_value=random_value,
             union_value=union_value,
         )
 
@@ -487,22 +480,14 @@ def value_grad_aux_fun(
 
 
 def policy_grad_aux_fun(
-    policy_model,
-    value_model,
-    data,
-    do_warmup,
-    config,
+    policy_model, value_model, union_sink_mask, data, do_warmup, config
 ):
-    batch, horizon, _ = data.union_obs.shape
-
     # B X obs/act_dim
     # only consider the first state-action pair as
     # our value function may not be trained enough to
     # judge the state-action pair for later trajectory pair
-
-    # BH X obs/act_dim
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    target_union_obs = data.union_obs[:, 0]
+    target_union_act = data.union_act[:, 0]
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
@@ -514,7 +499,7 @@ def policy_grad_aux_fun(
         v = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
-        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
+        weight = union_sink_mask * jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
 
         loss = jnp.mean(weight * union_loss)
         return loss, PolicyAux(
@@ -531,68 +516,55 @@ def policy_grad_aux_fun(
 
 
 def train_step(
-    curriculum_embedding_model,
-    embedding_model_target,
-    embedding_model,
-    embedding_optimizer,
-    value_model,
-    value_optimizer,
-    policy_model,
-    policy_optimizer,
-    batch_data,
-    config,
-    has_positive,
-    has_negative,
-    do_warmup,
-    key,
-    step,
+    state, batch_data, config, has_positive, has_negative, do_warmup, weight, key, step
 ):
-    key1, key2 = jax.random.split(key, num=2)
-
-    union_trainable, union_score, trainable_aux = get_union_trainable(
-        curriculum_embedding_model=curriculum_embedding_model,
-        embedding_model=embedding_model_target,
+    union_sink_mask, union_weight, union_sink_aux = get_union_sink(
+        curriculum_embedding_model=state.models.curriculum_embedding,
+        embedding_model=state.models.embedding_target,
         data=batch_data,
+        weight=weight,
         config=config,
     )
 
     embedding_grads, embedding_aux = embedding_grad_aux_fun(
-        curriculum_embedding_model=curriculum_embedding_model,
-        embedding_model=embedding_model,
+        curriculum_embedding_model=state.models.curriculum_embedding,
+        embedding_model=state.models.embedding,
         data=batch_data,
-        union_trainable=union_trainable,
+        union_sink_mask=union_sink_mask,
+        config=config,
         has_positive=has_positive,
         has_negative=has_negative,
-        pos_label=config.pos_label,
         union_scale=1.0 * do_warmup,  # convert into float type
-        key=key1,
+        key=key,
     )
-    embedding_optimizer.update(embedding_grads)
+    state.optimizers.embedding.update(embedding_grads)
 
     value_grads, value_aux = value_grad_aux_fun(
-        value_model=value_model,
-        union_score=union_score,
+        value_model=state.models.value,
+        union_sink_mask=union_sink_mask,
+        union_score=union_weight,
         data=batch_data,
         config=config,
         pos_scale=1.0 * has_positive,
         neg_scale=1.0 * has_negative,
-        union_scale=1.0 * do_warmup,
-        key=key2,
     )
-    value_optimizer.update(value_grads)
+    state.optimizers.value.update(value_grads)
 
     policy_grads, policy_aux = policy_grad_aux_fun(
-        policy_model=policy_model,
-        value_model=value_model,
+        policy_model=state.models.policy,
+        value_model=state.models.value,
+        union_sink_mask=union_sink_mask,
         data=batch_data,
         do_warmup=1.0 * do_warmup,
         config=config,
     )
-    policy_optimizer.update(policy_grads)
+    state.optimizers.policy.update(policy_grads)
 
     embedding_cond = step % config.stale_embd_freq == 0
-    embedding_model_target = polyak_update(
-        embedding_model_target, embedding_model, embedding_cond * config.update_tau
+    polyak_update(
+        state.models.embedding_target,
+        state.models.embedding,
+        embedding_cond * config.update_tau,
     )
 
     data_aux = DataAux(
@@ -606,7 +578,8 @@ def train_step(
 
     return (
         1.0 * embedding_cond,
-        trainable_aux,
+        union_weight,
+        union_sink_aux,
         embedding_aux,
         value_aux,
         policy_aux,
@@ -616,19 +589,13 @@ def train_step(
 
 @nnx.jit
 def train_n_steps(
-    curriculum_embedding_model,
-    embedding_model_target,
-    embedding_model,
-    embedding_optimizer,
-    value_model,
-    value_optimizer,
-    policy_model,
-    policy_optimizer,
+    state,
     data_buffer,
     config,
     has_positive,
     has_negative,
     do_warmup,
+    weight,
     key,
 ):
     num_steps = config.log_freq
@@ -641,16 +608,12 @@ def train_n_steps(
 
     def body_fun(i, carry):
         (
-            num_embd_updates,
-            _,
             key,
-            embedding_model_target,
-            embedding_model,
-            embedding_optimizer,
-            value_model,
-            value_optimizer,
-            policy_model,
-            policy_optimizer,
+            state,
+            data_buffer,
+            num_embd_updates,
+            weight,
+            _,
         ) = carry
 
         key, subkey = jax.random.split(key, 2)
@@ -659,59 +622,46 @@ def train_n_steps(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        is_embd_update, *val_aux = train_step(
-            curriculum_embedding_model=curriculum_embedding_model,
-            embedding_model_target=embedding_model_target,
-            embedding_model=embedding_model,
-            embedding_optimizer=embedding_optimizer,
-            value_model=value_model,
-            value_optimizer=value_optimizer,
-            policy_model=policy_model,
-            policy_optimizer=policy_optimizer,
+        is_embd_update, union_weight, *val_aux = train_step(
+            state=state,
             batch_data=batch_data,
             config=config,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
+            weight=weight,
             key=subkey,
             step=i + 1,
         )
 
-        return (
-            num_embd_updates + is_embd_update,
-            tuple(val_aux),
-            key,
-            embedding_model_target,
-            embedding_model,
-            embedding_optimizer,
-            value_model,
-            value_optimizer,
-            policy_model,
-            policy_optimizer,
+        data_buffer = data_buffer.update_union_weight(
+            data_buffer, union_idxs[i], union_weight
         )
 
-    init_val_aux = (
-        UnionTrainableAux(),
-        EmbeddingAux(),
-        ValueAux(),
-        PolicyAux(),
-        DataAux(),
-    )
-    init_carry = (
-        0.0,  # number of embd update initially is 0
-        init_val_aux,
-        key2,
-        embedding_model_target,
-        embedding_model,
-        embedding_optimizer,
-        value_model,
-        value_optimizer,
-        policy_model,
-        policy_optimizer,
-    )
-    num_embd_updates, val_aux, *_ = nnx.fori_loop(0, num_steps, body_fun, init_carry)
+        weight = weight * config.decay**is_embd_update
 
-    return num_embd_updates, num_steps, *val_aux
+        return (
+            key,
+            state,
+            data_buffer,
+            num_embd_updates + is_embd_update,
+            weight,
+            tuple(val_aux),
+        )
+
+    init_carry = (
+        key2,
+        state,
+        data_buffer,
+        0.0,  # number of embd update initially is 0
+        weight,
+        (UnionSinkAux(), EmbeddingAux(), ValueAux(), PolicyAux(), DataAux()),
+    )
+    _, _, data_buffer, num_embd_updates, weight, val_aux = nnx.fori_loop(
+        0, num_steps, body_fun, init_carry
+    )
+
+    return data_buffer, num_embd_updates, num_steps, weight, *val_aux
 
 
 def main(args, cfg_env=None):
@@ -751,6 +701,7 @@ def main(args, cfg_env=None):
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["use_vonmisesfisher_mode"] = args.use_vonmisesfisher_mode
     config["pos_label"] = args.preferred_label
+    config["neg_label"] = args.non_preferred_label
     config["lr"] = args.lr
 
     # set training steps
@@ -834,6 +785,21 @@ def main(args, cfg_env=None):
             optax.adamw(
                 learning_rate=config["lr"], weight_decay=config["weight_decay"]
             ),
+        ),
+    )
+
+    state = TrainingState(
+        models=Models(
+            curriculum_embedding=curriculum_embedding_model,
+            embedding_target=embedding_model_target,
+            embedding=embedding_model,
+            value=value_model,
+            policy=policy_model,
+        ),
+        optimizers=Optimizers(
+            embedding=embedding_optimizer,
+            value=value_optimizer,
+            policy=policy_optimizer,
         ),
     )
 
@@ -922,32 +888,28 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start embedding, cost and bc_policy model training.")
 
-    steps = 0
+    weight, steps = 1.0, 0
     while steps < config["total_iteration"]:
         do_warmup = steps >= config_data.warmup_steps
 
         (
+            data_buffer,
             num_embd_updates,
             num_itr,
+            weight,
             train_aux,
             embd_aux,
             value_aux,
             policy_aux,
             data_aux,
         ) = train_n_steps(
-            curriculum_embedding_model=curriculum_embedding_model,
-            embedding_model_target=embedding_model_target,
-            embedding_model=embedding_model,
-            embedding_optimizer=embedding_optimizer,
-            value_model=value_model,
-            value_optimizer=value_optimizer,
-            policy_model=policy_model,
-            policy_optimizer=policy_optimizer,
+            state=state,
             data_buffer=data_buffer,
             config=config_data,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
+            weight=weight,
             key=rngs.random_sample(),
         )
 
@@ -965,7 +927,6 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_value", value_aux.loss.item())
         logger.log_tabular("Loss/Loss_value_pos", value_aux.pos_loss.item())
         logger.log_tabular("Loss/Loss_value_neg", value_aux.neg_loss.item())
-        logger.log_tabular("Loss/Loss_value_random", value_aux.random_loss.item())
         logger.log_tabular("Loss/Loss_value_union", value_aux.union_loss.item())
 
         logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
@@ -983,35 +944,24 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_random_score", embd_aux.random_score.item())
         logger.log_tabular("Mean/pos_value", value_aux.pos_value.item())
         logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
-        logger.log_tabular("Mean/random_value", value_aux.random_value.item())
         logger.log_tabular("Mean/union_value", value_aux.union_value.item())
 
-        logger.log_tabular(
-            "NonPrefScore/union_trainable", train_aux.trainable_nonpref.item()
-        )
-        logger.log_tabular(
-            "NonPrefScore/union_non_trainable", train_aux.non_trainable_nonpref.item()
-        )
+        logger.log_tabular("NonPrefScore/union_sink", train_aux.sink_nonpref.item())
+        logger.log_tabular("NonPrefScore/union_source", train_aux.source_nonpref.item())
 
-        logger.log_tabular(
-            "Percentage/union_trainable", train_aux.trainable_percent.item()
-        )
+        logger.log_tabular("Percentage/union_sink", train_aux.sink_percent.item())
 
         logger.log_tabular("Reward/pos", data_aux.pos_reward.item())
         logger.log_tabular("Reward/neg", data_aux.neg_reward.item())
         logger.log_tabular("Reward/union", data_aux.union_reward)
-        logger.log_tabular("Reward/union_trainable", train_aux.trainable_reward.item())
-        logger.log_tabular(
-            "Reward/union_non_trainable", train_aux.non_trainable_reward.item()
-        )
+        logger.log_tabular("Reward/union_sink", train_aux.sink_reward.item())
+        logger.log_tabular("Reward/union_source", train_aux.source_reward.item())
 
         logger.log_tabular("Cost/pos", data_aux.pos_cost.item())
         logger.log_tabular("Cost/neg", data_aux.neg_cost.item())
         logger.log_tabular("Cost/union", data_aux.union_cost.item())
-        logger.log_tabular("Cost/union_trainable", train_aux.trainable_cost.item())
-        logger.log_tabular(
-            "Cost/union_non_trainable", train_aux.non_trainable_cost.item()
-        )
+        logger.log_tabular("Cost/union_sink", train_aux.sink_cost.item())
+        logger.log_tabular("Cost/union_source", train_aux.source_cost.item())
 
         logger.log_tabular(
             "Norm/embedding_model",
