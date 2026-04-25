@@ -493,6 +493,8 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
     # BH X obs/act_dim
     target_union_obs = data.union_obs.reshape(batch * horizon, -1)
     target_union_act = data.union_act.reshape(batch * horizon, -1)
+    
+    union_mask = union_mask.repeat(horizon)
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
