@@ -493,7 +493,7 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
     # BH X obs/act_dim
     target_union_obs = data.union_obs.reshape(batch * horizon, -1)
     target_union_act = data.union_act.reshape(batch * horizon, -1)
-    
+
     union_mask = union_mask.repeat(horizon)
 
     def loss_fun(policy_model):
@@ -506,7 +506,9 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
         v = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
-        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
+
+        # use only top 20% trajectory for learning policy
+        weight = jnp.exp(jnp.clip((q - 0.8) / config.value_temp, max=5.0))
 
         loss = jnp.mean(union_mask * weight * union_loss)
         return loss, PolicyAux(
