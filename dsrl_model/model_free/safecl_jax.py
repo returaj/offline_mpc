@@ -483,12 +483,16 @@ def value_grad_aux_fun(
 
 
 def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, config):
+    batch, horizon, _ = data.union_obs.shape
+
     # B X obs/act_dim
     # only consider the first state-action pair as
     # our value function may not be trained enough to
     # judge the state-action pair for later trajectory pair
-    target_union_obs = data.union_obs[:, 0]
-    target_union_act = data.union_act[:, 0]
+
+    # BH X obs/act_dim
+    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+    target_union_act = data.union_act.reshape(batch * horizon, -1)
 
     def loss_fun(policy_model):
         pred_union_act, *_ = policy_model(target_union_obs)
