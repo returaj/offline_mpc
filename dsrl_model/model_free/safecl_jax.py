@@ -110,6 +110,7 @@ class UnionSinkAux:
     mean_score: float = 0.0
     std_score: float = 0.0
     sink_percent: float = 0.0
+    sink_percent_ema: float = 0.0
     sink_reward: float = 0.0
     source_reward: float = 0.0
     sink_cost: float = 0.0
@@ -301,8 +302,9 @@ def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, co
         cscale=config.nonpref_cost_scale,
     )
 
-    union_weight = jnp.where(sink_mask, weight, weight * union_score)
-    union_weight = jnp.maximum(data.union_weight, union_weight)
+    # union_weight = jnp.where(sink_mask, weight, weight * union_score)
+    # union_weight = jnp.maximum(data.union_weight, union_weight)
+    union_weight = jnp.maximum(data.union_weight, weight * sink_mask)
 
     union_aux = UnionSinkAux(
         mean_score=union_score.mean(),
@@ -417,7 +419,9 @@ def embedding_grad_aux_fun(
     return grads, embd_aux
 
 
-def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_scale):
+def value_grad_aux_fun(
+    value_model, union_mask, union_score, data, config, pos_scale, neg_scale
+):
     # Value model learns the preferred state-action pair score
     pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
 
@@ -433,7 +437,9 @@ def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_sc
     neg_score = pref_sign * config.neg_label * jnp.ones_like(union_score)
     union_score = pref_sign * union_score
 
-    def xql_rescale_loss(value_model, score, x, scale):
+    full_mask = jnp.ones_like(union_mask)
+
+    def xql_rescale_loss(value_model, mask, score, x, scale):
         # Batch
         v1, v2 = value_model(x)
         v1_z, v2_z = (score - v1) / config.value_temp, (score - v2) / config.value_temp
@@ -446,19 +452,19 @@ def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_sc
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
 
-        loss = scale * (loss_v1 + loss_v2).mean()
-        value = scale * jnp.minimum(v1, v2).mean()
+        loss = scale * (mask * (loss_v1 + loss_v2)).mean()
+        value = scale * (mask * jnp.minimum(v1, v2)).mean()
         return loss, value
 
     def loss_fun(value_model):
         pos_loss, pos_value = xql_rescale_loss(
-            value_model, pos_score, target_pos, pos_scale
+            value_model, full_mask, pos_score, target_pos, pos_scale
         )
         neg_loss, neg_value = xql_rescale_loss(
-            value_model, neg_score, target_neg, neg_scale
+            value_model, full_mask, neg_score, target_neg, neg_scale
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, union_score, target_union, 1.0
+            value_model, union_mask, union_score, target_union, 1.0
         )
         loss = pos_loss + union_loss
         return loss, ValueAux(
@@ -476,7 +482,7 @@ def value_grad_aux_fun(value_model, union_score, data, config, pos_scale, neg_sc
     return grads, aux
 
 
-def policy_grad_aux_fun(policy_model, value_model, data, do_warmup, config):
+def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, config):
     # B X obs/act_dim
     # only consider the first state-action pair as
     # our value function may not be trained enough to
@@ -496,7 +502,7 @@ def policy_grad_aux_fun(policy_model, value_model, data, do_warmup, config):
         )
         weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
 
-        loss = jnp.mean(weight * union_loss)
+        loss = jnp.mean(union_mask * weight * union_loss)
         return loss, PolicyAux(
             loss=loss,
             q=q.mean(),
@@ -536,6 +542,7 @@ def train_step(
 
     value_grads, value_aux = value_grad_aux_fun(
         value_model=state.models.value,
+        union_mask=union_sink_mask,
         union_score=union_weight,
         data=batch_data,
         config=config,
@@ -548,6 +555,7 @@ def train_step(
         policy_model=state.models.policy,
         value_model=state.models.value,
         data=batch_data,
+        union_mask=union_sink_mask,
         do_warmup=1.0 * do_warmup,
         config=config,
     )
@@ -606,8 +614,10 @@ def train_n_steps(
             data_buffer,
             num_embd_updates,
             weight,
-            _,
+            val_aux,
         ) = carry
+
+        prev_sink_aux, *_ = val_aux
 
         key, subkey = jax.random.split(key, 2)
 
@@ -627,12 +637,20 @@ def train_n_steps(
             step=i + 1,
         )
 
+        sink_aux, *other_aux = val_aux
+
+        sink_percent_ema = (
+            config.decay * prev_sink_aux.sink_percent_ema
+            + (1 - config.decay) * sink_aux.sink_percent
+        )
+        sink_aux = sink_aux.replace(sink_percent_ema=sink_percent_ema)
+
+        update_weight = do_warmup * is_embd_update
+        weight = jnp.where(update_weight, 1.0 - sink_percent_ema, weight)
+
         data_buffer = data_buffer.update_union_weight(
             data_buffer, union_idxs[i], union_weight
         )
-
-        decay_factor = config.decay ** (do_warmup * is_embd_update)
-        weight = weight * decay_factor
 
         return (
             key,
@@ -640,7 +658,7 @@ def train_n_steps(
             data_buffer,
             num_embd_updates + is_embd_update,
             weight,
-            tuple(val_aux),
+            (sink_aux, *other_aux),
         )
 
     init_carry = (
@@ -882,7 +900,8 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start embedding, cost and bc_policy model training.")
 
-    weight, steps = 1.0, 0
+    weight = jnp.array(1.0)
+    steps = 0
     while steps < config["total_iteration"]:
         do_warmup = steps >= config_data.warmup_steps
 
@@ -939,11 +958,15 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/pos_value", value_aux.pos_value.item())
         logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
         logger.log_tabular("Mean/union_value", value_aux.union_value.item())
+        logger.log_tabular("Mean/decay_weight", weight.item())
 
         logger.log_tabular("NonPrefScore/union_sink", train_aux.sink_nonpref.item())
         logger.log_tabular("NonPrefScore/union_source", train_aux.source_nonpref.item())
 
         logger.log_tabular("Percentage/union_sink", train_aux.sink_percent.item())
+        logger.log_tabular(
+            "Percentage/union_sink_ema", train_aux.sink_percent_ema.item()
+        )
 
         logger.log_tabular("Reward/pos", data_aux.pos_reward.item())
         logger.log_tabular("Reward/neg", data_aux.neg_reward.item())
