@@ -49,6 +49,7 @@ default_cfg = {
     "decay": 0.999,
     "value_temp": 0.1,
     "value_limit": 0.85,
+    "value_th": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
@@ -452,8 +453,9 @@ def value_grad_aux_fun(
         loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
         loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
 
-        loss = scale * (mask * (loss_v1 + loss_v2)).mean()
-        value = scale * (mask * jnp.minimum(v1, v2)).mean()
+        mask_count = jnp.clip(mask.sum(), min=1.0)
+        loss = scale * (mask * (loss_v1 + loss_v2)).sum() / mask_count
+        value = scale * (mask * jnp.minimum(v1, v2)).sum() / mask_count
         return loss, value
 
     def loss_fun(value_model):
@@ -507,10 +509,10 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
 
-        # use only top 20% trajectory for learning policy
-        weight = jnp.exp(jnp.clip((q - 0.8) / config.value_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((q - config.value_th) / config.value_temp, max=5.0))
 
-        loss = jnp.mean(union_mask * weight * union_loss)
+        union_count = jnp.clip(union_mask.sum(), min=1.0)
+        loss = (union_mask * weight * union_loss).sum() / union_count
         return loss, PolicyAux(
             loss=loss,
             q=q.mean(),
