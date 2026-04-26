@@ -513,11 +513,16 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
 
         union_count = jnp.clip(union_mask.sum(), min=1.0)
         loss = (union_mask * weight * union_loss).sum() / union_count
+
+        qmean = (union_mask * q).sum() / union_count
+        vmean = (union_mask * v).sum() / union_count
+        weightmean = (union_mask * weight).sum() / union_count
+
         return loss, PolicyAux(
             loss=loss,
-            q=q.mean(),
-            v=v.mean(),
-            weight=weight.mean(),
+            q=qmean,
+            v=vmean,
+            weight=weightmean,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
