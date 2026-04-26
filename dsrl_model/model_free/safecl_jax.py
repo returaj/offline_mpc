@@ -125,9 +125,11 @@ class ValueAux:
     loss: float = 0.0
     pos_loss: float = 0.0
     neg_loss: float = 0.0
+    random_loss: float = 0.0
     union_loss: float = 0.0
     pos_value: float = 0.0
     neg_value: float = 0.0
+    random_value: float = 0.0
     union_value: float = 0.0
 
 
@@ -421,7 +423,7 @@ def embedding_grad_aux_fun(
 
 
 def value_grad_aux_fun(
-    value_model, union_mask, union_score, data, config, pos_scale, neg_scale
+    value_model, union_mask, union_score, data, config, pos_scale, neg_scale, key
 ):
     # Value model learns the preferred state-action pair score
     pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
@@ -434,8 +436,15 @@ def value_grad_aux_fun(
     target_union_obs, target_union_act = data.union_obs[:, 0], data.union_act[:, 0]
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
+    key1, key2 = jax.random.split(key, num=2)
+    mix_p1 = jax.random.uniform(key=key1, shape=target_union_act.shape)
+    target_shuffle_act = jax.random.permutation(key2, target_union_act, axis=0)
+    target_random_act = mix_p1 * target_shuffle_act + (1 - mix_p1) * target_union_act
+    target_random = jnp.concat([target_union_obs, target_random_act], axis=-1)
+
     pos_score = pref_sign * config.pos_label * jnp.ones_like(union_score)
     neg_score = pref_sign * config.neg_label * jnp.ones_like(union_score)
+    random_score = jnp.zeros_like(union_score)
     union_score = pref_sign * union_score
 
     full_mask = jnp.ones_like(union_mask)
@@ -465,17 +474,22 @@ def value_grad_aux_fun(
         neg_loss, neg_value = xql_rescale_loss(
             value_model, full_mask, neg_score, target_neg, neg_scale
         )
+        random_loss, random_value = xql_rescale_loss(
+            value_model, full_mask, random_score, target_random, 1.0
+        )
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_score, target_union, 1.0
         )
-        loss = pos_loss + union_loss
+        loss = pos_loss + random_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
             neg_loss=neg_loss,
+            random_loss=random_loss,
             union_loss=union_loss,
             pos_value=pos_value,
             neg_value=neg_value,
+            random_value=random_value,
             union_value=union_value,
         )
 
@@ -534,6 +548,8 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
 def train_step(
     state, batch_data, config, has_positive, has_negative, do_warmup, weight, key, step
 ):
+    key1, key2 = jax.random.split(key, num=2)
+
     union_sink_mask, union_weight, union_sink_aux = get_union_sink(
         curriculum_embedding_model=state.models.curriculum_embedding,
         embedding_model=state.models.embedding_target,
@@ -551,7 +567,7 @@ def train_step(
         has_positive=has_positive,
         has_negative=has_negative,
         union_scale=1.0 * do_warmup,  # convert into float type
-        key=key,
+        key=key1,
     )
     state.optimizers.embedding.update(embedding_grads)
 
@@ -563,6 +579,7 @@ def train_step(
         config=config,
         pos_scale=1.0 * has_positive,
         neg_scale=1.0 * has_negative,
+        key=key2,
     )
     state.optimizers.value.update(value_grads)
 
@@ -955,6 +972,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_value", value_aux.loss.item())
         logger.log_tabular("Loss/Loss_value_pos", value_aux.pos_loss.item())
         logger.log_tabular("Loss/Loss_value_neg", value_aux.neg_loss.item())
+        logger.log_tabular("Loss/Loss_value_random", value_aux.random_loss.item())
         logger.log_tabular("Loss/Loss_value_union", value_aux.union_loss.item())
 
         logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
@@ -972,6 +990,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_random_score", embd_aux.random_score.item())
         logger.log_tabular("Mean/pos_value", value_aux.pos_value.item())
         logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
+        logger.log_tabular("Mean/random_value", value_aux.random_value.item())
         logger.log_tabular("Mean/union_value", value_aux.union_value.item())
         logger.log_tabular("Mean/decay_weight", weight.item())
 
