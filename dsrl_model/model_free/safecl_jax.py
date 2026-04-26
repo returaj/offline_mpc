@@ -437,10 +437,9 @@ def value_grad_aux_fun(
     target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
 
     key1, key2 = jax.random.split(key, num=2)
-    mix_p1 = jax.random.uniform(key=key1, shape=target_union_act.shape)
-    target_shuffle_act = jax.random.permutation(key2, target_union_act, axis=0)
-    target_random_act = mix_p1 * target_shuffle_act + (1 - mix_p1) * target_union_act
-    target_random = jnp.concat([target_union_obs, target_random_act], axis=-1)
+    mix_p1 = jax.random.uniform(key=key1, shape=target_union.shape)
+    target_shuffle_union = jax.random.permutation(key2, target_union, axis=0)
+    target_random = mix_p1 * target_shuffle_union + (1 - mix_p1) * target_union
 
     pos_score = pref_sign * config.pos_label * jnp.ones_like(union_score)
     neg_score = pref_sign * config.neg_label * jnp.ones_like(union_score)
@@ -480,7 +479,7 @@ def value_grad_aux_fun(
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_score, target_union, 1.0
         )
-        loss = pos_loss + random_loss + union_loss
+        loss = pos_loss + neg_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
