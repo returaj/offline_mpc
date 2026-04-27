@@ -330,8 +330,8 @@ def embedding_grad_aux_fun(
     data,
     union_sink_mask,
     config,
-    has_positive,
-    has_negative,
+    pos_scale,
+    neg_scale,
     union_scale,
     key,
 ):
@@ -349,7 +349,7 @@ def embedding_grad_aux_fun(
     # target_random1 = mix_p1 * target_neg + (1 - mix_p1) * target_union
 
     key1, key2 = jax.random.split(key, num=2)
-    mix_p1 = jax.random.uniform(key=key1, shape=target_neg.shape)
+    mix_p1 = jax.random.uniform(key=key1, shape=target_union.shape)
     target_shuffle_union = jax.random.permutation(key2, target_union, axis=0)
     target_random = mix_p1 * target_shuffle_union + (1 - mix_p1) * target_union
 
@@ -366,23 +366,17 @@ def embedding_grad_aux_fun(
     target_random_z = curriculum_embedding_model(target_random, training=False)
 
     def loss_fun(embedding_model):
-        default_scale = 1.0
-
         pos_z = embedding_model(target_pos)
         # Batch
         pos_score = jnp.einsum("ij,ij->i", pos_z, target_pos_z)
-        pos_mean_loss = has_positive * jnp.mean(
-            range_loss(pos_score, target_pos_score, default_scale)
-        )
-        pos_mean_score = has_positive * jnp.mean(pos_score)
+        pos_mean_loss = jnp.mean(range_loss(pos_score, target_pos_score, pos_scale))
+        pos_mean_score = pos_scale * jnp.mean(pos_score)
 
         neg_z = embedding_model(target_neg)
         # Batch
         neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
-        neg_mean_loss = has_negative * jnp.mean(
-            range_loss(neg_score, target_neg_score, default_scale)
-        )
-        neg_mean_score = has_negative * jnp.mean(neg_score)
+        neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
+        neg_mean_score = neg_scale * jnp.mean(neg_score)
 
         union_z = embedding_model(target_union)
         union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
@@ -397,9 +391,7 @@ def embedding_grad_aux_fun(
 
         random_z = embedding_model(target_random)
         random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
-        random_mean_loss = jnp.mean(
-            range_loss(random_score, target_random_score, default_scale)
-        )
+        random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
         loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
@@ -563,8 +555,8 @@ def train_step(
         data=batch_data,
         union_sink_mask=union_sink_mask,
         config=config,
-        has_positive=has_positive,
-        has_negative=has_negative,
+        pos_scale=1.0 * has_positive,
+        neg_scale=1.0 * has_negative,
         union_scale=1.0 * do_warmup,  # convert into float type
         key=key1,
     )
