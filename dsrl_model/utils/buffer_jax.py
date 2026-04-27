@@ -300,22 +300,22 @@ class OnPolicyBuffer:
         self._priorities_alpha = priorities_alpha
         self.dtype = np.float32
 
-        self._pos_obs = np.empty((self.pos_capacity + 1, obs_dim), dtype=self.dtype)
-        self._pos_act = np.empty((self.pos_capacity, act_dim), dtype=self.dtype)
-        self._pos_reward = np.empty((self.pos_capacity,), dtype=self.dtype)
-        self._pos_cost = np.empty((self.pos_capacity,), dtype=self.dtype)
+        self._pos_obs = np.zeros((self.pos_capacity + 1, obs_dim), dtype=self.dtype)
+        self._pos_act = np.zeros((self.pos_capacity, act_dim), dtype=self.dtype)
+        self._pos_reward = np.zeros((self.pos_capacity,), dtype=self.dtype)
+        self._pos_cost = np.zeros((self.pos_capacity,), dtype=self.dtype)
         self._pos_priorities = np.ones((self.pos_capacity,), dtype=self.dtype)
 
-        self._neg_obs = np.empty((self.neg_capacity + 1, obs_dim), dtype=self.dtype)
-        self._neg_act = np.empty((self.neg_capacity, act_dim), dtype=self.dtype)
-        self._neg_reward = np.empty((self.neg_capacity,), dtype=self.dtype)
-        self._neg_cost = np.empty((self.neg_capacity,), dtype=self.dtype)
+        self._neg_obs = np.zeros((self.neg_capacity + 1, obs_dim), dtype=self.dtype)
+        self._neg_act = np.zeros((self.neg_capacity, act_dim), dtype=self.dtype)
+        self._neg_reward = np.zeros((self.neg_capacity,), dtype=self.dtype)
+        self._neg_cost = np.zeros((self.neg_capacity,), dtype=self.dtype)
         self._neg_priorities = np.ones((self.neg_capacity,), dtype=self.dtype)
 
-        self._union_obs = np.empty((self.union_capacity + 1, obs_dim), dtype=self.dtype)
-        self._union_act = np.empty((self.union_capacity, act_dim), dtype=self.dtype)
-        self._union_reward = np.empty((self.union_capacity,), dtype=self.dtype)
-        self._union_cost = np.empty((self.union_capacity,), dtype=self.dtype)
+        self._union_obs = np.zeros((self.union_capacity + 1, obs_dim), dtype=self.dtype)
+        self._union_act = np.zeros((self.union_capacity, act_dim), dtype=self.dtype)
+        self._union_reward = np.zeros((self.union_capacity,), dtype=self.dtype)
+        self._union_cost = np.zeros((self.union_capacity,), dtype=self.dtype)
         self._union_priorities = np.ones((self.union_capacity,), dtype=self.dtype)
 
         self._eps = 1e-6
