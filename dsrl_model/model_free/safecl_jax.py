@@ -394,7 +394,12 @@ def embedding_grad_aux_fun(
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
-        loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
+        loss = (
+            pos_mean_loss
+            + config.pos_neg_ratio * neg_mean_loss
+            + union_mean_loss
+            + random_mean_loss
+        )
 
         return loss, EmbeddingAux(
             loss=loss,
@@ -738,6 +743,9 @@ def main(args, cfg_env=None):
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
     config["lr"] = args.lr
+    config["pos_neg_ratio"] = jnp.maximum(args.num_preferred, 1.0) / jnp.maximum(
+        args.num_non_preferred, 1.0
+    )
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
