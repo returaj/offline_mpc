@@ -476,7 +476,7 @@ def value_grad_aux_fun(
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_score, target_union, 1.0
         )
-        loss = pos_loss + neg_loss + union_loss
+        loss = pos_loss + config.pos_neg_ratio * neg_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
