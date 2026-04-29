@@ -32,10 +32,13 @@ from dsrl_model.utils.models_jax import (
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e1),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -44,15 +47,15 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "stale_embd_freq": int(5e2),
-    "warmup_steps": int(3e4),
+    "stale_embd_freq": int(5e1),
+    "warmup_steps": int(3e1),
     "decay": 0.999,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e2),
 }
 
 trajectory_cfg = {
@@ -213,6 +216,30 @@ def get_multimodel_score(union, target_z, embedding_model):
     # use mean of 5 models to estimate the union score
     union_score = jnp.mean(union_scores, axis=0)
     return union_score
+
+
+def get_cost_reward_weight_matrix(data_buffer):
+    capacity = data_buffer.union_cost.shape[0]
+    horizon = data_buffer.horizon
+
+    cost, reward, weight = [0], [0], [0]
+    i, length = 0, 0
+    while i < capacity:
+        if data_buffer.union_priorities[i] == 0:
+            weight[-1] /= length
+            length = 0
+            cost.append(0)
+            reward.append(0)
+            weight.append(0)
+            i += horizon
+        else:
+            cost[-1] += data_buffer.union_cost[i]
+            reward[-1] += data_buffer.union_reward[i]
+            weight[-1] += data_buffer.union_weight[i]
+            length += 1
+            i += 1
+
+    return cost, reward, weight
 
 
 @nnx.jit
@@ -1063,6 +1090,15 @@ def main(args, cfg_env=None):
         logger.save_state(
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
         )
+
+    # plot cost, reward weight
+    costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer)
+    # Custom colormap: gray -> green
+    cmap = mcolors.LinearSegmentedColormap.from_list("gray_to_green", ["gray", "green"])
+    fig, ax = plt.subplots()
+    sc = ax.scatter(costs, rewards, c=weights, cmap=cmap, vmin=0, vmax=1)
+    fig.savefig(f"{args.log_dir}/weight_dataset.png", dpi=300, bbox_inches="tight")
+
     logger.close()
 
 
