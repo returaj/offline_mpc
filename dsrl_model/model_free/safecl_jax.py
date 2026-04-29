@@ -38,7 +38,7 @@ import matplotlib.colors as mcolors
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e1),
+    "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -47,15 +47,15 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "stale_embd_freq": int(5e1),
-    "warmup_steps": int(3e1),
+    "stale_embd_freq": int(5e2),
+    "warmup_steps": int(3e4),
     "decay": 0.999,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
-    "total_iteration": int(1e2),
+    "total_iteration": int(1e6),
 }
 
 trajectory_cfg = {
