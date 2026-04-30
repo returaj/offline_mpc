@@ -300,7 +300,7 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
     pos_data, neg_data, union_data = get_pos_neg_and_union_data(
-        data, trajectory_cfg, save_dir=args.log_dir
+        data, trajectory_cfg, save_dir=args.log_dir, seed=args.seed
     )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
@@ -439,7 +439,7 @@ def main(args, cfg_env=None):
                 if args.use_eval:
                     eval_start_time = time.time()
                     for id in range(eval_episodes):
-                        (eval_reward, eval_cost, eval_len) = evaluate_bc_policy(
+                        eval_reward, eval_cost, eval_len = evaluate_bc_policy(
                             eval_env, bc_policy.action, mu_obs, std_obs
                         )
                         eval_rew_deque.append(eval_reward)

@@ -879,7 +879,7 @@ def main(args, cfg_env=None):
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
     pos_data, neg_data, union_data = get_pos_neg_and_union_data(
-        data, trajectory_cfg, save_dir=args.log_dir
+        data, trajectory_cfg, save_dir=args.log_dir, seed=args.seed
     )
     mu_obs, std_obs = 0.0, 1.0
     if config["normalize_observation"]:
@@ -1097,7 +1097,9 @@ def main(args, cfg_env=None):
     cmap = mcolors.LinearSegmentedColormap.from_list("gray_to_green", ["gray", "green"])
     fig, ax = plt.subplots()
     sc = ax.scatter(costs, rewards, c=weights, cmap=cmap, vmin=0, vmax=1)
-    fig.savefig(f"{args.log_dir}/weight_dataset.png", dpi=300, bbox_inches="tight")
+    fig.savefig(
+        f"{args.log_dir}/weight_dataset_{args.seed}.png", dpi=300, bbox_inches="tight"
+    )
 
     logger.close()
 
