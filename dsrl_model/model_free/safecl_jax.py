@@ -779,7 +779,7 @@ def main(args, cfg_env=None):
     config["batch_size"] = batch_size
 
     # env name
-    env_name = re.search(r"Offline(.*?)Gymnasium-v[0-9]", args.task).group(1)
+    env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
     config["env_name"] = env_name
 
     # nonpref_reward_scale and nonpref_cost_scale
