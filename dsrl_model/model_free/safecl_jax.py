@@ -220,25 +220,25 @@ def get_multimodel_score(union, target_z, embedding_model):
 
 def get_cost_reward_weight_matrix(data_buffer):
     capacity = data_buffer.union_cost.shape[0]
-    horizon = data_buffer.horizon
-
     cost, reward, weight = [0], [0], [0]
+    last = False
     i, length = 0, 0
     while i < capacity:
         if data_buffer.union_priorities[i] == 0:
-            weight[-1] /= length
-            length = 0
-            cost.append(0)
-            reward.append(0)
-            weight.append(0)
-            i += horizon
+            if not last:
+                weight[-1] /= length
+                length = 0
+                cost.append(0)
+                reward.append(0)
+                weight.append(0)
+                last = True
         else:
             cost[-1] += data_buffer.union_cost[i]
             reward[-1] += data_buffer.union_reward[i]
             weight[-1] += data_buffer.union_weight[i]
             length += 1
-            i += 1
-
+            last = False
+        i += 1
     return cost, reward, weight
 
 
