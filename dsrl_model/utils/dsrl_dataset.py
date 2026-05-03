@@ -276,7 +276,7 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     return pos_shuffled_idx, neg_shuffled_idx, union_shuffled_idx
 
 
-def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
+def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
     if config["data_inpaint"] == "full":
         pos_idxs, neg_idxs, union_idxs = get_full_pos_neg_and_union_data(
             d4rl_data, config
@@ -362,7 +362,7 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir="."):
     ax.legend(loc="lower right")
 
     os.makedirs(save_dir, exist_ok=True)
-    fig.savefig(f"{save_dir}/sampled_dataset.png", bbox_inches="tight")
+    fig.savefig(f"{save_dir}/sampled_dataset_{seed}.png", bbox_inches="tight")
 
     return pos_data, neg_data, union_data
 
