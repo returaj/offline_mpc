@@ -220,19 +220,20 @@ def get_multimodel_score(union, target_z, embedding_model):
 
 def get_cost_reward_weight_matrix(data_buffer):
     capacity = data_buffer.union_cost.shape[0]
-    cost, reward, weight = [0], [0], [0]
-    last = False
+    cost, reward, weight = [], [], []
+    last = True
     i, length = 0, 0
     while i < capacity:
         if data_buffer.union_priorities[i] == 0:
             if not last:
                 weight[-1] /= length
                 length = 0
+                last = True
+        else:
+            if last:
                 cost.append(0)
                 reward.append(0)
                 weight.append(0)
-                last = True
-        else:
             cost[-1] += data_buffer.union_cost[i]
             reward[-1] += data_buffer.union_reward[i]
             weight[-1] += data_buffer.union_weight[i]
@@ -1093,8 +1094,8 @@ def main(args, cfg_env=None):
 
     # plot cost, reward weight
     costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer)
-    # Custom colormap: gray -> green
-    cmap = mcolors.LinearSegmentedColormap.from_list("gray_to_green", ["gray", "green"])
+    # Custom colormap: red -> green
+    cmap = mcolors.LinearSegmentedColormap.from_list("red_to_green", ["red", "green"])
     fig, ax = plt.subplots()
     sc = ax.scatter(costs, rewards, c=weights, cmap=cmap, vmin=0, vmax=1)
     fig.savefig(
