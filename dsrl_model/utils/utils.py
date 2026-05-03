@@ -339,7 +339,7 @@ def single_agent_args():
         {
             "name": "--non-preferred-label",
             "type": float,
-            "default": 0.0,
+            "default": -1.0,
             "help": "non-preferred label score for training safecl.",
         },
         {
