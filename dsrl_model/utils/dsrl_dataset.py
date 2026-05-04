@@ -113,7 +113,7 @@ def get_reward_pos_neg_and_union_data(d4rl_data, config):
     num_union_traj = config["num_union_trajectories"]
 
     # preferred dataset
-    reward_fraction = 0.9
+    reward_fraction = 0.95
     min_idx = int(reward_fraction * num_trajs)
     pos_idx = sorted_traj_idx[min_idx:]
     num_pos_traj = min(len(pos_idx), num_pos_traj)
@@ -125,7 +125,7 @@ def get_reward_pos_neg_and_union_data(d4rl_data, config):
     num_true_neg_traj = int(num_neg_traj * true_percentage)
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
-    reward_fraction = 0.1
+    reward_fraction = 0.05
     max_idx = int(reward_fraction * num_trajs)
     low_reward_neg_idx = sorted_traj_idx[:max_idx]
     num_true_neg_traj = min(len(low_reward_neg_idx), num_true_neg_traj)
@@ -167,7 +167,7 @@ def get_cost_pos_neg_and_union_data(d4rl_data, config):
     num_union_traj = config["num_union_trajectories"]
 
     # preferred dataset
-    cost_fraction = 0.1
+    cost_fraction = 0.05
     max_idx = int(cost_fraction * num_trajs)
     pos_idx = sorted_traj_idx[:max_idx]
     num_pos_traj = min(len(pos_idx), num_pos_traj)
@@ -179,7 +179,7 @@ def get_cost_pos_neg_and_union_data(d4rl_data, config):
     num_true_neg_traj = int(num_neg_traj * true_percentage)
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
-    cost_fraction = 0.9
+    cost_fraction = 0.95
     min_idx = int(cost_fraction * num_trajs)
     high_cost_neg_idx = sorted_traj_idx[min_idx:]
     num_true_neg_traj = min(len(high_cost_neg_idx), num_true_neg_traj)
@@ -227,11 +227,11 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
 
     ### sorted(top_reward_idx, key=lambda x: traj_cost[x])
     top_reward_sorted_cost_idx = top_reward_idx[np.argsort(traj_cost[top_reward_idx])]
-    cost_fraction = 0.1
+    cost_fraction = 0.05
     max_idx = int(cost_fraction * top_reward_sorted_cost_idx.shape[0])
     pos_idx = top_reward_sorted_cost_idx[:max_idx]
     num_pos_traj = min(len(pos_idx), num_pos_traj)
-    pos_shuffled_idx = np.random.choice(pos_idx, size=num_pos_traj, replace=False)
+    pos_shuffled_idx = pos_idx[:num_pos_traj]
 
     # non-preferred dataset
     true_percentage = 1.0 - config["non_pref_noise"]
@@ -239,12 +239,12 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
     ### high cost non-preferred dataset
-    cost_fraction = 0.9
+    cost_fraction = 0.95
     min_idx = int(cost_fraction * num_trajs)
     high_cost_neg_idx = sorted_cost_idx[min_idx:]
 
     ### low reward non-preferred dataset
-    reward_fraction = 0.1
+    reward_fraction = 0.05
     max_idx = int(reward_fraction * num_trajs)
     low_reward_neg_idx = sorted_reward_idx[:max_idx]
 
