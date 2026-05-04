@@ -221,17 +221,17 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     num_union_traj = config["num_union_trajectories"]
 
     # preferred dataset
-    reward_fraction = 0.5
-    min_idx = int(reward_fraction * sorted_reward_idx.shape[0])
-    top_reward_idx = sorted_reward_idx[min_idx:]
-
-    ### sorted(top_reward_idx, key=lambda x: traj_cost[x])
-    top_reward_sorted_cost_idx = top_reward_idx[np.argsort(traj_cost[top_reward_idx])]
     cost_fraction = 0.05
-    max_idx = int(cost_fraction * top_reward_sorted_cost_idx.shape[0])
-    pos_idx = top_reward_sorted_cost_idx[:max_idx]
+    max_idx = int(cost_fraction * sorted_cost_idx.shape[0])
+    low_cost_idx = sorted_cost_idx[:max_idx]
+
+    ### sorted(low_cost_idx, key=lambda x: traj_reward[x])
+    low_cost_sorted_reward_idx = low_cost_idx[np.argsort(traj_reward[low_cost_idx])]
+    reward_fraction = 0.95
+    min_idx = int(reward_fraction * low_cost_sorted_reward_idx.shape[0])
+    pos_idx = low_cost_sorted_reward_idx[min_idx:]
     num_pos_traj = min(len(pos_idx), num_pos_traj)
-    pos_shuffled_idx = pos_idx[:num_pos_traj]
+    pos_shuffled_idx = pos_idx[-num_pos_traj:]
 
     # non-preferred dataset
     true_percentage = 1.0 - config["non_pref_noise"]
@@ -242,18 +242,24 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     cost_fraction = 0.95
     min_idx = int(cost_fraction * num_trajs)
     high_cost_neg_idx = sorted_cost_idx[min_idx:]
+    num_high_cost_neg_traj = min(num_true_neg_traj // 2, high_cost_neg_idx.shape[0])
+    high_cost_neg_idx = high_cost_neg_idx[-num_high_cost_neg_traj:]
 
     ### low reward non-preferred dataset
     reward_fraction = 0.05
     max_idx = int(reward_fraction * num_trajs)
     low_reward_neg_idx = sorted_reward_idx[:max_idx]
-
-    neg_idx = np.union1d(high_cost_neg_idx, low_reward_neg_idx)
-    np.random.shuffle(neg_idx)
-    num_true_neg_traj = min(len(neg_idx), num_true_neg_traj)
-    true_neg_shuffled_idx = np.random.choice(
-        neg_idx, size=num_true_neg_traj, replace=False
+    num_low_reward_neg_traj = min(
+        num_true_neg_traj - num_high_cost_neg_traj, low_reward_neg_idx.shape[0]
     )
+    low_reward_neg_idx = low_reward_neg_idx[:num_low_reward_neg_traj]
+
+    true_neg_shuffled_idx = np.union1d(high_cost_neg_idx, low_reward_neg_idx)
+    # np.random.shuffle(neg_idx)
+    # num_true_neg_traj = min(len(neg_idx), num_true_neg_traj)
+    # true_neg_shuffled_idx = np.random.choice(
+    #     neg_idx, size=num_true_neg_traj, replace=False
+    # )
 
     del_idx = np.concatenate([pos_shuffled_idx, true_neg_shuffled_idx])
     union_idx = np.delete(np.arange(num_trajs), del_idx)
@@ -270,8 +276,12 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     num_union_traj = min(len(union_idx), num_union_traj)
     union_shuffled_idx = np.random.choice(union_idx, size=num_union_traj, replace=False)
 
-    print(f"Number of true negative trajectory dataset: {num_true_neg_traj}")
-    print(f"Number of false negative trajectory dataset: {num_false_neg_traj}")
+    print(
+        f"Number of true negative trajectory dataset: {true_neg_shuffled_idx.shape[0]}"
+    )
+    print(
+        f"Number of false negative trajectory dataset: {false_neg_shuffled_idx.shape[0]}"
+    )
 
     return pos_shuffled_idx, neg_shuffled_idx, union_shuffled_idx
 
