@@ -335,7 +335,10 @@ def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, co
 
     # union_weight = jnp.where(sink_mask, weight, weight * union_score)
     # union_weight = jnp.maximum(data.union_weight, union_weight)
-    union_weight = jnp.maximum(data.union_weight, weight * sink_mask)
+
+    # only add weights to those identified and reset those trajectories
+    # which have not been identified to zero.
+    union_weight = sink_mask * jnp.maximum(data.union_weight, weight)
 
     union_aux = UnionSinkAux(
         mean_score=union_score.mean(),
