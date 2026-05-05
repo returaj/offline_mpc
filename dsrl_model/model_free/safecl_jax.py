@@ -286,7 +286,9 @@ def get_sink_source_mean_values(value_arr, trainable_mask):
     return mean_trainable_value, mean_non_trainable_value
 
 
-def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, config):
+def get_union_sink(
+    curriculum_embedding_model, embedding_model, data, weight, do_warmup, config
+):
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
@@ -302,7 +304,7 @@ def get_union_sink(curriculum_embedding_model, embedding_model, data, weight, co
     # Batch X embd_dim
     union_z = embedding_model(target_union, training=False)
     # Batch
-    union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
+    union_score = do_warmup * jnp.einsum("ij,ij->i", union_z, target_union_z)
 
     sink_mask = (union_score > config.value_limit).astype(dtype)
     sink_count = sink_mask.sum()
@@ -451,7 +453,15 @@ def embedding_grad_aux_fun(
 
 
 def value_grad_aux_fun(
-    value_model, union_mask, union_score, data, config, pos_scale, neg_scale, key
+    value_model,
+    union_mask,
+    union_score,
+    data,
+    config,
+    pos_scale,
+    neg_scale,
+    union_scale,
+    key,
 ):
     # Value model learns the preferred state-action pair score
     pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
@@ -505,7 +515,7 @@ def value_grad_aux_fun(
             value_model, full_mask, random_score, target_random, 1.0
         )
         union_loss, union_value = xql_rescale_loss(
-            value_model, union_mask, union_score, target_union, 1.0
+            value_model, union_mask, union_score, target_union, union_scale
         )
         loss = pos_loss + config.pos_neg_ratio * neg_loss + union_loss
         return loss, ValueAux(
@@ -582,6 +592,7 @@ def train_step(
         embedding_model=state.models.embedding_target,
         data=batch_data,
         weight=weight,
+        do_warmup=1.0 * do_warmup,
         config=config,
     )
 
@@ -606,6 +617,7 @@ def train_step(
         config=config,
         pos_scale=1.0 * has_positive,
         neg_scale=1.0 * has_negative,
+        union_scale=1.0 * do_warmup,
         key=key2,
     )
     state.optimizers.value.update(value_grads)
@@ -707,6 +719,8 @@ def train_n_steps(
         update_weight = do_warmup * is_embd_update
         weight = jnp.where(update_weight, 1.0 - sink_percent_ema, weight)
 
+        # do_warmup: False: union_weight = 0
+        # do_warmup: True: update union_weight 
         data_buffer = data_buffer.update_union_weight(
             data_buffer, union_idxs[i], union_weight
         )
