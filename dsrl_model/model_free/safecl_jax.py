@@ -1125,9 +1125,17 @@ def main(args, cfg_env=None):
     # plot cost, reward weight
     costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer)
     # Custom colormap: red -> green
-    cmap = mcolors.LinearSegmentedColormap.from_list("red_to_green", ["red", "green"])
+    limit = max(abs(min(weights)), abs(max(weights)))
+    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
     fig, ax = plt.subplots()
-    sc = ax.scatter(costs, rewards, c=weights, cmap=cmap, vmin=0, vmax=1)
+    sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
+
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Preference")
+
+    ax.set_xlabel("Traj. Cost")
+    ax.set_ylabel("Traj. Reward")
+    ax.set_title(f"Preference Plot ({env_name})")
     fig.savefig(
         f"{args.log_dir}/weight_dataset_{args.seed}.png", dpi=300, bbox_inches="tight"
     )
