@@ -345,8 +345,8 @@ class TransformerEmbedding(nnx.Module):
         for transformer in self.transformer_blocks:
             x = transformer(x, self.mask, training)
 
-        x = x[:, -1, :]
         if normalize_z:
             x = l2_normalize(x, axis=-1)
 
+        # batch X horizon X embd_dim
         return x

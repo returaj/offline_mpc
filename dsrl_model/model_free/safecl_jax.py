@@ -292,19 +292,24 @@ def get_union_sink(
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
+    mid_traj = horizon // 2
+    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
+
     # Batch X Horizon X obs_act_dim
     target_union = jnp.concat([data.union_obs, data.union_act], axis=-1)
 
-    # Batch X embd_dim
+    # Batch X Horizon X embd_dim
     target_union_z = curriculum_embedding_model(target_union, training=False)
 
     # # multimodel estimation of the union score
     # union_score = get_multimodel_score(target_union, target_union_z, embedding_model)
 
-    # Batch X embd_dim
+    # Batch X Horizon X embd_dim
     union_z = embedding_model(target_union, training=False)
+    # Batch X Horizon
+    traj_union_score = do_warmup * jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
     # Batch
-    union_score = do_warmup * jnp.einsum("ij,ij->i", union_z, target_union_z)
+    union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
 
     sink_mask = (union_score > config.value_limit).astype(dtype)
     sink_count = sink_mask.sum()
@@ -369,7 +374,10 @@ def embedding_grad_aux_fun(
     key,
 ):
     dtype = data.union_obs.dtype
-    batch = data.union_obs.shape[0]
+    batch, horizon, _ = data.union_obs.shape
+
+    mid_traj = horizon // 2
+    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
 
     # shape: Batch X Horizon X obs_act_dim
     target_pos = jnp.concat([data.pos_obs, data.pos_act], axis=-1)
@@ -392,27 +400,31 @@ def embedding_grad_aux_fun(
     target_union_score = jnp.ones(shape=(batch,), dtype=dtype)
     target_random_score = jnp.zeros(shape=(batch,), dtype=dtype)
 
-    # Batch X embd_dim
+    # Batch X Horizon X embd_dim
     target_pos_z = curriculum_embedding_model(target_pos, training=False)
     target_neg_z = curriculum_embedding_model(target_neg, training=False)
     target_union_z = curriculum_embedding_model(target_union, training=False)
     target_random_z = curriculum_embedding_model(target_random, training=False)
 
     def loss_fun(embedding_model):
+        # Batch X Horizon X embd_dim
         pos_z = embedding_model(target_pos)
+        # Batch X Horizon
+        traj_pos_score = jnp.einsum("ijk,ijk->ij", pos_z, target_pos_z)
         # Batch
-        pos_score = jnp.einsum("ij,ij->i", pos_z, target_pos_z)
+        pos_score = jnp.einsum("ij,j->i", traj_pos_score, select_mid_traj)
         pos_mean_loss = jnp.mean(range_loss(pos_score, target_pos_score, pos_scale))
         pos_mean_score = pos_scale * jnp.mean(pos_score)
 
         neg_z = embedding_model(target_neg)
-        # Batch
-        neg_score = jnp.einsum("ij,ij->i", neg_z, target_neg_z)
+        traj_neg_score = jnp.einsum("ijk,ijk->ij", neg_z, target_neg_z)
+        neg_score = jnp.einsum("ij,j->i", traj_neg_score, select_mid_traj)
         neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
         neg_mean_score = neg_scale * jnp.mean(neg_score)
 
         union_z = embedding_model(target_union)
-        union_score = jnp.einsum("ij,ij->i", union_z, target_union_z)
+        traj_union_score = jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
+        union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
         union_loss = range_loss(union_score, target_union_score, union_scale)
         union_sink_count = jnp.clip(union_sink_mask.sum(), min=1.0)
         union_mean_loss = (
@@ -423,7 +435,8 @@ def embedding_grad_aux_fun(
         )
 
         random_z = embedding_model(target_random)
-        random_score = jnp.einsum("ij,ij->i", random_z, target_random_z)
+        traj_random_score = jnp.einsum("ijk,ijk->ij", random_z, target_random_z)
+        random_score = jnp.einsum("ij,j->i", traj_random_score, select_mid_traj)
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
@@ -720,7 +733,7 @@ def train_n_steps(
         weight = jnp.where(update_weight, 1.0 - sink_percent_ema, weight)
 
         # do_warmup: False: union_weight = 0
-        # do_warmup: True: update union_weight 
+        # do_warmup: True: update union_weight
         data_buffer = data_buffer.update_union_weight(
             data_buffer, union_idxs[i], union_weight
         )
