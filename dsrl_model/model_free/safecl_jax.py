@@ -735,7 +735,7 @@ def train_n_steps(
 
         update_weight = do_warmup * embedding_cond
         embd_freq = jnp.maximum(
-            config.embd_freq, 100 * sink_percent_ema * config.embd_freq
+            config.embd_freq, (100 * sink_percent_ema * config.embd_freq) // 1
         )
 
         train_aux = train_aux.replace(
