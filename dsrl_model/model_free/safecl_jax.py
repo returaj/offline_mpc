@@ -47,7 +47,7 @@ default_cfg = {
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
-    "stale_embd_freq": int(5e2),
+    "embd_freq": int(5e2),
     "warmup_steps": int(3e4),
     "decay": 0.999,
     "value_temp": 0.1,
@@ -97,6 +97,14 @@ class TrainingState(nnx.Module):
     def __init__(self, models, optimizers):
         self.models = models
         self.optimizers = optimizers
+
+
+@struct.dataclass
+class TrainAux:
+    weight: float = 0.0
+    num_embd_updates: float = 0.0
+    embd_freq: float = 0.0
+    num_itr: float = 0.0
 
 
 @struct.dataclass
@@ -596,7 +604,7 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
 
 
 def train_step(
-    state, batch_data, config, has_positive, has_negative, do_warmup, weight, key, step
+    state, batch_data, config, train_aux, has_positive, has_negative, do_warmup, key
 ):
     key1, key2 = jax.random.split(key, num=2)
 
@@ -604,7 +612,7 @@ def train_step(
         curriculum_embedding_model=state.models.curriculum_embedding,
         embedding_model=state.models.embedding_target,
         data=batch_data,
-        weight=weight,
+        weight=train_aux.weight,
         do_warmup=1.0 * do_warmup,
         config=config,
     )
@@ -645,13 +653,6 @@ def train_step(
     )
     state.optimizers.policy.update(policy_grads)
 
-    embedding_cond = step % config.stale_embd_freq == 0
-    polyak_update(
-        state.models.embedding_target,
-        state.models.embedding,
-        embedding_cond * config.update_tau,
-    )
-
     data_aux = DataAux(
         pos_reward=has_positive * batch_data.pos_reward.sum(-1).mean(),
         pos_cost=has_positive * batch_data.pos_cost.sum(-1).mean(),
@@ -662,7 +663,6 @@ def train_step(
     )
 
     return (
-        1.0 * embedding_cond,
         union_weight,
         union_sink_aux,
         embedding_aux,
@@ -676,12 +676,13 @@ def train_step(
 def train_n_steps(
     state,
     data_buffer,
+    train_aux,
     config,
     has_positive,
     has_negative,
     do_warmup,
-    weight,
     key,
+    steps,
 ):
     num_steps = config.log_freq
 
@@ -696,8 +697,7 @@ def train_n_steps(
             key,
             state,
             data_buffer,
-            num_embd_updates,
-            weight,
+            train_aux,
             val_aux,
         ) = carry
 
@@ -709,19 +709,23 @@ def train_n_steps(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        is_embd_update, union_weight, *val_aux = train_step(
+        union_weight, sink_aux, *other_aux = train_step(
             state=state,
             batch_data=batch_data,
             config=config,
+            train_aux=train_aux,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
-            weight=weight,
             key=subkey,
-            step=i + 1,
         )
 
-        sink_aux, *other_aux = val_aux
+        embedding_cond = 1.0 * ((steps + i + 1) % train_aux.embd_freq == 0)
+        polyak_update(
+            state.models.embedding_target,
+            state.models.embedding,
+            embedding_cond * config.update_tau,
+        )
 
         sink_percent_ema = (
             config.decay * prev_sink_aux.sink_percent_ema
@@ -729,8 +733,16 @@ def train_n_steps(
         )
         sink_aux = sink_aux.replace(sink_percent_ema=sink_percent_ema)
 
-        update_weight = do_warmup * is_embd_update
-        weight = jnp.where(update_weight, 1.0 - sink_percent_ema, weight)
+        update_weight = do_warmup * embedding_cond
+        embd_freq = jnp.maximum(
+            config.embd_freq, 100 * sink_percent_ema * config.embd_freq
+        )
+
+        train_aux = train_aux.replace(
+            embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
+            num_embd_updates=train_aux.num_embd_updates + embedding_cond,
+            weight=jnp.where(update_weight, 1.0 - sink_percent_ema, train_aux.weight),
+        )
 
         # do_warmup: False: union_weight = 0
         # do_warmup: True: update union_weight
@@ -742,8 +754,7 @@ def train_n_steps(
             key,
             state,
             data_buffer,
-            num_embd_updates + is_embd_update,
-            weight,
+            train_aux,
             (sink_aux, *other_aux),
         )
 
@@ -751,15 +762,15 @@ def train_n_steps(
         key2,
         state,
         data_buffer,
-        0.0,  # number of embd update initially is 0
-        weight,
+        train_aux,
         (UnionSinkAux(), EmbeddingAux(), ValueAux(), PolicyAux(), DataAux()),
     )
-    _, _, data_buffer, num_embd_updates, weight, val_aux = nnx.fori_loop(
+    _, _, data_buffer, train_aux, val_aux = nnx.fori_loop(
         0, num_steps, body_fun, init_carry
     )
 
-    return data_buffer, num_embd_updates, num_steps, weight, *val_aux
+    train_aux = train_aux.replace(num_itr=num_steps)
+    return data_buffer, train_aux, *val_aux
 
 
 def main(args, cfg_env=None):
@@ -797,7 +808,7 @@ def main(args, cfg_env=None):
     config["normalize_observation"] = args.normalize_observation
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
-    config["stale_embd_freq"] = args.embd_freq or config["stale_embd_freq"]
+    config["embd_freq"] = args.embd_freq or config["embd_freq"]
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
     config["lr"] = args.lr
@@ -989,17 +1000,20 @@ def main(args, cfg_env=None):
     logger.save_config(dict_args)
     logger.log("Start embedding, cost and bc_policy model training.")
 
-    weight = jnp.array(1.0)
+    train_aux = TrainAux(
+        weight=1.0,
+        num_embd_updates=0,
+        embd_freq=config_data.embd_freq,
+        num_itr=0,
+    )
     steps = 0
     while steps < config["total_iteration"]:
         do_warmup = steps >= config_data.warmup_steps
 
         (
             data_buffer,
-            num_embd_updates,
-            num_itr,
-            weight,
             train_aux,
+            sink_aux,
             embd_aux,
             value_aux,
             policy_aux,
@@ -1007,15 +1021,16 @@ def main(args, cfg_env=None):
         ) = train_n_steps(
             state=state,
             data_buffer=data_buffer,
+            train_aux=train_aux,
             config=config_data,
             has_positive=has_positive,
             has_negative=has_negative,
             do_warmup=do_warmup,
-            weight=weight,
             key=rngs.random_sample(),
+            steps=steps,
         )
 
-        steps += num_itr
+        steps += train_aux.num_itr
 
         logger.logged = False
 
@@ -1037,10 +1052,13 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_policy_v", policy_aux.v.item())
         logger.log_tabular("Loss/Loss_policy_weight", policy_aux.weight.item())
 
-        logger.log_tabular("Num/target_embedding_updates", num_embd_updates.item())
+        logger.log_tabular(
+            "Num/target_embedding_updates", train_aux.num_embd_updates.item()
+        )
+        logger.log_tabular("Num/target_embedding_stale", train_aux.embd_freq.item())
 
-        logger.log_tabular("Mean/union_score", train_aux.mean_score.item())
-        logger.log_tabular("Mean/union_std", train_aux.std_score.item())
+        logger.log_tabular("Mean/union_score", sink_aux.mean_score.item())
+        logger.log_tabular("Mean/union_std", sink_aux.std_score.item())
         logger.log_tabular("Mean/embd_pos_score", embd_aux.pos_score.item())
         logger.log_tabular("Mean/embd_neg_score", embd_aux.neg_score.item())
         logger.log_tabular("Mean/embd_union_score", embd_aux.union_score.item())
@@ -1049,27 +1067,27 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
         logger.log_tabular("Mean/random_value", value_aux.random_value.item())
         logger.log_tabular("Mean/union_value", value_aux.union_value.item())
-        logger.log_tabular("Mean/decay_weight", weight.item())
+        logger.log_tabular("Mean/decay_weight", train_aux.weight.item())
 
-        logger.log_tabular("NonPrefScore/union_sink", train_aux.sink_nonpref.item())
-        logger.log_tabular("NonPrefScore/union_source", train_aux.source_nonpref.item())
+        logger.log_tabular("NonPrefScore/union_sink", sink_aux.sink_nonpref.item())
+        logger.log_tabular("NonPrefScore/union_source", sink_aux.source_nonpref.item())
 
-        logger.log_tabular("Percentage/union_sink", train_aux.sink_percent.item())
+        logger.log_tabular("Percentage/union_sink", sink_aux.sink_percent.item())
         logger.log_tabular(
-            "Percentage/union_sink_ema", train_aux.sink_percent_ema.item()
+            "Percentage/union_sink_ema", sink_aux.sink_percent_ema.item()
         )
 
         logger.log_tabular("Reward/pos", data_aux.pos_reward.item())
         logger.log_tabular("Reward/neg", data_aux.neg_reward.item())
         logger.log_tabular("Reward/union", data_aux.union_reward)
-        logger.log_tabular("Reward/union_sink", train_aux.sink_reward.item())
-        logger.log_tabular("Reward/union_source", train_aux.source_reward.item())
+        logger.log_tabular("Reward/union_sink", sink_aux.sink_reward.item())
+        logger.log_tabular("Reward/union_source", sink_aux.source_reward.item())
 
         logger.log_tabular("Cost/pos", data_aux.pos_cost.item())
         logger.log_tabular("Cost/neg", data_aux.neg_cost.item())
         logger.log_tabular("Cost/union", data_aux.union_cost.item())
-        logger.log_tabular("Cost/union_sink", train_aux.sink_cost.item())
-        logger.log_tabular("Cost/union_source", train_aux.source_cost.item())
+        logger.log_tabular("Cost/union_sink", sink_aux.sink_cost.item())
+        logger.log_tabular("Cost/union_source", sink_aux.source_cost.item())
 
         logger.log_tabular(
             "Norm/embedding_model",
