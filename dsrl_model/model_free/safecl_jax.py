@@ -329,6 +329,7 @@ def get_union_sink(
 
     pos_sink_mask = (union_score > config.value_limit).astype(dtype)
     neg_sink_mask = (union_score < -config.value_limit).astype(dtype)
+    source_mask = 1.0 - pos_sink_mask - neg_sink_mask
 
     pos_sink_percent = pos_sink_mask.sum() / batch
     neg_sink_percent = neg_sink_mask.sum() / batch
@@ -376,7 +377,9 @@ def get_union_sink(
     # which have not been identified to zero.
     pos_union_weight = pos_sink_mask * jnp.maximum(data.union_weight, weight)
     neg_union_weight = neg_sink_mask * jnp.minimum(data.union_weight, -weight)
-    union_weight = pos_union_weight + neg_union_weight
+    # use union score for outside mask
+    source_weight = source_mask * weight * union_score
+    union_weight = pos_union_weight + neg_union_weight + source_weight
 
     union_aux = UnionSinkAux(
         mean_score=union_score.mean(),
@@ -659,7 +662,8 @@ def train_step(
     )
     state.optimizers.embedding.update(embedding_grads)
 
-    union_mask = 1.0 * (union_score != 0)
+    # Allow full union dataset to learn value
+    union_mask = jnp.ones_like(union_weight)
     value_grads, value_aux = value_grad_aux_fun(
         value_model=state.models.value,
         union_mask=union_mask,
@@ -677,7 +681,7 @@ def train_step(
         policy_model=state.models.policy,
         value_model=state.models.value,
         data=batch_data,
-        union_mask=1.0 * (union_score > 0),
+        union_mask=union_mask,  # full union dataset to learn policy
         do_warmup=1.0 * do_warmup,
         config=config,
     )
