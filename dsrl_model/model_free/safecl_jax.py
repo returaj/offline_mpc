@@ -125,6 +125,8 @@ class UnionSinkAux:
     neg_sink_percent: float = 0.0
     sink_percent: float = 0.0
     sink_percent_ema: float = 0.0
+    sink_bimodality: float = 0.0
+    sink_bimodality_ema: float = 0.0
     pos_sink_reward: float = 0.0
     neg_sink_reward: float = 0.0
     source_reward: float = 0.0
@@ -256,6 +258,11 @@ def get_cost_reward_weight_matrix(data_buffer):
     return cost, reward, weight
 
 
+@jax.jit
+def ema(target, curr, decay):
+    return decay * target + (1 - decay) * curr
+
+
 @nnx.jit
 def polyak_update(target_model, curr_model, tau):
     target_param = nnx.state(target_model, nnx.Param)
@@ -334,6 +341,7 @@ def get_union_sink(
     pos_sink_percent = pos_sink_mask.sum() / batch
     neg_sink_percent = neg_sink_mask.sum() / batch
     sink_percent = pos_sink_percent + neg_sink_percent
+    sink_bimodality = jnp.mean(jnp.abs(union_score) ** 2)
 
     sink_score = pos_sink_mask - neg_sink_mask
 
@@ -387,6 +395,7 @@ def get_union_sink(
         pos_sink_percent=pos_sink_percent,
         neg_sink_percent=neg_sink_percent,
         sink_percent=sink_percent,
+        sink_bimodality=sink_bimodality,
         pos_sink_reward=mean_pos_sink_reward,
         neg_sink_reward=mean_neg_sink_reward,
         source_reward=mean_source_reward,
@@ -761,21 +770,27 @@ def train_n_steps(
             embedding_cond * config.update_tau,
         )
 
-        sink_percent_ema = (
-            config.decay * prev_sink_aux.sink_percent_ema
-            + (1 - config.decay) * sink_aux.sink_percent
+        sink_percent_ema = ema(
+            prev_sink_aux.sink_percent_ema, sink_aux.sink_percent, config.decay
         )
-        sink_aux = sink_aux.replace(sink_percent_ema=sink_percent_ema)
+        sink_bimodality_ema = ema(
+            prev_sink_aux.sink_bimodality_ema, sink_aux.sink_bimodality, config.decay
+        )
+        sink_aux = sink_aux.replace(
+            sink_percent_ema=sink_percent_ema, sink_bimodality_ema=sink_bimodality_ema
+        )
 
         update_weight = do_warmup * embedding_cond
         embd_freq = jnp.maximum(
-            config.embd_freq, (100 * sink_percent_ema * config.embd_freq) // 1
+            250, (100 * sink_bimodality_ema * config.embd_freq) // 1
         )
 
         train_aux = train_aux.replace(
             embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
             num_embd_updates=train_aux.num_embd_updates + embedding_cond,
-            weight=jnp.where(update_weight, 1.0 - sink_percent_ema, train_aux.weight),
+            weight=jnp.where(
+                update_weight, 1.0 - sink_bimodality_ema, train_aux.weight
+            ),
         )
 
         # do_warmup: False: union_weight = 0
@@ -1093,6 +1108,10 @@ def main(args, cfg_env=None):
 
         logger.log_tabular("Mean/union_score", sink_aux.mean_score.item())
         logger.log_tabular("Mean/union_std", sink_aux.std_score.item())
+        logger.log_tabular("Mean/union_bimodality", sink_aux.sink_bimodality.item())
+        logger.log_tabular(
+            "Mean/union_bimodality_ema", sink_aux.sink_bimodality_ema.item()
+        )
         logger.log_tabular("Mean/embd_pos_score", embd_aux.pos_score.item())
         logger.log_tabular("Mean/embd_neg_score", embd_aux.neg_score.item())
         logger.log_tabular("Mean/embd_union_score", embd_aux.union_score.item())
