@@ -11,6 +11,8 @@ import dsrl.offline_safety_gymnasium  # type: ignore
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import optax
 from flax import nnx, struct
@@ -31,9 +33,6 @@ from dsrl_model.utils.models_jax import (
 )
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
-
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 EPS = 1e-6
 
@@ -353,7 +352,7 @@ def get_union_sink(
         get_sink_source_mean_values(data.union_cost, pos_sink_mask, neg_sink_mask)
     )
 
-    mean_pos_sink_nonpref = (sink_percent > 0.0) * get_nonpref_mean_value(
+    mean_pos_sink_nonpref = (pos_sink_percent > 0.0) * get_nonpref_mean_value(
         mean_pos_sink_reward,
         mean_pos_sink_cost,
         horizon,
@@ -361,7 +360,7 @@ def get_union_sink(
         rscale=config.nonpref_reward_scale,
         cscale=config.nonpref_cost_scale,
     )
-    mean_neg_sink_nonpref = (sink_percent > 0.0) * get_nonpref_mean_value(
+    mean_neg_sink_nonpref = (neg_sink_percent > 0.0) * get_nonpref_mean_value(
         mean_neg_sink_reward,
         mean_neg_sink_cost,
         horizon,
