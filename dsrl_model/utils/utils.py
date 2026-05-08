@@ -348,6 +348,12 @@ def single_agent_args():
             "default": None,
             "help": "update the target embedding network frequency.",
         },
+        {
+            "name": "--policy-loss-type",
+            "type": str,
+            "default": "forward_kl",
+            "help": "policy loss type can be either forward_kl or inverse_kl",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

@@ -34,6 +34,8 @@ from dsrl_model.utils.models_jax import (
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
+# jax.config.update("jax_disable_jit", True)
+
 EPS = 1e-6
 
 default_cfg = {
@@ -169,6 +171,7 @@ class PolicyAux:
     q: float = 0.0
     v: float = 0.0
     weight: float = 0.0
+    entropy: float = 0.0
 
 
 def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
@@ -611,8 +614,7 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
     union_mask = union_mask.repeat(horizon)
 
     def loss_fun(policy_model):
-        pred_union_act, *_ = policy_model(target_union_obs)
-        union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        pred_union_act, log_pi, *_ = policy_model(target_union_obs)
 
         q = do_warmup * jnp.minimum(
             *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
@@ -621,20 +623,27 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
             *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
         )
 
-        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
-
         union_count = jnp.clip(union_mask.sum(), min=1.0)
-        loss = (union_mask * weight * union_loss).sum() / union_count
+
+        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
+        if config.policy_loss_type == "forward_kl":
+            union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+            loss = (union_mask * weight * union_loss).sum() / union_count
+        else:
+            union_loss = -q + 0.001 * log_pi
+            loss = (union_mask * union_loss).sum() / union_count
 
         qmean = (union_mask * q).sum() / union_count
         vmean = (union_mask * v).sum() / union_count
         weightmean = (union_mask * weight).sum() / union_count
+        entropymean = -(union_mask * log_pi).sum() / union_count
 
         return loss, PolicyAux(
             loss=loss,
             q=qmean,
             v=vmean,
             weight=weightmean,
+            entropy=entropymean,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -852,7 +861,7 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["policy_type"] = args.policy_type
+    config["policy_loss_type"] = args.policy_loss_type
     config["normalize_observation"] = args.normalize_observation
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
@@ -1099,6 +1108,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/Loss_policy_q", policy_aux.q.item())
         logger.log_tabular("Loss/Loss_policy_v", policy_aux.v.item())
         logger.log_tabular("Loss/Loss_policy_weight", policy_aux.weight.item())
+        logger.log_tabular("Loss/Loss_policy_entropy", policy_aux.entropy.item())
 
         logger.log_tabular(
             "Num/target_embedding_updates", train_aux.num_embd_updates.item()
