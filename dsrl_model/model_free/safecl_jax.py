@@ -630,7 +630,7 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
             union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
             loss = (union_mask * weight * union_loss).sum() / union_count
         else:
-            union_loss = -q + 0.001 * log_pi
+            union_loss = -v + 0.001 * log_pi
             loss = (union_mask * union_loss).sum() / union_count
 
         qmean = (union_mask * q).sum() / union_count
