@@ -922,6 +922,8 @@ def main(args, cfg_env=None):
         horizon=config["train_horizon"],
         embd_dim=embd_size,
         num_attentions=2,
+        do_layer_norm=True,
+        do_residual=True,
     )
     embedding_optimizer = nnx.Optimizer(
         model=embedding_model,
@@ -940,6 +942,8 @@ def main(args, cfg_env=None):
         horizon=config["train_horizon"],
         embd_dim=embd_size,
         num_attentions=3,
+        do_layer_norm=False,
+        do_residual=False,
     )
 
     value_model = EnsembleValue(

@@ -287,7 +287,16 @@ class TransformerBlock(nnx.Module):
     Code: https://docs.jaxstack.ai/en/latest/JAX_for_LLM_pretraining.html
     """
 
-    def __init__(self, rngs, d_model, liner_features, num_heads, rate=0.3):
+    def __init__(
+        self,
+        rngs,
+        d_model,
+        liner_features,
+        num_heads,
+        do_layer_norm=True,
+        do_residual=True,
+        rate=0.3,
+    ):
         self.attn = nnx.MultiHeadAttention(num_heads, d_model, decode=False, rngs=rngs)
         self.dp1 = nnx.Dropout(rate=rate, rngs=rngs)
         self.ln1 = nnx.LayerNorm(d_model, rngs=rngs)
@@ -298,16 +307,33 @@ class TransformerBlock(nnx.Module):
         )
         self.dp2 = nnx.Dropout(rate=rate, rngs=rngs)
         self.ln2 = nnx.LayerNorm(d_model, rngs=rngs)
+        self.do_layer_norm = do_layer_norm
+        self.do_residual = do_residual
+
+    def maybe_layer_norm(self, ln, x):
+        if self.do_layer_norm:
+            x = ln(x)
+        return x
+
+    def maybe_residual(self, prev_x, x):
+        if self.do_residual:
+            x = prev_x + x
+        return x
 
     def __call__(self, x, mask=None, training=False):
         # x shape: batch x horizon x d_model
-        attn_x = self.dp1(self.attn(self.ln1(x), mask=mask), deterministic=not training)
-        # residual connection
-        x = x + attn_x
 
-        ff_x = self.dp2(self.ff(self.ln2(x)), deterministic=not training)
-        # residual connection
-        x = x + ff_x
+        # layer norm: ln1(x)
+        ln_x = self.maybe_layer_norm(self.ln1, x)
+        attn_x = self.dp1(self.attn(ln_x, mask=mask), deterministic=not training)
+        # residual connection: x + attn_x
+        x = self.maybe_residual(x, attn_x)
+
+        # layer norm: ln2(x)
+        ln_x = self.maybe_layer_norm(self.ln2, x)
+        ff_x = self.dp2(self.ff(ln_x), deterministic=not training)
+        # residual connection: x + ff_x
+        x = self.maybe_residual(x, ff_x)
         return x
 
 
@@ -321,6 +347,8 @@ class TransformerEmbedding(nnx.Module):
         embd_dim=128,
         num_heads=4,
         num_attentions=1,
+        do_layer_norm=True,
+        do_residual=True,
     ):
         self.encoder = nnx.Linear(obs_dim + act_dim, embd_dim, rngs=rngs)
         self.pos_encoding = positionalencoding1d(embd_dim, horizon)
@@ -333,6 +361,8 @@ class TransformerEmbedding(nnx.Module):
                     d_model=embd_dim,
                     liner_features=linear_features,
                     num_heads=num_heads,
+                    do_layer_norm=do_layer_norm,
+                    do_residual=do_residual,
                 )
                 for _ in range(num_attentions)
             ]
