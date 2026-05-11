@@ -238,21 +238,27 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     num_true_neg_traj = int(num_neg_traj * true_percentage)
     num_false_neg_traj = num_neg_traj - num_true_neg_traj
 
+    ### low reward non-preferred dataset
+    reward_fraction = 0.01
+    max_idx = int(reward_fraction * num_trajs)
+    low_reward_neg_idx = sorted_reward_idx[:max_idx]
+    num_low_reward_neg_traj = min(num_true_neg_traj // 2, low_reward_neg_idx.shape[0])
+    # low_reward_neg_idx = low_reward_neg_idx[:num_low_reward_neg_traj]
+    low_reward_neg_idx = np.random.choice(
+        low_reward_neg_idx, size=num_low_reward_neg_traj, replace=False
+    )
+
     ### high cost non-preferred dataset
     cost_fraction = 0.9
     min_idx = int(cost_fraction * num_trajs)
     high_cost_neg_idx = sorted_cost_idx[min_idx:]
-    num_high_cost_neg_traj = min(num_true_neg_traj // 2, high_cost_neg_idx.shape[0])
-    high_cost_neg_idx = high_cost_neg_idx[-num_high_cost_neg_traj:]
-
-    ### low reward non-preferred dataset
-    reward_fraction = 0.1
-    max_idx = int(reward_fraction * num_trajs)
-    low_reward_neg_idx = sorted_reward_idx[:max_idx]
-    num_low_reward_neg_traj = min(
-        num_true_neg_traj - num_high_cost_neg_traj, low_reward_neg_idx.shape[0]
+    num_high_cost_neg_traj = min(
+        num_true_neg_traj - num_low_reward_neg_traj, high_cost_neg_idx.shape[0]
     )
-    low_reward_neg_idx = low_reward_neg_idx[:num_low_reward_neg_traj]
+    # high_cost_neg_idx = high_cost_neg_idx[-num_high_cost_neg_traj:]
+    high_cost_neg_idx = np.random.choice(
+        high_cost_neg_idx, size=num_high_cost_neg_traj, replace=False
+    )
 
     true_neg_shuffled_idx = np.union1d(high_cost_neg_idx, low_reward_neg_idx)
     # np.random.shuffle(neg_idx)
