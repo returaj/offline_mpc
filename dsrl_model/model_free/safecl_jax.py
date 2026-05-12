@@ -1,3 +1,4 @@
+import functools
 import os
 import random
 import re
@@ -235,31 +236,48 @@ def get_multimodel_score(union, target_z, embedding_model):
     return union_score
 
 
-def get_cost_reward_weight_matrix(data_buffer):
-    capacity = data_buffer.union_cost.shape[0]
-    cost, reward, weight = [], [], []
-    last = True
-    i, length = 0, 0
-    while i < capacity:
-        if data_buffer.union_priorities[i] == 0:
-            if not last:
-                weight[-1] /= length
-                length = 0
-                last = True
-        else:
-            if last:
-                cost.append(0)
-                reward.append(0)
-                weight.append(0)
-            length += 1
-            last = False
+@functools.partial(jax.jit, static_argnames=["num_trajs"])
+def get_cost_reward_weight_matrix(data_buffer, num_trajs):
+    costs = data_buffer.union_cost
+    rewards = data_buffer.union_reward
+    weights = data_buffer.union_weight
+    priorities = data_buffer.union_priorities
 
-        cost[-1] += data_buffer.union_cost[i]
-        reward[-1] += data_buffer.union_reward[i]
-        weight[-1] += data_buffer.union_weight[i]
+    nonzero = priorities != 0
+    # start is where current priority is nonzero and previous is zero
+    start = nonzero & jnp.concatenate([jnp.array([True]), ~nonzero[:-1]])
 
-        i += 1
-    return cost, reward, weight
+    segment_ids = jnp.cumsum(start) - 1
+    num_segments = num_trajs
+
+    # estimates the total cost/reward/weight of the trajectory
+    costs = jax.ops.segment_sum(costs, segment_ids, num_segments)
+    rewards = jax.ops.segment_sum(rewards, segment_ids, num_segments)
+    weights_sum = jax.ops.segment_sum(weights, segment_ids, num_segments)
+
+    # estimates the expected weight of the trajectory
+    lengths = jax.ops.segment_sum(jnp.ones_like(weights), segment_ids, num_segments)
+    weights = weights_sum / lengths
+
+    return costs, rewards, weights
+
+
+def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
+    # plot cost, reward weight
+    costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer, num_trajs)
+    # Custom colormap: purple to orange
+    limit = max(abs(min(weights)), abs(max(weights)))
+    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+    fig, ax = plt.subplots()
+    sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
+
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Preference")
+
+    ax.set_xlabel("Traj. Cost")
+    ax.set_ylabel("Traj. Reward")
+    ax.set_title(f"Preference Plot ({env_name})")
+    fig.savefig(save_plot, dpi=300, bbox_inches="tight")
 
 
 @jax.jit
@@ -1183,6 +1201,12 @@ def main(args, cfg_env=None):
         logger.dump_tabular()
 
         if steps % config["save_freq"] == 0:
+            plot_weighted_trajectory_data(
+                data_buffer=data_buffer,
+                num_trajs=args.num_union,
+                env_name=env_name,
+                save_plot=f"{args.log_dir}/weight_dataset_{steps}_{args.seed}.png",
+            )
             logger.nn_model_save(
                 itr=steps,
                 nn_model_saver_element=embedding_model,
@@ -1219,22 +1243,11 @@ def main(args, cfg_env=None):
             state_dict={"mu_obs": mu_obs, "std_obs": std_obs}, dirname="norm"
         )
 
-    # plot cost, reward weight
-    costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer)
-    # Custom colormap: red -> green
-    limit = max(abs(min(weights)), abs(max(weights)))
-    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
-    fig, ax = plt.subplots()
-    sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
-
-    cbar = fig.colorbar(sc, ax=ax)
-    cbar.set_label("Preference")
-
-    ax.set_xlabel("Traj. Cost")
-    ax.set_ylabel("Traj. Reward")
-    ax.set_title(f"Preference Plot ({env_name})")
-    fig.savefig(
-        f"{args.log_dir}/weight_dataset_{args.seed}.png", dpi=300, bbox_inches="tight"
+    plot_weighted_trajectory_data(
+        data_buffer=data_buffer,
+        num_trajs=args.num_union,
+        env_name=env_name,
+        save_plot=f"{args.log_dir}/weight_dataset_{args.seed}.png",
     )
 
     logger.close()
