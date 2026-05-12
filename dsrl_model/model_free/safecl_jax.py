@@ -49,7 +49,7 @@ default_cfg = {
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "embd_freq": int(5e2),
-    "warmup_steps": int(3e4),
+    "warmup_steps": int(5e4),
     "decay": 0.999,
     "value_temp": 0.1,
     "value_limit": 0.85,
@@ -251,11 +251,13 @@ def get_cost_reward_weight_matrix(data_buffer):
                 cost.append(0)
                 reward.append(0)
                 weight.append(0)
-            cost[-1] += data_buffer.union_cost[i]
-            reward[-1] += data_buffer.union_reward[i]
-            weight[-1] += data_buffer.union_weight[i]
             length += 1
             last = False
+
+        cost[-1] += data_buffer.union_cost[i]
+        reward[-1] += data_buffer.union_reward[i]
+        weight[-1] += data_buffer.union_weight[i]
+
         i += 1
     return cost, reward, weight
 
@@ -923,7 +925,6 @@ def main(args, cfg_env=None):
         embd_dim=embd_size,
         num_attentions=2,
         do_layer_norm=True,
-        do_residual=True,
     )
     embedding_optimizer = nnx.Optimizer(
         model=embedding_model,
@@ -943,7 +944,6 @@ def main(args, cfg_env=None):
         embd_dim=embd_size,
         num_attentions=3,
         do_layer_norm=False,
-        do_residual=False,
     )
 
     value_model = EnsembleValue(
