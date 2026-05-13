@@ -266,8 +266,8 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
     # plot cost, reward weight
     costs, rewards, weights = get_cost_reward_weight_matrix(data_buffer, num_trajs)
     # Custom colormap: purple to orange
-    limit = max(abs(min(weights)), abs(max(weights)))
-    norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+    neg_limit, pos_limit = min(min(weights), -0.01), max(max(weights), 0.01)
+    norm = mcolors.TwoSlopeNorm(vmin=neg_limit, vcenter=0, vmax=pos_limit)
     fig, ax = plt.subplots()
     sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
 
