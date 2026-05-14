@@ -238,7 +238,7 @@ class TdmpcValue(nnx.Module):
         self.model = nnx.Sequential(
             nnx.Linear(x_dim, hidden_size, rngs=rngs),
             nnx.LayerNorm(hidden_size, rngs=rngs),
-            nnx.tanh,
+            nnx.elu,
             nnx.Linear(hidden_size, hidden_size, rngs=rngs),
             nnx.elu,
             nnx.Linear(
