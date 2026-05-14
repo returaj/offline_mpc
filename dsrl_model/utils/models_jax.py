@@ -302,7 +302,7 @@ class TransformerBlock(nnx.Module):
         self.ln1 = nnx.LayerNorm(d_model, rngs=rngs)
         self.ff = nnx.Sequential(
             nnx.Linear(d_model, liner_features, rngs=rngs),
-            nnx.relu,
+            nnx.gelu,
             nnx.Linear(liner_features, d_model, rngs=rngs),
         )
         self.dp2 = nnx.Dropout(rate=rate, rngs=rngs)
@@ -351,7 +351,10 @@ class TransformerEmbedding(nnx.Module):
         do_residual=True,
     ):
         self.encoder = nnx.Linear(obs_dim + act_dim, embd_dim, rngs=rngs)
-        self.pos_encoding = positionalencoding1d(embd_dim, horizon)
+        # self.pos_encoding = positionalencoding1d(embd_dim, horizon)
+        self.pos_embedding = nnx.Embed(
+            num_embeddings=horizon, features=embd_dim, rngs=rngs
+        )
         self.mask = jnp.tril(jnp.ones((horizon, horizon)))  # causal mask
         linear_features = 4 * embd_dim
         self.transformer_blocks = tuple(
@@ -371,7 +374,8 @@ class TransformerEmbedding(nnx.Module):
     def __call__(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
         x = self.encoder(x)
-        x += self.pos_encoding
+        positions = jnp.arange(x.shape[1])[None, :]  # (1, Horizon)
+        x += self.pos_embedding(positions)
         for transformer in self.transformer_blocks:
             x = transformer(x, self.mask, training)
 

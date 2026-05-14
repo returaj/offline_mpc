@@ -513,8 +513,8 @@ def embedding_grad_aux_fun(
 
         loss = (
             pos_mean_loss
-            + config.pos_neg_ratio * neg_mean_loss
-            + union_mean_loss
+            + neg_mean_loss
+            + config.pos_neg_ratio * union_mean_loss
             + random_mean_loss
         )
 
@@ -942,7 +942,6 @@ def main(args, cfg_env=None):
         horizon=config["train_horizon"],
         embd_dim=embd_size,
         num_attentions=2,
-        do_layer_norm=True,
     )
     embedding_optimizer = nnx.Optimizer(
         model=embedding_model,
@@ -961,7 +960,7 @@ def main(args, cfg_env=None):
         horizon=config["train_horizon"],
         embd_dim=embd_size,
         num_attentions=3,
-        do_layer_norm=False,
+        do_residual=False,
     )
 
     value_model = EnsembleValue(
