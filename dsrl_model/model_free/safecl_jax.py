@@ -223,10 +223,8 @@ def get_multimodel_score(union, target_z, embedding_model):
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
     def multimodel(carry):
         x, target_z, model = carry
-        # Batch X embd_dim
-        z = model(x)
         # Batch
-        score = jnp.einsum("ij,ij->i", z, target_z)
+        score = model.get_score(x, target_z)
         return carry, score
 
     # 5 X Batch
@@ -337,24 +335,19 @@ def get_union_sink(
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
-    mid_traj = horizon // 2
-    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
-
     # Batch X Horizon X obs_act_dim
     target_union = jnp.concat([data.union_obs, data.union_act], axis=-1)
 
     # Batch X Horizon X embd_dim
-    target_union_z = curriculum_embedding_model(target_union, training=False)
+    target_union_z = curriculum_embedding_model.z(target_union, training=False)
 
     # # multimodel estimation of the union score
     # union_score = get_multimodel_score(target_union, target_union_z, embedding_model)
 
-    # Batch X Horizon X embd_dim
-    union_z = embedding_model(target_union, training=False)
-    # Batch X Horizon
-    traj_union_score = do_warmup * jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
     # Batch
-    union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
+    union_score = do_warmup * embedding_model.get_score(
+        target_union, target_union_z, training=False
+    )
 
     pos_sink_mask = (union_score > config.value_limit).astype(dtype)
     neg_sink_mask = (union_score < -config.value_limit).astype(dtype)
@@ -446,9 +439,6 @@ def embedding_grad_aux_fun(
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
-    mid_traj = horizon // 2
-    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
-
     # shape: Batch X Horizon X obs_act_dim
     target_pos = jnp.concat([data.pos_obs, data.pos_act], axis=-1)
     target_neg = jnp.concat([data.neg_obs, data.neg_act], axis=-1)
@@ -472,30 +462,22 @@ def embedding_grad_aux_fun(
     union_sink_mask = (target_union_score != 0).astype(dtype)
 
     # Batch X Horizon X embd_dim
-    target_pos_z = curriculum_embedding_model(target_pos, training=False)
-    target_neg_z = curriculum_embedding_model(target_neg, training=False)
-    target_union_z = curriculum_embedding_model(target_union, training=False)
-    target_random_z = curriculum_embedding_model(target_random, training=False)
+    target_pos_z = curriculum_embedding_model.z(target_pos, training=False)
+    target_neg_z = curriculum_embedding_model.z(target_neg, training=False)
+    target_union_z = curriculum_embedding_model.z(target_union, training=False)
+    target_random_z = curriculum_embedding_model.z(target_random, training=False)
 
     def loss_fun(embedding_model):
-        # Batch X Horizon X embd_dim
-        pos_z = embedding_model(target_pos)
-        # Batch X Horizon
-        traj_pos_score = jnp.einsum("ijk,ijk->ij", pos_z, target_pos_z)
         # Batch
-        pos_score = jnp.einsum("ij,j->i", traj_pos_score, select_mid_traj)
+        pos_score = embedding_model.get_score(target_pos, target_pos_z)
         pos_mean_loss = jnp.mean(range_loss(pos_score, target_pos_score, pos_scale))
         pos_mean_score = pos_scale * jnp.mean(pos_score)
 
-        neg_z = embedding_model(target_neg)
-        traj_neg_score = jnp.einsum("ijk,ijk->ij", neg_z, target_neg_z)
-        neg_score = jnp.einsum("ij,j->i", traj_neg_score, select_mid_traj)
+        neg_score = embedding_model.get_score(target_neg, target_neg_z)
         neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
         neg_mean_score = neg_scale * jnp.mean(neg_score)
 
-        union_z = embedding_model(target_union)
-        traj_union_score = jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
-        union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
+        union_score = embedding_model.get_score(target_union, target_union_z)
         union_loss = range_loss(union_score, target_union_score, union_scale)
         union_sink_count = jnp.clip(union_sink_mask.sum(), min=1.0)
         union_mean_loss = (
@@ -505,9 +487,7 @@ def embedding_grad_aux_fun(
             jnp.einsum("i,i->", union_sink_mask, union_score) / union_sink_count
         )
 
-        random_z = embedding_model(target_random)
-        traj_random_score = jnp.einsum("ijk,ijk->ij", random_z, target_random_z)
-        random_score = jnp.einsum("ij,j->i", traj_random_score, select_mid_traj)
+        random_score = embedding_model.get_score(target_random, target_random_z)
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
@@ -601,7 +581,7 @@ def value_grad_aux_fun(
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_weight, target_union, union_scale
         )
-        loss = pos_loss + config.pos_neg_ratio * neg_loss + union_loss
+        loss = pos_loss + neg_loss + config.pos_neg_ratio * union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,

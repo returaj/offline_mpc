@@ -370,8 +370,9 @@ class TransformerEmbedding(nnx.Module):
                 for _ in range(num_attentions)
             ]
         )
+        self.attention = nnx.Linear(embd_dim, 1, rngs=rngs)
 
-    def __call__(self, x, normalize_z=True, training=True):
+    def z(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
         x = self.encoder(x)
         positions = jnp.arange(x.shape[1])[None, :]  # (1, Horizon)
@@ -384,3 +385,15 @@ class TransformerEmbedding(nnx.Module):
 
         # batch X horizon X embd_dim
         return x
+
+    def get_score(self, x, ztarget, normalize_z=True, training=True):
+        # batch X horizon X embd_dim
+        z = self.z(x, normalize_z, training)
+        # batch X horizon
+        traj_score = jnp.einsum("ijk,ijk->ij", z, ztarget)
+        # batch X horizon
+        attn_logits = self.attention(z).squeeze(axis=-1)
+        attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+        # batch
+        score = jnp.einsum("ij,ij->i", attn_weights, traj_score)
+        return score
