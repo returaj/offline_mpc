@@ -625,7 +625,8 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
 
         union_count = jnp.clip(union_mask.sum(), min=1.0)
 
-        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((q - v) / config.value_temp, max=5.0))
+        weight = jax.lax.stop_gradient(weight)
         if config.policy_loss_type == "forward_kl":
             union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
             loss = (union_mask * weight * union_loss).sum() / union_count
