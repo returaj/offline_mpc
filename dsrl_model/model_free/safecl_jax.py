@@ -604,7 +604,9 @@ def value_grad_aux_fun(
     return grads, aux
 
 
-def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, config):
+def policy_grad_aux_fun(
+    policy_model, value_model, data, union_mask, pos_scale, union_scale, config
+):
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
@@ -621,18 +623,14 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
     target_pos_act = data.pos_act.reshape(batch * horizon, -1)
     pos_mask = jnp.ones_like(union_mask)
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, mask):
+    def fwd_kl_loss(policy_model, target_obs, target_act, mask, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
 
         # BH
-        q = do_warmup * jnp.minimum(
-            *value_model(jnp.concat([target_obs, target_act], axis=-1))
-        )
-        v = do_warmup * jnp.minimum(
-            *value_model(jnp.concat([target_obs, pred_act], axis=-1))
-        )
+        q = jnp.minimum(*value_model(jnp.concat([target_obs, target_act], axis=-1)))
+        v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
         weight = jnp.exp(jnp.clip((q - v) / config.value_temp, max=5.0))
-        weight = jax.lax.stop_gradient(weight)
+        weight = scale * jax.lax.stop_gradient(weight)
         # BH
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
         # union_loss = -v + 0.001 * log_pi  # inverse kl
@@ -653,10 +651,10 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
 
     def loss_fun(policy_model):
         union_loss, union_aux = fwd_kl_loss(
-            policy_model, target_union_obs, target_union_act, union_mask
+            policy_model, target_union_obs, target_union_act, union_mask, union_scale
         )
         pos_loss, pos_aux = fwd_kl_loss(
-            policy_model, target_pos_obs, target_pos_act, pos_mask
+            policy_model, target_pos_obs, target_pos_act, pos_mask, pos_scale
         )
         loss = union_loss + pos_loss
         return loss, PolicyAux(
@@ -717,7 +715,8 @@ def train_step(
         value_model=state.models.value,
         data=batch_data,
         union_mask=union_mask,  # full union dataset to learn policy
-        do_warmup=1.0 * do_warmup,
+        pos_scale=1.0 * has_positive,
+        union_scale=1.0 * do_warmup,
         config=config,
     )
     state.optimizers.policy.update(policy_grads)
