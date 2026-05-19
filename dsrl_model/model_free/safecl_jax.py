@@ -52,6 +52,7 @@ default_cfg = {
     "embd_freq": int(5e2),
     "warmup_steps": int(5e4),
     "decay": 0.999,
+    "pi_temp": 0.5,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
@@ -629,7 +630,7 @@ def policy_grad_aux_fun(
         # BH
         q = jnp.minimum(*value_model(jnp.concat([target_obs, target_act], axis=-1)))
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        weight = jnp.exp(jnp.clip((q - v) / config.value_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((q - v) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
         # BH
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
@@ -880,8 +881,9 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["policy_loss_type"] = args.policy_loss_type
     config["normalize_observation"] = args.normalize_observation
-    config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
+    config["value_temp"] = args.value_weight_temp or config["value_temp"]
+    config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
     config["embd_freq"] = args.embd_freq or config["embd_freq"]
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
