@@ -52,6 +52,7 @@ default_cfg = {
     "embd_freq": int(5e2),
     "warmup_steps": int(5e4),
     "decay": 0.999,
+    "pi_temp": 0.5,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
@@ -168,11 +169,16 @@ class EmbeddingAux:
 
 @struct.dataclass
 class PolicyAux:
-    loss: float = 0.0
-    q: float = 0.0
-    v: float = 0.0
-    weight: float = 0.0
-    entropy: float = 0.0
+    @struct.dataclass
+    class Value:
+        loss: float = 0.0
+        q: float = 0.0
+        v: float = 0.0
+        weight: float = 0.0
+        entropy: float = 0.0
+
+    pos: Value = Value()
+    union: Value = Value()
 
 
 def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
@@ -223,10 +229,8 @@ def get_multimodel_score(union, target_z, embedding_model):
     @nnx.scan(length=num_models, in_axes=nnx.Carry, out_axes=(nnx.Carry, 0))
     def multimodel(carry):
         x, target_z, model = carry
-        # Batch X embd_dim
-        z = model(x)
         # Batch
-        score = jnp.einsum("ij,ij->i", z, target_z)
+        score = model.get_score(x, target_z)
         return carry, score
 
     # 5 X Batch
@@ -337,24 +341,19 @@ def get_union_sink(
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
-    mid_traj = horizon // 2
-    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
-
     # Batch X Horizon X obs_act_dim
     target_union = jnp.concat([data.union_obs, data.union_act], axis=-1)
 
     # Batch X Horizon X embd_dim
-    target_union_z = curriculum_embedding_model(target_union, training=False)
+    target_union_z = curriculum_embedding_model.z(target_union, training=False)
 
     # # multimodel estimation of the union score
     # union_score = get_multimodel_score(target_union, target_union_z, embedding_model)
 
-    # Batch X Horizon X embd_dim
-    union_z = embedding_model(target_union, training=False)
-    # Batch X Horizon
-    traj_union_score = do_warmup * jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
     # Batch
-    union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
+    union_score = do_warmup * embedding_model.get_score(
+        target_union, target_union_z, training=False
+    )
 
     pos_sink_mask = (union_score > config.value_limit).astype(dtype)
     neg_sink_mask = (union_score < -config.value_limit).astype(dtype)
@@ -446,9 +445,6 @@ def embedding_grad_aux_fun(
     dtype = data.union_obs.dtype
     batch, horizon, _ = data.union_obs.shape
 
-    mid_traj = horizon // 2
-    select_mid_traj = 1 / mid_traj * (jnp.arange(horizon) > mid_traj).astype(dtype)
-
     # shape: Batch X Horizon X obs_act_dim
     target_pos = jnp.concat([data.pos_obs, data.pos_act], axis=-1)
     target_neg = jnp.concat([data.neg_obs, data.neg_act], axis=-1)
@@ -472,30 +468,22 @@ def embedding_grad_aux_fun(
     union_sink_mask = (target_union_score != 0).astype(dtype)
 
     # Batch X Horizon X embd_dim
-    target_pos_z = curriculum_embedding_model(target_pos, training=False)
-    target_neg_z = curriculum_embedding_model(target_neg, training=False)
-    target_union_z = curriculum_embedding_model(target_union, training=False)
-    target_random_z = curriculum_embedding_model(target_random, training=False)
+    target_pos_z = curriculum_embedding_model.z(target_pos, training=False)
+    target_neg_z = curriculum_embedding_model.z(target_neg, training=False)
+    target_union_z = curriculum_embedding_model.z(target_union, training=False)
+    target_random_z = curriculum_embedding_model.z(target_random, training=False)
 
     def loss_fun(embedding_model):
-        # Batch X Horizon X embd_dim
-        pos_z = embedding_model(target_pos)
-        # Batch X Horizon
-        traj_pos_score = jnp.einsum("ijk,ijk->ij", pos_z, target_pos_z)
         # Batch
-        pos_score = jnp.einsum("ij,j->i", traj_pos_score, select_mid_traj)
+        pos_score = embedding_model.get_score(target_pos, target_pos_z)
         pos_mean_loss = jnp.mean(range_loss(pos_score, target_pos_score, pos_scale))
         pos_mean_score = pos_scale * jnp.mean(pos_score)
 
-        neg_z = embedding_model(target_neg)
-        traj_neg_score = jnp.einsum("ijk,ijk->ij", neg_z, target_neg_z)
-        neg_score = jnp.einsum("ij,j->i", traj_neg_score, select_mid_traj)
+        neg_score = embedding_model.get_score(target_neg, target_neg_z)
         neg_mean_loss = jnp.mean(range_loss(neg_score, target_neg_score, neg_scale))
         neg_mean_score = neg_scale * jnp.mean(neg_score)
 
-        union_z = embedding_model(target_union)
-        traj_union_score = jnp.einsum("ijk,ijk->ij", union_z, target_union_z)
-        union_score = jnp.einsum("ij,j->i", traj_union_score, select_mid_traj)
+        union_score = embedding_model.get_score(target_union, target_union_z)
         union_loss = range_loss(union_score, target_union_score, union_scale)
         union_sink_count = jnp.clip(union_sink_mask.sum(), min=1.0)
         union_mean_loss = (
@@ -505,9 +493,7 @@ def embedding_grad_aux_fun(
             jnp.einsum("i,i->", union_sink_mask, union_score) / union_sink_count
         )
 
-        random_z = embedding_model(target_random)
-        traj_random_score = jnp.einsum("ijk,ijk->ij", random_z, target_random_z)
-        random_score = jnp.einsum("ij,j->i", traj_random_score, select_mid_traj)
+        random_score = embedding_model.get_score(target_random, target_random_z)
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
@@ -601,7 +587,7 @@ def value_grad_aux_fun(
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_weight, target_union, union_scale
         )
-        loss = pos_loss + config.pos_neg_ratio * neg_loss + union_loss
+        loss = pos_loss + neg_loss + config.pos_neg_ratio * union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
@@ -619,7 +605,9 @@ def value_grad_aux_fun(
     return grads, aux
 
 
-def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, config):
+def policy_grad_aux_fun(
+    policy_model, value_model, data, union_mask, pos_scale, union_scale, config
+):
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
@@ -630,40 +618,49 @@ def policy_grad_aux_fun(policy_model, value_model, data, union_mask, do_warmup, 
     # BH X obs/act_dim
     target_union_obs = data.union_obs.reshape(batch * horizon, -1)
     target_union_act = data.union_act.reshape(batch * horizon, -1)
-
     union_mask = union_mask.repeat(horizon)
 
-    def loss_fun(policy_model):
-        pred_union_act, log_pi, *_ = policy_model(target_union_obs)
+    target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
+    target_pos_act = data.pos_act.reshape(batch * horizon, -1)
+    pos_mask = jnp.ones_like(union_mask)
 
-        q = do_warmup * jnp.minimum(
-            *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
-        )
-        v = do_warmup * jnp.minimum(
-            *value_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
-        )
+    def fwd_kl_loss(policy_model, target_obs, target_act, mask, scale):
+        pred_act, log_pi, *_ = policy_model(target_obs)
 
-        union_count = jnp.clip(union_mask.sum(), min=1.0)
+        # BH
+        q = jnp.minimum(*value_model(jnp.concat([target_obs, target_act], axis=-1)))
+        v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
+        weight = jnp.exp(jnp.clip((q - v) / config.pi_temp, max=5.0))
+        weight = scale * jax.lax.stop_gradient(weight)
+        # BH
+        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
+        # union_loss = -v + 0.001 * log_pi  # inverse kl
 
-        weight = jnp.exp(jnp.clip(q / config.value_temp, max=5.0))
-        if config.policy_loss_type == "forward_kl":
-            union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
-            loss = (union_mask * weight * union_loss).sum() / union_count
-        else:
-            union_loss = -v + 0.001 * log_pi
-            loss = (union_mask * union_loss).sum() / union_count
-
-        qmean = (union_mask * q).sum() / union_count
-        vmean = (union_mask * v).sum() / union_count
-        weightmean = (union_mask * weight).sum() / union_count
-        entropymean = -(union_mask * log_pi).sum() / union_count
-
-        return loss, PolicyAux(
+        count = jnp.clip(mask.sum(), min=1.0)
+        loss = (mask * weight * l2_loss).sum() / count
+        qmean = (mask * q).sum() / count
+        vmean = (mask * v).sum() / count
+        weightmean = (mask * weight).sum() / count
+        entropymean = -(mask * log_pi).sum() / count
+        return loss, PolicyAux.Value(
             loss=loss,
             q=qmean,
             v=vmean,
             weight=weightmean,
             entropy=entropymean,
+        )
+
+    def loss_fun(policy_model):
+        union_loss, union_aux = fwd_kl_loss(
+            policy_model, target_union_obs, target_union_act, union_mask, union_scale
+        )
+        pos_loss, pos_aux = fwd_kl_loss(
+            policy_model, target_pos_obs, target_pos_act, pos_mask, pos_scale
+        )
+        loss = union_loss + pos_loss
+        return loss, PolicyAux(
+            union=union_aux,
+            pos=pos_aux,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -719,7 +716,8 @@ def train_step(
         value_model=state.models.value,
         data=batch_data,
         union_mask=union_mask,  # full union dataset to learn policy
-        do_warmup=1.0 * do_warmup,
+        pos_scale=1.0 * has_positive,
+        union_scale=1.0 * do_warmup,
         config=config,
     )
     state.optimizers.policy.update(policy_grads)
@@ -883,8 +881,9 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["policy_loss_type"] = args.policy_loss_type
     config["normalize_observation"] = args.normalize_observation
-    config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
+    config["value_temp"] = args.value_weight_temp or config["value_temp"]
+    config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
     config["embd_freq"] = args.embd_freq or config["embd_freq"]
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
@@ -1114,22 +1113,18 @@ def main(args, cfg_env=None):
 
         logger.log_tabular("Train/Steps", steps)
 
-        logger.log_tabular("Loss/Loss_embedding", embd_aux.loss.item())
-        logger.log_tabular("Loss/Loss_embd_pos", embd_aux.pos_loss.item())
-        logger.log_tabular("Loss/Loss_embd_neg", embd_aux.neg_loss.item())
-        logger.log_tabular("Loss/Loss_embd_union", embd_aux.union_loss.item())
-        logger.log_tabular("Loss/Loss_embd_random_loss", embd_aux.random_loss.item())
-        logger.log_tabular("Loss/Loss_value", value_aux.loss.item())
-        logger.log_tabular("Loss/Loss_value_pos", value_aux.pos_loss.item())
-        logger.log_tabular("Loss/Loss_value_neg", value_aux.neg_loss.item())
-        logger.log_tabular("Loss/Loss_value_random", value_aux.random_loss.item())
-        logger.log_tabular("Loss/Loss_value_union", value_aux.union_loss.item())
-
-        logger.log_tabular("Loss/Loss_policy", policy_aux.loss.item())
-        logger.log_tabular("Loss/Loss_policy_q", policy_aux.q.item())
-        logger.log_tabular("Loss/Loss_policy_v", policy_aux.v.item())
-        logger.log_tabular("Loss/Loss_policy_weight", policy_aux.weight.item())
-        logger.log_tabular("Loss/Loss_policy_entropy", policy_aux.entropy.item())
+        logger.log_tabular("Loss/embedding", embd_aux.loss.item())
+        logger.log_tabular("Loss/embd_pos", embd_aux.pos_loss.item())
+        logger.log_tabular("Loss/embd_neg", embd_aux.neg_loss.item())
+        logger.log_tabular("Loss/embd_union", embd_aux.union_loss.item())
+        logger.log_tabular("Loss/embd_random", embd_aux.random_loss.item())
+        logger.log_tabular("Loss/value", value_aux.loss.item())
+        logger.log_tabular("Loss/value_pos", value_aux.pos_loss.item())
+        logger.log_tabular("Loss/value_neg", value_aux.neg_loss.item())
+        logger.log_tabular("Loss/value_random", value_aux.random_loss.item())
+        logger.log_tabular("Loss/value_union", value_aux.union_loss.item())
+        logger.log_tabular("Loss/pi_union", policy_aux.union.loss.item())
+        logger.log_tabular("Loss/pi_pos", policy_aux.pos.loss.item())
 
         logger.log_tabular(
             "Num/target_embedding_updates", train_aux.num_embd_updates.item()
@@ -1146,11 +1141,19 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_neg_score", embd_aux.neg_score.item())
         logger.log_tabular("Mean/embd_union_score", embd_aux.union_score.item())
         logger.log_tabular("Mean/embd_random_score", embd_aux.random_score.item())
-        logger.log_tabular("Mean/pos_value", value_aux.pos_value.item())
-        logger.log_tabular("Mean/neg_value", value_aux.neg_value.item())
-        logger.log_tabular("Mean/random_value", value_aux.random_value.item())
-        logger.log_tabular("Mean/union_value", value_aux.union_value.item())
+        logger.log_tabular("Mean/value_pos", value_aux.pos_value.item())
+        logger.log_tabular("Mean/value_neg", value_aux.neg_value.item())
+        logger.log_tabular("Mean/value_random", value_aux.random_value.item())
+        logger.log_tabular("Mean/value_union", value_aux.union_value.item())
         logger.log_tabular("Mean/decay_weight", train_aux.weight.item())
+        logger.log_tabular("Mean/pi_union_q", policy_aux.union.q.item())
+        logger.log_tabular("Mean/pi_union_v", policy_aux.union.v.item())
+        logger.log_tabular("Mean/pi_union_weight", policy_aux.union.weight.item())
+        logger.log_tabular("Mean/pi_union_entropy", policy_aux.union.entropy.item())
+        logger.log_tabular("Mean/pi_pos_q", policy_aux.pos.q.item())
+        logger.log_tabular("Mean/pi_pos_v", policy_aux.pos.v.item())
+        logger.log_tabular("Mean/pi_pos_weight", policy_aux.pos.weight.item())
+        logger.log_tabular("Mean/pi_pos_entropy", policy_aux.pos.entropy.item())
 
         logger.log_tabular(
             "NonPrefScore/union_pos_sink", sink_aux.pos_sink_nonpref.item()

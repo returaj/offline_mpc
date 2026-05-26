@@ -350,6 +350,7 @@ class TransformerEmbedding(nnx.Module):
         do_layer_norm=True,
         do_residual=True,
     ):
+        self.horizon = horizon
         self.encoder = nnx.Linear(obs_dim + act_dim, embd_dim, rngs=rngs)
         # self.pos_encoding = positionalencoding1d(embd_dim, horizon)
         self.pos_embedding = nnx.Embed(
@@ -370,8 +371,9 @@ class TransformerEmbedding(nnx.Module):
                 for _ in range(num_attentions)
             ]
         )
+        self.attention = nnx.Linear(embd_dim, 1, rngs=rngs)
 
-    def __call__(self, x, normalize_z=True, training=True):
+    def z(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
         x = self.encoder(x)
         positions = jnp.arange(x.shape[1])[None, :]  # (1, Horizon)
@@ -384,3 +386,17 @@ class TransformerEmbedding(nnx.Module):
 
         # batch X horizon X embd_dim
         return x
+
+    def get_score(self, x, ztarget, normalize_z=True, training=True):
+        # batch X horizon X embd_dim
+        z = self.z(x, normalize_z, training)
+        # batch X horizon
+        traj_score = jnp.einsum("ijk,ijk->ij", z, ztarget)
+        attn_logits = self.attention(z).squeeze(axis=-1)
+        # mask first half of the trajectory
+        first_half = jnp.arange(self.horizon) <= self.horizon // 2
+        attn_logits = attn_logits + first_half * -1e9
+        attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+        # batch
+        score = jnp.einsum("ij,ij->i", attn_weights, traj_score)
+        return score
