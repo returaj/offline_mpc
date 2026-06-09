@@ -392,10 +392,11 @@ class TransformerEmbedding(nnx.Module):
         z = self.z(x, normalize_z, training)
         # batch X horizon
         traj_score = jnp.einsum("ijk,ijk->ij", z, ztarget)
+        # horizon: mask first half of the trajectory
+        second_half = jnp.arange(self.horizon) > self.horizon // 2
+        # batch X horizon
         attn_logits = self.attention(z).squeeze(axis=-1)
-        # mask first half of the trajectory
-        first_half = jnp.arange(self.horizon) <= self.horizon // 2
-        attn_logits = attn_logits + first_half * -1e9
+        attn_logits = attn_logits + (1.0 - second_half) * -1e9
         attn_weights = jax.nn.softmax(attn_logits, axis=-1)
         # batch
         score = jnp.einsum("ij,ij->i", attn_weights, traj_score)
