@@ -53,6 +53,7 @@ default_cfg = {
     "warmup_steps": int(5e4),
     "decay": 0.999,
     "pi_temp": 0.5,
+    "pi_baseline": 0.9,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
@@ -630,7 +631,7 @@ def policy_grad_aux_fun(
         # BH
         q = jnp.minimum(*value_model(jnp.concat([target_obs, target_act], axis=-1)))
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        weight = jnp.exp(jnp.clip((q - v) / config.pi_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((q - config.pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
         # BH
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
@@ -811,12 +812,16 @@ def train_n_steps(
             250, (100 * sink_bimodality_ema * config.embd_freq) // 1
         )
 
+        new_weight = (
+            train_aux.weight * config.gamma
+            if config.use_weight_decay
+            else 1.0 - sink_bimodality_ema
+        )
+
         train_aux = train_aux.replace(
             embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
             num_embd_updates=train_aux.num_embd_updates + embedding_cond,
-            weight=jnp.where(
-                update_weight, 1.0 - sink_bimodality_ema, train_aux.weight
-            ),
+            weight=jnp.where(update_weight, new_weight, train_aux.weight),
         )
 
         # do_warmup: False: union_weight = 0
@@ -884,9 +889,12 @@ def main(args, cfg_env=None):
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
+    config["pi_baseline"] = args.alpha or config["pi_baseline"]
     config["embd_freq"] = args.embd_freq or config["embd_freq"]
+    config["embd_size"] = args.embd_size or config["embd_size"]
     config["pos_label"] = args.preferred_label
     config["neg_label"] = args.non_preferred_label
+    config["use_weight_decay"] = args.use_weight_decay
     config["lr"] = args.lr
     config["pos_neg_ratio"] = jnp.maximum(args.num_preferred, 1.0) / jnp.maximum(
         args.num_non_preferred, 1.0

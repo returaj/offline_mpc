@@ -349,10 +349,28 @@ def single_agent_args():
             "help": "update the target embedding network frequency.",
         },
         {
+            "name": "--embd-size",
+            "type": int,
+            "default": None,
+            "help": "embedding size",
+        },
+        {
             "name": "--policy-loss-type",
             "type": str,
             "default": "forward_kl",
             "help": "policy loss type can be either forward_kl or inverse_kl",
+        },
+        {
+            "name": "--alpha",
+            "type": float,
+            "default": None,
+            "help": "hyperparam alpha",
+        },
+        {
+            "name": "--use-weight-decay",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "SafeCL whether to use weight decay or percentage based",
         },
     ]
     # Create argument parser
