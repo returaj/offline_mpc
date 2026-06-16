@@ -31,6 +31,7 @@ from dsrl_model.utils.models_jax import (
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     get_tree_norm,
+    softer_max,
 )
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
@@ -53,7 +54,6 @@ default_cfg = {
     "warmup_steps": int(5e4),
     "decay": 0.999,
     "pi_temp": 0.5,
-    "pi_baseline": 0.9,
     "value_temp": 0.1,
     "value_limit": 0.85,
     "value_th": 0.85,
@@ -180,6 +180,7 @@ class PolicyAux:
 
     pos: Value = Value()
     union: Value = Value()
+    pi_baseline: float = 0.0
 
 
 def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
@@ -609,6 +610,8 @@ def value_grad_aux_fun(
 def policy_grad_aux_fun(
     policy_model, value_model, data, union_mask, pos_scale, union_scale, config
 ):
+    del union_mask
+
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
@@ -619,49 +622,58 @@ def policy_grad_aux_fun(
     # BH X obs/act_dim
     target_union_obs = data.union_obs.reshape(batch * horizon, -1)
     target_union_act = data.union_act.reshape(batch * horizon, -1)
-    union_mask = union_mask.repeat(horizon)
 
     target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
     target_pos_act = data.pos_act.reshape(batch * horizon, -1)
-    pos_mask = jnp.ones_like(union_mask)
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, mask, scale):
+    # BH
+    union_q = jnp.minimum(
+        *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
+    )
+    pos_q = jnp.minimum(
+        *value_model(jnp.concat([target_pos_obs, target_pos_act], axis=-1))
+    )
+
+    # scalar: logmeanexp(union_q)
+    if config.pi_baseline_type == "softer_max":
+        pi_baseline = softer_max(union_q, config.pi_temp)
+    elif config.pi_baseline_type == "mean_std":
+        pi_baseline = union_q.mean() + config.pi_alpha * union_q.std()
+    else:
+        pi_baseline = config.pi_alpha
+
+    def fwd_kl_loss(policy_model, target_obs, target_act, q, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
 
         # BH
-        q = jnp.minimum(*value_model(jnp.concat([target_obs, target_act], axis=-1)))
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        weight = jnp.exp(jnp.clip((q - config.pi_baseline) / config.pi_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((q - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
         # BH
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
         # union_loss = -v + 0.001 * log_pi  # inverse kl
 
-        count = jnp.clip(mask.sum(), min=1.0)
-        loss = (mask * weight * l2_loss).sum() / count
-        qmean = (mask * q).sum() / count
-        vmean = (mask * v).sum() / count
-        weightmean = (mask * weight).sum() / count
-        entropymean = -(mask * log_pi).sum() / count
+        loss = (weight * l2_loss).mean()
         return loss, PolicyAux.Value(
             loss=loss,
-            q=qmean,
-            v=vmean,
-            weight=weightmean,
-            entropy=entropymean,
+            q=q.mean(),
+            v=v.mean(),
+            weight=weight.mean(),
+            entropy=-log_pi.mean(),
         )
 
     def loss_fun(policy_model):
         union_loss, union_aux = fwd_kl_loss(
-            policy_model, target_union_obs, target_union_act, union_mask, union_scale
+            policy_model, target_union_obs, target_union_act, union_q, union_scale
         )
         pos_loss, pos_aux = fwd_kl_loss(
-            policy_model, target_pos_obs, target_pos_act, pos_mask, pos_scale
+            policy_model, target_pos_obs, target_pos_act, pos_q, pos_scale
         )
         loss = union_loss + pos_loss
         return loss, PolicyAux(
             union=union_aux,
             pos=pos_aux,
+            pi_baseline=pi_baseline,
         )
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -883,13 +895,14 @@ def main(args, cfg_env=None):
     trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg}
+    config["pi_baseline_type"] = args.policy_baseline_type
+    config["pi_alpha"] = args.alpha
+
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["policy_loss_type"] = args.policy_loss_type
     config["normalize_observation"] = args.normalize_observation
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
     config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
-    config["pi_baseline"] = args.alpha or config["pi_baseline"]
     config["embd_freq"] = args.embd_freq or config["embd_freq"]
     config["embd_size"] = args.embd_size or config["embd_size"]
     config["pos_label"] = args.preferred_label
@@ -1162,6 +1175,7 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/pi_pos_v", policy_aux.pos.v.item())
         logger.log_tabular("Mean/pi_pos_weight", policy_aux.pos.weight.item())
         logger.log_tabular("Mean/pi_pos_entropy", policy_aux.pos.entropy.item())
+        logger.log_tabular("Mean/pi_baseline", policy_aux.pi_baseline.item())
 
         logger.log_tabular(
             "NonPrefScore/union_pos_sink", sink_aux.pos_sink_nonpref.item()

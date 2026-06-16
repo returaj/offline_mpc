@@ -45,6 +45,11 @@ def log1pexp(x, eps=EPS):
     return pos_x + jnp.log(1 + jnp.exp(-abs_x))
 
 
+def softer_max(x: jnp.ndarray, temp: float = 1.0):
+    # B
+    return temp * jax.nn.logsumexp(x / temp)
+
+
 def get_tree_norm(tree):
     square_tree = jax.tree_util.tree_map(lambda x: jnp.sum(x**2), tree)
     total_square = jax.tree_util.tree_reduce(lambda acc, x: acc + x, square_tree)

@@ -355,15 +355,15 @@ def single_agent_args():
             "help": "embedding size",
         },
         {
-            "name": "--policy-loss-type",
+            "name": "--policy-baseline-type",
             "type": str,
-            "default": "forward_kl",
-            "help": "policy loss type can be either forward_kl or inverse_kl",
+            "default": "constant",
+            "help": "policy baseline type can be 'constant', 'softer_max', 'mean_std'",
         },
         {
             "name": "--alpha",
             "type": float,
-            "default": None,
+            "default": 0.9,
             "help": "hyperparam alpha",
         },
         {
