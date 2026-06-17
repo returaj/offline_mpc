@@ -275,14 +275,46 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
     neg_limit, pos_limit = min(min(weights), -0.01), max(max(weights), 0.01)
     norm = mcolors.TwoSlopeNorm(vmin=neg_limit, vcenter=0, vmax=pos_limit)
     fig, ax = plt.subplots()
-    sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
+    
+    pos_mask = weights > 0
+    neg_mask = weights <= 0
+    
+    # Positive preferences: circles
+    sc_pos = ax.scatter(
+        np.array(costs)[pos_mask],
+        np.array(rewards)[pos_mask],
+        c=weights[pos_mask],
+        cmap="PuOr",
+        norm=norm,
+        marker="o",
+        s=80,
+        edgecolors="black",
+        linewidths=0.5,
+        label="Positive",
+    )
+    
+    # Negative preferences: crosses
+    ax.scatter(
+        np.array(costs)[neg_mask],
+        np.array(rewards)[neg_mask],
+        c=weights[neg_mask],
+        cmap="PuOr",
+        norm=norm,
+        marker="x",
+        s=80,
+        linewidths=1.5,
+        label="Negative",
+    )
+    
+    # sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
 
-    cbar = fig.colorbar(sc, ax=ax)
+    cbar = fig.colorbar(sc_pos, ax=ax)
     cbar.set_label("Preference")
 
     ax.set_xlabel("Traj. Cost")
     ax.set_ylabel("Traj. Reward")
     ax.set_title(f"Preference Plot ({env_name})")
+    ax.legend()
     fig.savefig(save_plot, dpi=300, bbox_inches="tight")
 
 
