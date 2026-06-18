@@ -535,12 +535,7 @@ def embedding_grad_aux_fun(
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
-        loss = (
-            pos_mean_loss
-            + neg_mean_loss
-            + config.pos_neg_ratio * union_mean_loss
-            + random_mean_loss
-        )
+        loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
 
         return loss, EmbeddingAux(
             loss=loss,
@@ -625,7 +620,7 @@ def value_grad_aux_fun(
         union_loss, union_value = xql_rescale_loss(
             value_model, union_mask, union_weight, target_union, union_scale
         )
-        loss = pos_loss + neg_loss + config.pos_neg_ratio * union_loss
+        loss = pos_loss + neg_loss + union_loss
         return loss, ValueAux(
             loss=loss,
             pos_loss=pos_loss,
