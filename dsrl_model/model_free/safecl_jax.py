@@ -123,6 +123,8 @@ class DataAux:
 
 @struct.dataclass
 class UnionSinkAux:
+    max_score: float = 0.0
+    min_score: float = 0.0
     mean_score: float = 0.0
     std_score: float = 0.0
     pos_sink_percent: float = 0.0
@@ -275,10 +277,10 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
     neg_limit, pos_limit = min(min(weights), -0.01), max(max(weights), 0.01)
     norm = mcolors.TwoSlopeNorm(vmin=neg_limit, vcenter=0, vmax=pos_limit)
     fig, ax = plt.subplots()
-    
+
     pos_mask = weights > 0
     neg_mask = weights <= 0
-    
+
     # Positive preferences: circles
     sc_pos = ax.scatter(
         np.array(costs)[pos_mask],
@@ -292,7 +294,7 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
         linewidths=0.5,
         label="Positive",
     )
-    
+
     # Negative preferences: crosses
     ax.scatter(
         np.array(costs)[neg_mask],
@@ -305,7 +307,7 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
         linewidths=1.5,
         label="Negative",
     )
-    
+
     # sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
 
     cbar = fig.colorbar(sc_pos, ax=ax)
@@ -445,6 +447,8 @@ def get_union_sink(
     union_weight = pos_union_weight + neg_union_weight + source_weight
 
     union_aux = UnionSinkAux(
+        max_score=union_score.max(),
+        min_score=union_score.min(),
         mean_score=union_score.mean(),
         std_score=union_score.std(),
         pos_sink_percent=pos_sink_percent,
@@ -1184,6 +1188,8 @@ def main(args, cfg_env=None):
         )
         logger.log_tabular("Num/target_embedding_stale", train_aux.embd_freq.item())
 
+        logger.log_tabular("Mean/union_max", sink_aux.max_score.item())
+        logger.log_tabular("Mean/union_min", sink_aux.min_score.item())
         logger.log_tabular("Mean/union_score", sink_aux.mean_score.item())
         logger.log_tabular("Mean/union_std", sink_aux.std_score.item())
         logger.log_tabular("Mean/union_bimodality", sink_aux.sink_bimodality.item())
