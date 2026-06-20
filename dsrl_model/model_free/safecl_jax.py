@@ -648,16 +648,17 @@ def policy_grad_aux_fun(
     # B X obs/act_dim
     # only consider the first state-action pair as
     # our value function may not be trained enough to
-    # judge the state-action pair for later trajectory pair
+    # judge the state-action pair for later trajectory pair.
+    # We found that our value function hallucinates for later
+    # state-action pairs in the trajectory.
 
-    # BH X obs/act_dim
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    target_union_obs = data.union_obs[:, 0]
+    target_union_act = data.union_act[:, 0]
 
-    target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
-    target_pos_act = data.pos_act.reshape(batch * horizon, -1)
+    target_pos_obs = data.pos_obs[:, 0]
+    target_pos_act = data.pos_act[:, 0]
 
-    # BH
+    # B
     union_q = jnp.minimum(
         *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
     )
@@ -665,7 +666,7 @@ def policy_grad_aux_fun(
         *value_model(jnp.concat([target_pos_obs, target_pos_act], axis=-1))
     )
 
-    # scalar: logmeanexp(union_q)
+    # scalar
     if config.pi_baseline_type == "softer_max":
         pi_baseline = softer_max(union_q, config.pi_temp)
     elif config.pi_baseline_type == "mean_std":
@@ -676,11 +677,11 @@ def policy_grad_aux_fun(
     def fwd_kl_loss(policy_model, target_obs, target_act, q, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
 
-        # BH
+        # B
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
         weight = jnp.exp(jnp.clip((q - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
-        # BH
+        # B
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
         # union_loss = -v + 0.001 * log_pi  # inverse kl
 
