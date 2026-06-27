@@ -30,6 +30,8 @@ from dsrl_model.utils.models_jax import (
     EnsembleValue,
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
+    TransformerEmbeddingCostant,
+    TransformerEmbeddingNoProjection,
     get_tree_norm,
     softer_max,
 )
@@ -930,6 +932,8 @@ def main(args, cfg_env=None):
     config["pi_baseline_type"] = args.policy_baseline_type
     config["pi_alpha"] = args.alpha
 
+    config["embd_type"] = args.embedding_model_type
+
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["normalize_observation"] = args.normalize_observation
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
@@ -987,14 +991,39 @@ def main(args, cfg_env=None):
     )
 
     embd_size = config["embd_size"]
-    embedding_model = TransformerEmbedding(
-        rngs=rngs,
-        obs_dim=obs_space.shape[0],
-        act_dim=act_space.shape[0],
-        horizon=config["train_horizon"],
-        embd_dim=embd_size,
-        num_attentions=2,
-    )
+    if config["embd_type"] == "model_projection":
+        embedding_model = TransformerEmbedding(
+            rngs=rngs,
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            horizon=config["train_horizon"],
+            embd_dim=embd_size,
+            num_attentions=2,
+        )
+    elif config["embd_type"] == "constant_projection":
+        embedding_model = TransformerEmbeddingCostant(
+            rngs=rngs,
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            horizon=config["train_horizon"],
+            embd_dim=embd_size,
+            num_attentions=2,
+        )
+    elif config["embd_type"] == "no_projection":
+        embedding_model = TransformerEmbeddingNoProjection(
+            rngs=rngs,
+            obs_dim=obs_space.shape[0],
+            act_dim=act_space.shape[0],
+            horizon=config["train_horizon"],
+            embd_dim=embd_size,
+            num_attentions=2,
+        )
+    else:
+        raise ValueError(
+            "Embedding type not valid. "
+            + "It should be either 'no_projection', 'constant_projection', 'model_projection'. "
+            + f"Given embedding type: {config['embd_type']}."
+        )
     embedding_optimizer = nnx.Optimizer(
         model=embedding_model,
         tx=optax.chain(
