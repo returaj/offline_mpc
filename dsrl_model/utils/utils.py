@@ -361,6 +361,12 @@ def single_agent_args():
             "help": "policy baseline type can be 'constant', 'softer_max', 'mean_std'",
         },
         {
+            "name": "--embedding-model-type",
+            "type": str,
+            "default": "model_projection",
+            "help": "embedding model type can be 'no_projection', 'constant_projection', 'model_projection'",
+        },
+        {
             "name": "--alpha",
             "type": float,
             "default": 0.9,

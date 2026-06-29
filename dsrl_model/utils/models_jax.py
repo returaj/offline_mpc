@@ -406,3 +406,80 @@ class TransformerEmbedding(nnx.Module):
         # batch
         score = jnp.einsum("ij,ij->i", attn_weights, traj_score)
         return score
+
+
+class TransformerEmbeddingNoProjection(TransformerEmbedding):
+    def __init__(
+        self,
+        rngs,
+        obs_dim,
+        act_dim,
+        horizon,
+        embd_dim=128,
+        num_heads=4,
+        num_attentions=1,
+        do_layer_norm=True,
+        do_residual=True,
+    ):
+        super().__init__(
+            rngs,
+            obs_dim,
+            act_dim,
+            horizon,
+            embd_dim,
+            num_heads,
+            num_attentions,
+            do_layer_norm,
+            do_residual,
+        )
+        self.pre_score = nnx.Sequential(
+            nnx.Linear(embd_dim, embd_dim, rngs=rngs),
+            nnx.elu,
+            nnx.Linear(embd_dim, 1, rngs=rngs),
+        )
+
+    def get_score(self, x, ztarget, normalize_z=True, training=True):
+        del ztarget
+        # batch X horizon X embd_dim
+        z = self.z(x, normalize_z, training)
+        z = z[:, -1, :]
+        # batch
+        score = nnx.tanh(self.pre_score(z).squeeze(axis=-1))
+        return score
+
+
+class TransformerEmbeddingCostant(TransformerEmbedding):
+    def __init__(
+        self,
+        rngs,
+        obs_dim,
+        act_dim,
+        horizon,
+        embd_dim=128,
+        num_heads=4,
+        num_attentions=1,
+        do_layer_norm=True,
+        do_residual=True,
+    ):
+        super().__init__(
+            rngs,
+            obs_dim,
+            act_dim,
+            horizon,
+            embd_dim,
+            num_heads,
+            num_attentions,
+            do_layer_norm,
+            do_residual,
+        )
+        direction = jax.random.normal(rngs(), shape=(embd_dim,), dtype=jnp.float32)
+        self.unit_direction = l2_normalize(direction, axis=-1)
+        self.embd_dim = embd_dim
+
+    def get_score(self, x, ztarget, normalize_z=True, training=True):
+        del ztarget
+        batch, horizon, _ = x.shape
+        ztarget = jnp.broadcast_to(
+            self.unit_direction, shape=(batch, horizon, self.embd_dim)
+        )
+        return super().get_score(x, ztarget, normalize_z, training)
