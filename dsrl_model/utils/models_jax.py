@@ -165,7 +165,6 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         return log_prob
 
-    @functools.partial(jax.jit, static_argnums=0)
     def action_w_key(self, key, obs, deterministic=False):
         x = self.pre_encoder(obs)
 
