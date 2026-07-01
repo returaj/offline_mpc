@@ -165,7 +165,6 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         return log_prob
 
-    @functools.partial(jax.jit, static_argnums=0)
     def action_w_key(self, key, obs, deterministic=False):
         x = self.pre_encoder(obs)
 
@@ -196,8 +195,12 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         return jax.nn.tanh(pretanh_action)
 
+    @functools.partial(jax.jit, static_argnums=0)
+    def action_keep_params_static(self, key, obs, deterministic=False):
+        return self.action_w_key(key, obs, deterministic)
+
     def action(self, obs, deterministic=False):
-        return self.action_w_key(self.rngs(), obs, deterministic)
+        return self.action_keep_params_static(self.rngs(), obs, deterministic)
 
 
 class ExpCostModel(nnx.Module):

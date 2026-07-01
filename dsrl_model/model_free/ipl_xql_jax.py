@@ -117,6 +117,7 @@ def discounted_sum(arr, gamma):
 
 
 def policy_loss_grads_fun(
+    value_model,
     critic_model,
     policy_model,
     data,
@@ -133,55 +134,41 @@ def policy_loss_grads_fun(
     target_union_obs = data.union_obs.reshape(batch * horizon, -1)
     target_union_act = data.union_act.reshape(batch * horizon, -1)
 
+    # Batch_Horizon
+    q_union = jnp.minimum(
+        *critic_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
+    )
+    v_union = jnp.minimum(*value_model(target_union_obs))
+    weight_union = jnp.clip((q_union - v_union) / beta, max=5.0)
+    weight_union = jnp.exp(weight_union)
+    # scalar value
+    weight_pos = jnp.max(weight_union)
+
     def loss_fun(policy_model):
         pred_pos_act, *_ = policy_model(target_pos_obs)
         pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
-        pos_bc_loss = has_positive * jnp.mean(pos_loss)
+        pos_bc_loss = has_positive * weight_pos * jnp.mean(pos_loss)
 
         pred_union_act, *_ = policy_model(target_union_obs)
-        # Batch_Horizon
-        q_union = jnp.minimum(
-            *critic_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
-        )
-        v_union = jnp.minimum(
-            *critic_model(jnp.concat([target_union_obs, pred_union_act], axis=-1))
-        )
-        weight_union = jnp.clip((q_union - v_union) / beta, max=5.0)
-        weight_union = jax.lax.stop_gradient(jnp.exp(weight_union))
-
         union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
         union_bc_loss = jnp.mean(weight_union * union_loss)
 
         loss = pos_bc_loss + union_bc_loss
-        return loss, (pos_bc_loss, union_bc_loss, q_union.mean(), v_union.mean())
+        return loss, (pos_bc_loss, union_bc_loss)
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_values), grads = grad_fun(policy_model)
-    return loss, grads, *aux_values
-
-
-def compute_v(critic_model, policy_model, obs, key):
-    # B X H X obs_dim
-    batch, horizon, _ = obs.shape
-    obs = obs.reshape(batch * horizon, -1)
-
-    # BH X act_dim
-    pi_act = policy_model.action_w_key(key, obs)
-    # BH
-    value = jnp.minimum(*critic_model(jnp.concat([obs, pi_act], axis=-1)))
-    return value.reshape(batch, horizon)
+    return loss, grads, *aux_values, q_union.mean(), v_union.mean()
 
 
 def critic_loss_grads_fun(
+    value_model,
     critic_model,
-    critic_model_target,
-    policy_model,
     data,
     has_positive,
     has_negative,
     gamma,
     lmbda,
-    key,
 ):
     dtype = data.union_obs.dtype
     horizon = data.horizon
@@ -193,16 +180,14 @@ def critic_loss_grads_fun(
     # This is a permutation matrix to shift one timestep ahead
     shift_one_timestep = jnp.eye(horizon, k=-1, dtype=dtype)
 
-    def get_reward(critic_model, obs, act, key):
+    def get_reward(critic_model, obs, act):
         # Batch X Horizon
         q1, q2 = critic_model(jnp.concat([obs, act], axis=-1))
         q1, q2 = q2 * mask_last_horizon, q2 * mask_last_horizon
         ## use mean v_next
         # v_next = jnp.mean(jnp.stack(value_model(obs)), axis=0) @ shift_one_timestep
         ## use min v_next
-        v_next = (
-            compute_v(critic_model_target, policy_model, obs, key) @ shift_one_timestep
-        )
+        v_next = jnp.minimum(*value_model(obs)) @ shift_one_timestep
         v_next = jnp.clip(v_next, min=-200, max=200)
         ## ensure last horizon is not used
         ## as last reward term is not estimated
@@ -210,11 +195,10 @@ def critic_loss_grads_fun(
         r2 = (q2 - gamma * v_next) * mask_last_horizon
         return r1, r2
 
-    def pref_loss(critic_model, obs1, act1, obs2, act2, key):
-        key1, key2 = jax.random.split(key)
+    def pref_loss(critic_model, obs1, act1, obs2, act2):
         # Batch X Horizon
-        r1_1, r1_2 = get_reward(critic_model, obs1, act1, key1)
-        r2_1, r2_2 = get_reward(critic_model, obs2, act2, key2)
+        r1_1, r1_2 = get_reward(critic_model, obs1, act1)
+        r2_1, r2_2 = get_reward(critic_model, obs2, act2)
         # traj_reward_1 > traj_reward_2
         logit1 = r1_1.sum(axis=1) - r2_1.sum(axis=1)
         logp1 = nnx.log_sigmoid(logit1)
@@ -226,8 +210,6 @@ def critic_loss_grads_fun(
         return loss
 
     def loss_fun(critic_model):
-        key1, key2, key3 = jax.random.split(key, 3)
-
         pos_neg_loss = (
             has_positive
             * has_negative
@@ -237,7 +219,6 @@ def critic_loss_grads_fun(
                 act1=data.pos_act,
                 obs2=data.neg_obs,
                 act2=data.neg_act,
-                key=key1,
             )
         )
         pos_union_loss = has_positive * pref_loss(
@@ -246,7 +227,6 @@ def critic_loss_grads_fun(
             act1=data.pos_act,
             obs2=data.union_obs,
             act2=data.union_act,
-            key=key2,
         )
         union_neg_loss = has_negative * pref_loss(
             critic_model=critic_model,
@@ -254,7 +234,6 @@ def critic_loss_grads_fun(
             act1=data.union_act,
             obs2=data.neg_obs,
             act2=data.neg_act,
-            key=key3,
         )
         loss = pos_neg_loss + pos_union_loss + union_neg_loss
         return loss, (pos_neg_loss, pos_union_loss, union_neg_loss)
@@ -264,7 +243,48 @@ def critic_loss_grads_fun(
     return loss, grads, *aux_values
 
 
+def value_loss_grads_fun(
+    value_model,
+    critic_model,
+    data,
+    has_positive,
+    alpha,
+):
+    def xql_rescale_loss(value_model, obs, act):
+        # Batch X Horizon
+        target_q = jnp.minimum(*critic_model(jnp.concat([obs, act], axis=-1)))
+        v1, v2 = value_model(obs)
+        v1_z, v2_z = (target_q - v1) / alpha, (target_q - v2) / alpha
+
+        max_z = jnp.maximum(v1_z, v2_z).max()
+        max_z = jnp.where(max_z < -1.0, -1.0, max_z)
+        # scale by e^max_z
+        # Detach the gradients is important as loss function is getting changed
+        max_z = jax.lax.stop_gradient(max_z)
+        loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
+        loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
+        return jnp.mean(loss_v1 + loss_v2)
+
+    def loss_fun(value_model):
+        pos_loss = has_positive * xql_rescale_loss(
+            value_model, data.pos_obs, data.pos_act
+        )
+        # neg trajectory is already part of union dataset
+        # training on neg trajectory with full batch size is changing the data
+        # distribution and we are overweighing the neg trajectory in the dataset
+        # neg_loss = xql_rescale_loss(value_model, data.neg_obs, data.neg_act)
+        union_loss = xql_rescale_loss(value_model, data.union_obs, data.union_act)
+        loss = pos_loss + union_loss
+        return loss, (pos_loss, union_loss)
+
+    grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
+    (loss, aux_values), grads = grad_fun(value_model)
+    return loss, grads, *aux_values
+
+
 def train_step(
+    value_model,
+    value_optimizer,
     critic_model_target,
     critic_model,
     critic_optimizer,
@@ -274,22 +294,29 @@ def train_step(
     config,
     has_positive,
     has_negative,
-    key,
 ):
+    value_loss, value_grads, *value_aux = value_loss_grads_fun(
+        value_model=value_model,
+        critic_model=critic_model_target,
+        data=batch_data,
+        has_positive=has_positive,
+        alpha=config.alpha,
+    )
+    value_optimizer.update(value_grads)
+
     critic_loss, critic_grads, *critic_aux = critic_loss_grads_fun(
+        value_model=value_model,
         critic_model=critic_model,
-        critic_model_target=critic_model_target,
-        policy_model=policy_model,
         data=batch_data,
         has_positive=has_positive,
         has_negative=has_negative,
         gamma=config.gamma,
         lmbda=config.lmbda,
-        key=key,
     )
     critic_optimizer.update(critic_grads)
 
     policy_loss, policy_grads, *policy_aux = policy_loss_grads_fun(
+        value_model=value_model,
         critic_model=critic_model_target,
         policy_model=policy_model,
         data=batch_data,
@@ -311,6 +338,8 @@ def train_step(
     mean_union_cost = batch_data.union_cost.sum(-1).mean()
 
     return (
+        value_loss,
+        *value_aux,
         critic_loss,
         *critic_aux,
         policy_loss,
@@ -326,6 +355,8 @@ def train_step(
 
 @nnx.jit
 def train_n_steps(
+    value_model,
+    value_optimizer,
     critic_model_target,
     critic_model,
     critic_optimizer,
@@ -339,15 +370,15 @@ def train_n_steps(
 ):
     num_steps = config.log_freq
 
-    key, subkey = jax.random.split(key)
     pos_idxs, neg_idxs, union_idxs = data_buffer.sample_idxs(
-        data_buffer, subkey, num_steps
+        data_buffer, key, num_steps
     )
 
     def body_fun(i, carry):
         (
             _,
-            key,
+            value_model,
+            value_optimizer,
             critic_model_target,
             critic_model,
             critic_optimizer,
@@ -359,8 +390,9 @@ def train_n_steps(
             data_buffer, pos_idxs[i], neg_idxs[i], union_idxs[i]
         )
 
-        key, subkey = jax.random.split(key)
         val = train_step(
+            value_model=value_model,
+            value_optimizer=value_optimizer,
             critic_model_target=critic_model_target,
             critic_model=critic_model,
             critic_optimizer=critic_optimizer,
@@ -370,12 +402,12 @@ def train_n_steps(
             config=config,
             has_positive=has_positive,
             has_negative=has_negative,
-            key=subkey,
         )
 
         return (
             val,
-            key,
+            value_model,
+            value_optimizer,
             critic_model_target,
             critic_model,
             critic_optimizer,
@@ -383,10 +415,11 @@ def train_n_steps(
             policy_optimizer,
         )
 
-    init_val = (jnp.zeros((), dtype=jnp.float32),) * 15
+    init_val = (jnp.zeros((), dtype=jnp.float32),) * 18
     init_carry = (
         init_val,
-        key,
+        value_model,
+        value_optimizer,
         critic_model_target,
         critic_model,
         critic_optimizer,
@@ -428,6 +461,7 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
+    config["alpha"] = args.value_weight_temp or config["value_weight_temp"]
     config["beta"] = args.bc_weight_temp
     config["lmbda"] = args.lmbda
     config["policy_type"] = args.policy_type
@@ -455,6 +489,21 @@ def main(args, cfg_env=None):
     )
     policy_optimizer = nnx.Optimizer(
         model=policy_model,
+        tx=optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(
+                learning_rate=config["lr"], weight_decay=config["weight_decay"]
+            ),
+        ),
+    )
+
+    value_model = EnsembleValue(
+        rngs=rngs,
+        x_dim=obs_space.shape[0],
+        hidden_size=config["hidden_size"],
+    )
+    value_optimizer = nnx.Optimizer(
+        model=value_model,
         tx=optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
             optax.adamw(
@@ -572,6 +621,8 @@ def main(args, cfg_env=None):
     while steps < config["total_iteration"]:
 
         val, num_itr = train_n_steps(
+            value_model=value_model,
+            value_optimizer=value_optimizer,
             critic_model_target=critic_model_target,
             critic_model=critic_model,
             critic_optimizer=critic_optimizer,
@@ -585,6 +636,9 @@ def main(args, cfg_env=None):
         )
 
         (
+            value_loss,
+            value_pos_loss,
+            value_union_loss,
             critic_loss,
             critic_pos_neg_loss,
             critic_pos_union_loss,
@@ -626,6 +680,11 @@ def main(args, cfg_env=None):
 
             logger.log_tabular("Train/Steps", steps)
 
+            logger.log_tabular("Loss/Loss_value", value_loss.item())
+            logger.log_tabular("Loss/Loss_value_pos", value_pos_loss.item())
+            # logger.log_tabular("Loss/Loss_value_neg", value_neg_loss.item())
+            logger.log_tabular("Loss/Loss_value_union", value_union_loss.item())
+
             logger.log_tabular("Loss/Loss_critic", critic_loss.item())
             logger.log_tabular("Loss/Loss_critic_pos_neg", critic_pos_neg_loss.item())
             logger.log_tabular(
@@ -650,6 +709,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Cost/union", mean_union_cost.item())
 
             logger.log_tabular(
+                "Norm/value_model",
+                get_tree_norm(nnx.state(value_model, nnx.Param)),
+            )
+            logger.log_tabular(
                 "Norm/critic_model",
                 get_tree_norm(nnx.state(critic_model, nnx.Param)),
             )
@@ -660,6 +723,11 @@ def main(args, cfg_env=None):
             logger.dump_tabular()
 
         if steps % config["save_freq"] == 0:
+            logger.nn_model_save(
+                itr=steps,
+                nn_model_saver_element=value_model,
+                prefix="value",
+            )
             logger.nn_model_save(
                 itr=steps,
                 nn_model_saver_element=critic_model,
@@ -674,6 +742,7 @@ def main(args, cfg_env=None):
         if steps >= config["total_iteration"]:
             break
 
+    logger.nn_model_save(itr=steps, nn_model_saver_element=value_model, prefix="value")
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=critic_model, prefix="critic"
     )
