@@ -43,7 +43,7 @@ from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_ar
 EPS = 1e-6
 
 default_cfg = {
-    "log_freq": int(1e4),
+    "log_freq": int(1e2),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
@@ -61,7 +61,7 @@ default_cfg = {
     "value_th": 0.85,
     "update_tau": 0.01,
     "weight_decay": 0.01,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e3),
 }
 
 trajectory_cfg = {
@@ -641,10 +641,8 @@ def value_grad_aux_fun(
 
 
 def policy_grad_aux_fun(
-    policy_model, value_model, data, union_mask, pos_scale, union_scale, config
+    policy_model, value_model, data, union_weight, pos_scale, union_scale, config
 ):
-    del union_mask
-
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
@@ -676,12 +674,21 @@ def policy_grad_aux_fun(
     else:
         pi_baseline = config.pi_alpha
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, q, scale):
+    def fwd_kl_loss(policy_model, target_obs, target_act, logw, q, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
 
         # B
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        weight = jnp.exp(jnp.clip((q - pi_baseline) / config.pi_temp, max=5.0))
+        if config.pi_weight_type == "value_based":
+            log_weight = q
+        elif config.pi_weight_type == "score_based":
+            log_weight = logw
+        else:
+            raise ValueError(
+                "Policy weight type should be value_based or score_based. "
+                + f"Given {config.pi_weight_type}."
+            )
+        weight = jnp.exp(jnp.clip((log_weight - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
         # B
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
@@ -698,10 +705,21 @@ def policy_grad_aux_fun(
 
     def loss_fun(policy_model):
         union_loss, union_aux = fwd_kl_loss(
-            policy_model, target_union_obs, target_union_act, union_q, union_scale
+            policy_model,
+            target_union_obs,
+            target_union_act,
+            union_weight,
+            union_q,
+            union_scale,
         )
+        pos_weight = jnp.ones_like(union_weight)
         pos_loss, pos_aux = fwd_kl_loss(
-            policy_model, target_pos_obs, target_pos_act, pos_q, pos_scale
+            policy_model,
+            target_pos_obs,
+            target_pos_act,
+            pos_weight,
+            pos_q,
+            pos_scale,
         )
         loss = union_loss + pos_loss
         return loss, PolicyAux(
@@ -762,7 +780,7 @@ def train_step(
         policy_model=state.models.policy,
         value_model=state.models.value,
         data=batch_data,
-        union_mask=union_mask,  # full union dataset to learn policy
+        union_weight=union_weight,  # pass union weight to learn policy
         pos_scale=1.0 * has_positive,
         union_scale=1.0 * do_warmup,
         config=config,
@@ -930,6 +948,7 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
+    config["pi_weight_type"] = args.policy_weight_type
     config["pi_alpha"] = args.alpha
 
     config["embd_type"] = args.embedding_model_type

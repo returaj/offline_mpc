@@ -361,6 +361,12 @@ def single_agent_args():
             "help": "policy baseline type can be 'constant', 'softer_max', 'mean_std'",
         },
         {
+            "name": "--policy-weight-type",
+            "type": str,
+            "default": "value_based",
+            "help": "policy weight type can be 'value_based', 'score_based'",
+        },
+        {
             "name": "--embedding-model-type",
             "type": str,
             "default": "model_projection",
