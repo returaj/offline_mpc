@@ -21,7 +21,7 @@ from torch.optim.lr_scheduler import LinearLR
 from dsrl_model.utils.bufffer import SafeDiceBuffer
 from dsrl_model.utils.dsrl_dataset import (
     get_dataset_in_d4rl_format,
-    get_neg_and_union_data,
+    get_pos_neg_and_union_data,
 )
 from dsrl_model.utils.logger import EpochLogger
 from dsrl_model.utils.models import (
@@ -62,9 +62,9 @@ trajectory_cfg = {
     "target_cost": 25.0,
     # ((low_cost, low_reward), (high_cost, low_reward), (medium_cost, high_reward))
     "inpaint_ranges": None,
+    "num_positive_trajectories": 0,
     "num_negative_trajectories": 50,
     "num_union_trajectories": -1,
-    "percentage_validation_trajectories": 0.2,
 }
 
 trajectory_data = {
@@ -78,7 +78,6 @@ trajectory_data = {
 def evaluate_bc_policy(eval_env, bc_policy, device, save_video=False):
     eval_done = False
     eval_obs, _ = eval_env.reset()
-    # eval_obs = (eval_obs - mu_obs) / (std_obs + EP)
     eval_obs = torch.as_tensor(eval_obs, dtype=torch.float32, device=device).unsqueeze(
         0
     )
@@ -260,6 +259,7 @@ def main(args, cfg_env=None):
     torch.set_num_threads(4)
     device = torch.device(f"{args.device}:{args.device_id}")
 
+    trajectory_cfg["num_positive_trajectories"] = 0
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
@@ -335,8 +335,12 @@ def main(args, cfg_env=None):
     data = get_dataset_in_d4rl_format(
         eval_env, trajectory_cfg, args.task, ep_len, config["action_repeat"]
     )
-    neg_data, union_data = get_neg_and_union_data(data, trajectory_cfg)
-    # neg_data, union_data, mu_obs, std_obs = get_normalized_data(neg_data, union_data)
+    pos_data, neg_data, union_data = get_pos_neg_and_union_data(
+        data, trajectory_cfg, save_dir=args.log_dir, seed=args.seed
+    )
+
+    del pos_data  # as there is no possitive trajectories
+
     neg_observations = torch.as_tensor(
         neg_data["observations"], dtype=torch.float32, device=device
     )

@@ -2,7 +2,6 @@ import argparse
 from distutils.util import strtobool
 
 import gymnasium
-from flax import struct
 
 
 class ActionRepeater(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
@@ -41,6 +40,8 @@ def get_params_norm(params, grads=False):
 
 
 def make_static_config_from_dict(name: str, d: dict):
+    from flax import struct
+
     annotations = {}
     defaults = {}
 
