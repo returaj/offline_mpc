@@ -652,11 +652,16 @@ def policy_grad_aux_fun(
     # We found that our value function hallucinates for later
     # state-action pairs in the trajectory.
 
-    target_union_obs = data.union_obs[:, 0]
-    target_union_act = data.union_act[:, 0]
-
-    target_pos_obs = data.pos_obs[:, 0]
-    target_pos_act = data.pos_act[:, 0]
+    if config.pi_weight_type == "value_based":
+        target_union_obs = data.union_obs[:, 0]
+        target_union_act = data.union_act[:, 0]
+        target_pos_obs = data.pos_obs[:, 0]
+        target_pos_act = data.pos_act[:, 0]
+    else:
+        target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+        target_union_act = data.union_act.reshape(batch * horizon, -1)
+        target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
+        target_pos_act = data.pos_act.reshape(batch * horizon, -1)
 
     # B
     union_q = jnp.minimum(
@@ -676,13 +681,17 @@ def policy_grad_aux_fun(
 
     def fwd_kl_loss(policy_model, target_obs, target_act, logw, q, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
+        # B / BH
+        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
 
         # B
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
         if config.pi_weight_type == "value_based":
             log_weight = q
         elif config.pi_weight_type == "score_based":
-            log_weight = logw
+            log_weight = logw  # B
+            l2_loss = l2_loss.reshape(batch, horizon)
+            l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
         else:
             raise ValueError(
                 "Policy weight type should be value_based or score_based. "
@@ -690,9 +699,6 @@ def policy_grad_aux_fun(
             )
         weight = jnp.exp(jnp.clip((log_weight - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
-        # B
-        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
-        # union_loss = -v + 0.001 * log_pi  # inverse kl
 
         loss = (weight * l2_loss).mean()
         return loss, PolicyAux.Value(
