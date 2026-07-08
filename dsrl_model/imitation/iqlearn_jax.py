@@ -126,10 +126,9 @@ def policy_loss_grads_fun(
     # Batch X Horizon X obs_dim
     batch, horizon, _ = data.union_obs.shape
 
-    # Batch_Horizon X obs_dim
-    # target_obs = data.pos_obs.reshape(batch * horizon, -1)
-    target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
-    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+    # Batch_(Horizon-1) X obs_dim: mask the last horizon step
+    target_pos_obs = data.pos_obs[:, :-1].reshape(batch * (horizon - 1), -1)
+    target_union_obs = data.union_obs[:, :-1].reshape(batch * (horizon - 1), -1)
     target_obs = jnp.concat([target_pos_obs, target_union_obs], axis=0)
 
     def loss_fun(policy_model):
@@ -194,14 +193,14 @@ def critic_loss_grads_fun(
         return v
 
     def iqlearn_loss(q, v, vnext):
-        # Batch X Horizon
-        reward = mask_last_horizon * (q - gamma * vnext)
+        # Batch X (Horizon-1): mask the last horizon step
+        reward = (q - gamma * vnext)[:, :-1]
         total_pos_reward = batch * (horizon - 1)
         reward_pos_loss = -jnp.sum(pos_idx * reward) / total_pos_reward
-        # Batch X Horizon
-        v0 = mask_last_horizon * (v - gamma * vnext)
+        # Batch X (Horizon-1)
+        v0 = (v - gamma * vnext)[:, :-1]
         value_loss = v0.mean()
-        # Batch X Horizon
+        # Batch X (Horizon-1)
         chi_loss = 1 / (4 * lmbda) * (reward**2).mean()
         loss = reward_pos_loss + value_loss + chi_loss
         return loss, reward_pos_loss, value_loss, chi_loss
