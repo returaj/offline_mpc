@@ -109,7 +109,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
 
         self.logits = nnx.Linear(hidden_size, num_components, rngs=rngs)
         self.means = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
-        self.logstds = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
+        # self.logstds = nnx.Linear(hidden_size, num_components * act_dim, rngs=rngs)
+        self.logstds = nnx.Param(jnp.full((num_components, act_dim), -2.0))
 
     def get_pretanh_action_dist(self, obs):
         x = self.pre_encoder(obs)
@@ -117,8 +118,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         mixture_logits = self.logits(x) / self.mdn_temp
         means = jnp.clip(self.means(x), self.mean_min, self.mean_max)
         means = means.reshape(-1, self.num_components, self.act_dim)
-        logstds = jnp.clip(self.logstds(x), self.logstd_min, self.logstd_max)
-        logstds = logstds.reshape(-1, self.num_components, self.act_dim)
+        logstds = jnp.clip(self.logstds, self.logstd_min, self.logstd_max)
+        logstds = jnp.broadcast_to(logstds, means.shape)
         stds = jnp.exp(logstds)
 
         mixture_dist = distrax.Categorical(logits=mixture_logits)
@@ -171,8 +172,8 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         mixture_logits = self.logits(x) / self.mdn_temp
         means = jnp.clip(self.means(x), self.mean_min, self.mean_max)
         means = means.reshape(-1, self.num_components, self.act_dim)
-        logstds = jnp.clip(self.logstds(x), self.logstd_min, self.logstd_max)
-        logstds = logstds.reshape(-1, self.num_components, self.act_dim)
+        logstds = jnp.clip(self.logstds, self.logstd_min, self.logstd_max)
+        logstds = jnp.broadcast_to(logstds, means.shape)
         stds = jnp.exp(logstds)
 
         mixture_dist = distrax.Categorical(logits=mixture_logits)
