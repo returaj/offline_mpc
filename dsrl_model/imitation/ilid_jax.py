@@ -42,12 +42,12 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 10.0,
+    "max_grad_norm": 5.0,
     "decay": 0.9,
     "alpha": 1.0,
     "lmbda": 0.85,
     "pu_nu": 0.9,
-    "rollback": 20,
+    "rollback": 10,
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 1,
     "weight_decay": 0.01,
@@ -150,11 +150,20 @@ def policy_loss_grads_fun(
     union_weight = data.union_weight.reshape((batch * horizon,))
 
     def loss_fun(policy_model):
-        # Batch_Horizon,
-        logp_pos = policy_model.get_log_prob(pos_obs, pos_act)
-        logp_union = union_weight * policy_model.get_log_prob(union_obs, union_act)
-        loss = -alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
-        return loss, (union_weight.min(), union_weight.mean(), union_weight.max())
+        # # Batch_Horizon,
+        # logp_pos = policy_model.get_log_prob(pos_obs, pos_act)
+        # logp_union = union_weight * policy_model.get_log_prob(union_obs, union_act)
+        # loss = -alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
+
+        pred_pos_act, logp_pos, *_ = policy_model(pos_obs)
+        loss_pos = optax.l2_loss(pred_pos_act, pos_act).sum(-1).mean()
+        pred_union_act, logp_union, *_ = policy_model(union_obs)
+        loss_union = (
+            union_weight * optax.l2_loss(pred_union_act, union_act).sum(-1)
+        ).mean()
+        loss = alpha * loss_pos + loss_union
+
+        return loss, (union_weight.mean(), -logp_pos.mean(), -logp_union.mean())
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
     (loss, aux_value), grads = grad_fun(policy_model)
@@ -627,9 +636,9 @@ def main(args, cfg_env=None):
             alpha_loss,
             alpha,
             policy_loss,
-            policy_weight_min,
             policy_weight_mean,
-            policy_weight_max,
+            policy_logp_pos,
+            policy_logp_union,
         ) = val
 
         steps += num_itr
@@ -644,14 +653,10 @@ def main(args, cfg_env=None):
             logger.log_tabular("Value/alpha", alpha.item())
             logger.log_tabular("Value/log_pi_baseline", log_pi_baseline.item())
             logger.log_tabular(
-                "Value/policy_union_weight_min", policy_weight_min.item()
-            )
-            logger.log_tabular(
                 "Value/policy_union_weight_mean", policy_weight_mean.item()
             )
-            logger.log_tabular(
-                "Value/policy_union_weight_max", policy_weight_max.item()
-            )
+            logger.log_tabular("Value/policy_union_logp", policy_logp_union.item())
+            logger.log_tabular("Value/policy_pos_logp", policy_logp_pos.item())
 
             logger.log_tabular(
                 "Norm/discriminator_model",
