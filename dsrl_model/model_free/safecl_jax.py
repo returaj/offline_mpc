@@ -49,7 +49,8 @@ default_cfg = {
     "hidden_size": 256,
     "embd_size": 128,
     "max_grad_norm": 5.0,
-    "gamma": 0.99,
+    "gamma": 0.9,  # for trajectory based policy learning
+    "lmbda": 0.99,  # for weight decay in score function
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "embd_freq": int(5e2),
@@ -641,10 +642,8 @@ def value_grad_aux_fun(
 
 
 def policy_grad_aux_fun(
-    policy_model, value_model, data, union_mask, pos_scale, union_scale, config
+    policy_model, value_model, data, union_weight, pos_scale, union_scale, config
 ):
-    del union_mask
-
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
@@ -654,11 +653,16 @@ def policy_grad_aux_fun(
     # We found that our value function hallucinates for later
     # state-action pairs in the trajectory.
 
-    target_union_obs = data.union_obs[:, 0]
-    target_union_act = data.union_act[:, 0]
-
-    target_pos_obs = data.pos_obs[:, 0]
-    target_pos_act = data.pos_act[:, 0]
+    if config.pi_weight_type == "value_based":
+        target_union_obs = data.union_obs[:, 0]
+        target_union_act = data.union_act[:, 0]
+        target_pos_obs = data.pos_obs[:, 0]
+        target_pos_act = data.pos_act[:, 0]
+    else:
+        target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+        target_union_act = data.union_act.reshape(batch * horizon, -1)
+        target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
+        target_pos_act = data.pos_act.reshape(batch * horizon, -1)
 
     # B
     union_q = jnp.minimum(
@@ -676,16 +680,26 @@ def policy_grad_aux_fun(
     else:
         pi_baseline = config.pi_alpha
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, q, scale):
+    def fwd_kl_loss(policy_model, target_obs, target_act, logw, q, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
+        # B / BH
+        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
 
         # B
         v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        weight = jnp.exp(jnp.clip((q - pi_baseline) / config.pi_temp, max=5.0))
+        if config.pi_weight_type == "value_based":
+            log_weight = q
+        elif config.pi_weight_type == "score_based":
+            log_weight = logw  # B
+            l2_loss = l2_loss.reshape(batch, horizon)
+            l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
+        else:
+            raise ValueError(
+                "Policy weight type should be value_based or score_based. "
+                + f"Given {config.pi_weight_type}."
+            )
+        weight = jnp.exp(jnp.clip((log_weight - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
-        # B
-        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
-        # union_loss = -v + 0.001 * log_pi  # inverse kl
 
         loss = (weight * l2_loss).mean()
         return loss, PolicyAux.Value(
@@ -698,10 +712,21 @@ def policy_grad_aux_fun(
 
     def loss_fun(policy_model):
         union_loss, union_aux = fwd_kl_loss(
-            policy_model, target_union_obs, target_union_act, union_q, union_scale
+            policy_model,
+            target_union_obs,
+            target_union_act,
+            union_weight,
+            union_q,
+            union_scale,
         )
+        pos_weight = jnp.ones_like(union_weight)
         pos_loss, pos_aux = fwd_kl_loss(
-            policy_model, target_pos_obs, target_pos_act, pos_q, pos_scale
+            policy_model,
+            target_pos_obs,
+            target_pos_act,
+            pos_weight,
+            pos_q,
+            pos_scale,
         )
         loss = union_loss + pos_loss
         return loss, PolicyAux(
@@ -762,7 +787,7 @@ def train_step(
         policy_model=state.models.policy,
         value_model=state.models.value,
         data=batch_data,
-        union_mask=union_mask,  # full union dataset to learn policy
+        union_weight=union_weight,  # pass union weight to learn policy
         pos_scale=1.0 * has_positive,
         union_scale=1.0 * do_warmup,
         config=config,
@@ -859,7 +884,7 @@ def train_n_steps(
         )
 
         new_weight = (
-            train_aux.weight * config.gamma
+            train_aux.weight * config.lmbda
             if config.use_weight_decay
             else 1.0 - sink_bimodality_ema
         )
@@ -930,6 +955,7 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
+    config["pi_weight_type"] = args.policy_weight_type
     config["pi_alpha"] = args.alpha
 
     config["embd_type"] = args.embedding_model_type
