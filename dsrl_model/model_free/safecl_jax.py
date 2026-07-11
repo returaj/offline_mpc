@@ -49,7 +49,8 @@ default_cfg = {
     "hidden_size": 256,
     "embd_size": 128,
     "max_grad_norm": 5.0,
-    "gamma": 0.99,
+    "gamma": 0.9,  # for trajectory based policy learning
+    "lmbda": 0.99,  # for weight decay in score function
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 500,  # 20
     "embd_freq": int(5e2),
@@ -883,7 +884,7 @@ def train_n_steps(
         )
 
         new_weight = (
-            train_aux.weight * config.gamma
+            train_aux.weight * config.lmbda
             if config.use_weight_decay
             else 1.0 - sink_bimodality_ema
         )
