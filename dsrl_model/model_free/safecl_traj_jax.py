@@ -47,19 +47,17 @@ default_cfg = {
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "embd_size": 128,
+    "embd_size": 64,
     "max_grad_norm": 5.0,
     "gamma": 0.9,  # for trajectory based policy learning
     "lmbda": 0.99,  # for weight decay in score function
     "action_repeat": 1,  # set to 2, min value is 1
-    "train_horizon": 500,  # 20
-    "embd_freq": int(5e2),
+    "train_horizon": 50,  # 50
+    "embd_freq": 1000,
     "warmup_steps": int(5e4),
-    "decay": 0.999,
-    "pi_temp": 0.5,
-    "value_temp": 0.1,
-    "value_limit": 0.85,
-    "value_th": 0.85,
+    "decay": 0.999,  # exponential moving average decay
+    "pi_temp": 0.2,
+    "value_limit": 0.90,
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
@@ -83,20 +81,16 @@ trajectory_data = {
 
 
 class Models(nnx.Module):
-    def __init__(
-        self, curriculum_embedding, embedding_target, embedding, value, policy
-    ):
+    def __init__(self, curriculum_embedding, embedding_target, embedding, policy):
         self.curriculum_embedding = curriculum_embedding
         self.embedding_target = embedding_target
         self.embedding = embedding
-        self.value = value
         self.policy = policy
 
 
 class Optimizers(nnx.Module):
-    def __init__(self, embedding, value, policy):
+    def __init__(self, embedding, policy):
         self.embedding = embedding
-        self.value = value
         self.policy = policy
 
 
@@ -148,19 +142,6 @@ class UnionSinkAux:
 
 
 @struct.dataclass
-class ValueAux:
-    loss: float = 0.0
-    pos_loss: float = 0.0
-    neg_loss: float = 0.0
-    random_loss: float = 0.0
-    union_loss: float = 0.0
-    pos_value: float = 0.0
-    neg_value: float = 0.0
-    random_value: float = 0.0
-    union_value: float = 0.0
-
-
-@struct.dataclass
 class EmbeddingAux:
     loss: float = 0.0
     pos_loss: float = 0.0
@@ -178,8 +159,6 @@ class PolicyAux:
     @struct.dataclass
     class Value:
         loss: float = 0.0
-        q: float = 0.0
-        v: float = 0.0
         weight: float = 0.0
         entropy: float = 0.0
 
@@ -558,154 +537,46 @@ def embedding_grad_aux_fun(
     return grads, embd_aux
 
 
-def value_grad_aux_fun(
-    value_model,
-    union_mask,
-    union_weight,
-    data,
-    config,
-    pos_scale,
-    neg_scale,
-    union_scale,
-    key,
-):
-    # Value model learns the preferred state-action pair score
-    pref_sign = jnp.where(config.pos_label > 0, 1.0, -1.0)
-
-    # Batch X obs/act_dim
-    target_pos = jnp.concat([data.pos_obs[:, 0], data.pos_act[:, 0]], axis=-1)
-    target_neg = jnp.concat([data.neg_obs[:, 0], data.neg_act[:, 0]], axis=-1)
-
-    # union data
-    target_union_obs, target_union_act = data.union_obs[:, 0], data.union_act[:, 0]
-    target_union = jnp.concat([target_union_obs, target_union_act], axis=-1)
-
-    key1, key2 = jax.random.split(key, num=2)
-    mix_p1 = jax.random.uniform(key=key1, shape=target_union.shape)
-    target_shuffle_union = jax.random.permutation(key2, target_union, axis=0)
-    target_random = mix_p1 * target_shuffle_union + (1 - mix_p1) * target_union
-
-    pos_weight = pref_sign * config.pos_label * jnp.ones_like(union_weight)
-    neg_weight = pref_sign * config.neg_label * jnp.ones_like(union_weight)
-    random_weight = jnp.zeros_like(union_weight)
-    union_weight = pref_sign * union_weight
-
-    full_mask = jnp.ones_like(union_mask)
-
-    def xql_rescale_loss(value_model, mask, score, x, scale):
-        # Batch
-        v1, v2 = value_model(x)
-        v1_z, v2_z = (score - v1) / config.value_temp, (score - v2) / config.value_temp
-
-        max_z = jnp.maximum(v1_z, v2_z).max()
-        max_z = jnp.where(max_z < -1.0, -1.0, max_z)
-        # scale by e^max_z
-        # Detach the gradients is important as loss function is getting changed
-        max_z = jax.lax.stop_gradient(max_z)
-        loss_v1 = jnp.exp(v1_z - max_z) - v1_z * jnp.exp(-max_z) - jnp.exp(-max_z)
-        loss_v2 = jnp.exp(v2_z - max_z) - v2_z * jnp.exp(-max_z) - jnp.exp(-max_z)
-
-        mask_count = jnp.clip(mask.sum(), min=1.0)
-        loss = scale * (mask * (loss_v1 + loss_v2)).sum() / mask_count
-        value = scale * (mask * jnp.minimum(v1, v2)).sum() / mask_count
-        return loss, value
-
-    def loss_fun(value_model):
-        pos_loss, pos_value = xql_rescale_loss(
-            value_model, full_mask, pos_weight, target_pos, pos_scale
-        )
-        neg_loss, neg_value = xql_rescale_loss(
-            value_model, full_mask, neg_weight, target_neg, neg_scale
-        )
-        random_loss, random_value = xql_rescale_loss(
-            value_model, full_mask, random_weight, target_random, 1.0
-        )
-        union_loss, union_value = xql_rescale_loss(
-            value_model, union_mask, union_weight, target_union, union_scale
-        )
-        loss = pos_loss + neg_loss + union_loss
-        return loss, ValueAux(
-            loss=loss,
-            pos_loss=pos_loss,
-            neg_loss=neg_loss,
-            random_loss=random_loss,
-            union_loss=union_loss,
-            pos_value=pos_value,
-            neg_value=neg_value,
-            random_value=random_value,
-            union_value=union_value,
-        )
-
-    grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
-    (loss, aux), grads = grad_fun(value_model)
-    return grads, aux
-
-
 def policy_grad_aux_fun(
-    policy_model, value_model, data, union_weight, pos_scale, union_scale, config
+    policy_model, data, union_weight, pos_scale, union_scale, config
 ):
     batch, horizon, _ = data.union_obs.shape
 
     # B X obs/act_dim
     # only consider the first state-action pair as
-    # our value function may not be trained enough to
+    # our the other parts of the trajectory may not be trained enough to
     # judge the state-action pair for later trajectory pair.
-    # We found that our value function hallucinates for later
-    # state-action pairs in the trajectory.
+    # We found that we can control the later pair of the trajectory
+    # by controlling gamma.
 
-    if config.pi_weight_type == "value_based":
-        target_union_obs = data.union_obs[:, 0]
-        target_union_act = data.union_act[:, 0]
-        target_pos_obs = data.pos_obs[:, 0]
-        target_pos_act = data.pos_act[:, 0]
-    else:
-        target_union_obs = data.union_obs.reshape(batch * horizon, -1)
-        target_union_act = data.union_act.reshape(batch * horizon, -1)
-        target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
-        target_pos_act = data.pos_act.reshape(batch * horizon, -1)
-
-    # B
-    union_q = jnp.minimum(
-        *value_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
-    )
-    pos_q = jnp.minimum(
-        *value_model(jnp.concat([target_pos_obs, target_pos_act], axis=-1))
-    )
+    # BH X obs/act_dim
+    target_union_obs = data.union_obs.reshape(batch * horizon, -1)
+    target_union_act = data.union_act.reshape(batch * horizon, -1)
+    target_pos_obs = data.pos_obs.reshape(batch * horizon, -1)
+    target_pos_act = data.pos_act.reshape(batch * horizon, -1)
 
     # scalar
     if config.pi_baseline_type == "softer_max":
-        pi_baseline = softer_max(union_q, config.pi_temp)
+        pi_baseline = softer_max(union_weight, config.pi_temp)
     elif config.pi_baseline_type == "mean_std":
-        pi_baseline = union_q.mean() + config.pi_alpha * union_q.std()
+        pi_baseline = union_weight.mean() + config.pi_alpha * union_weight.std()
     else:
         pi_baseline = config.pi_alpha
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, logw, q, scale):
+    def fwd_kl_loss(policy_model, target_obs, target_act, logw, scale):
         pred_act, log_pi, *_ = policy_model(target_obs)
-        # B / BH
+        # BH
         l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
+        l2_loss = l2_loss.reshape(batch, horizon)  # B X H
+        l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
 
         # B
-        v = jnp.minimum(*value_model(jnp.concat([target_obs, pred_act], axis=-1)))
-        if config.pi_weight_type == "value_based":
-            log_weight = q
-        elif config.pi_weight_type == "score_based":
-            log_weight = logw  # B
-            l2_loss = l2_loss.reshape(batch, horizon)
-            l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
-        else:
-            raise ValueError(
-                "Policy weight type should be value_based or score_based. "
-                + f"Given {config.pi_weight_type}."
-            )
-        weight = jnp.exp(jnp.clip((log_weight - pi_baseline) / config.pi_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
 
         loss = (weight * l2_loss).mean()
         return loss, PolicyAux.Value(
             loss=loss,
-            q=q.mean(),
-            v=v.mean(),
             weight=weight.mean(),
             entropy=-log_pi.mean(),
         )
@@ -716,7 +587,6 @@ def policy_grad_aux_fun(
             target_union_obs,
             target_union_act,
             union_weight,
-            union_q,
             union_scale,
         )
         pos_weight = jnp.ones_like(union_weight)
@@ -725,7 +595,6 @@ def policy_grad_aux_fun(
             target_pos_obs,
             target_pos_act,
             pos_weight,
-            pos_q,
             pos_scale,
         )
         loss = union_loss + pos_loss
@@ -744,8 +613,6 @@ def policy_grad_aux_fun(
 def train_step(
     state, batch_data, config, train_aux, has_positive, has_negative, do_warmup, key
 ):
-    key1, key2 = jax.random.split(key, num=2)
-
     union_score, union_weight, union_sink_aux = get_union_sink(
         curriculum_embedding_model=state.models.curriculum_embedding,
         embedding_model=state.models.embedding_target,
@@ -764,28 +631,12 @@ def train_step(
         pos_scale=1.0 * has_positive,
         neg_scale=1.0 * has_negative,
         union_scale=1.0 * do_warmup,  # convert into float type
-        key=key1,
+        key=key,
     )
     state.optimizers.embedding.update(embedding_grads)
 
-    # Allow full union dataset to learn value
-    union_mask = jnp.ones_like(union_weight)
-    value_grads, value_aux = value_grad_aux_fun(
-        value_model=state.models.value,
-        union_mask=union_mask,
-        union_weight=union_weight,
-        data=batch_data,
-        config=config,
-        pos_scale=1.0 * has_positive,
-        neg_scale=1.0 * has_negative,
-        union_scale=1.0 * do_warmup,
-        key=key2,
-    )
-    state.optimizers.value.update(value_grads)
-
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=state.models.policy,
-        value_model=state.models.value,
         data=batch_data,
         union_weight=union_weight,  # pass union weight to learn policy
         pos_scale=1.0 * has_positive,
@@ -807,7 +658,6 @@ def train_step(
         union_weight,
         union_sink_aux,
         embedding_aux,
-        value_aux,
         policy_aux,
         data_aux,
     )
@@ -914,7 +764,7 @@ def train_n_steps(
         state,
         data_buffer,
         train_aux,
-        (UnionSinkAux(), EmbeddingAux(), ValueAux(), PolicyAux(), DataAux()),
+        (UnionSinkAux(), EmbeddingAux(), PolicyAux(), DataAux()),
     )
     _, _, data_buffer, train_aux, val_aux = nnx.fori_loop(
         0, num_steps, body_fun, init_carry
@@ -925,6 +775,16 @@ def train_n_steps(
 
 
 def main(args, cfg_env=None):
+    """
+    This code is exactly same as safecl_jax with policy_weight_type set to "score_based".
+    In this file we have removed value model training as in the original file training based
+    on score_based lead to unused value model training. We created this file to remove unused
+    models and its training component.
+
+    This file directly trains the policy using the embedding decayed weights. No value training
+    is required here. However we may want to choose to set the gamma, lmbda to control the procedure.
+    """
+
     # set the random seed, device and number of threads
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -955,7 +815,6 @@ def main(args, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
-    config["pi_weight_type"] = args.policy_weight_type
     config["pi_alpha"] = args.alpha
 
     config["embd_type"] = args.embedding_model_type
@@ -963,7 +822,6 @@ def main(args, cfg_env=None):
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["normalize_observation"] = args.normalize_observation
     config["value_limit"] = args.value_weight_limit or config["value_limit"]
-    config["value_temp"] = args.value_weight_temp or config["value_temp"]
     config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
     config["embd_freq"] = args.embd_freq or config["embd_freq"]
     config["embd_size"] = args.embd_size or config["embd_size"]
@@ -971,6 +829,8 @@ def main(args, cfg_env=None):
     config["neg_label"] = args.non_preferred_label
     config["use_weight_decay"] = args.use_weight_decay
     config["lr"] = args.lr
+    config["lmbda"] = args.lmbda or config["lmbda"]
+    config["gamma"] = args.gamma or config["gamma"]
     config["pos_neg_ratio"] = jnp.maximum(args.num_preferred, 1.0) / jnp.maximum(
         args.num_non_preferred, 1.0
     )
@@ -1070,32 +930,15 @@ def main(args, cfg_env=None):
         do_residual=False,
     )
 
-    value_model = EnsembleValue(
-        rngs=rngs,
-        x_dim=obs_space.shape[0] + act_space.shape[0],
-        hidden_size=config["hidden_size"],
-    )
-    value_optimizer = nnx.Optimizer(
-        model=value_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
-    )
-
     state = TrainingState(
         models=Models(
             curriculum_embedding=curriculum_embedding_model,
             embedding_target=embedding_model_target,
             embedding=embedding_model,
-            value=value_model,
             policy=policy_model,
         ),
         optimizers=Optimizers(
             embedding=embedding_optimizer,
-            value=value_optimizer,
             policy=policy_optimizer,
         ),
     )
@@ -1200,7 +1043,6 @@ def main(args, cfg_env=None):
             train_aux,
             sink_aux,
             embd_aux,
-            value_aux,
             policy_aux,
             data_aux,
         ) = train_n_steps(
@@ -1226,11 +1068,6 @@ def main(args, cfg_env=None):
         logger.log_tabular("Loss/embd_neg", embd_aux.neg_loss.item())
         logger.log_tabular("Loss/embd_union", embd_aux.union_loss.item())
         logger.log_tabular("Loss/embd_random", embd_aux.random_loss.item())
-        logger.log_tabular("Loss/value", value_aux.loss.item())
-        logger.log_tabular("Loss/value_pos", value_aux.pos_loss.item())
-        logger.log_tabular("Loss/value_neg", value_aux.neg_loss.item())
-        logger.log_tabular("Loss/value_random", value_aux.random_loss.item())
-        logger.log_tabular("Loss/value_union", value_aux.union_loss.item())
         logger.log_tabular("Loss/pi_union", policy_aux.union.loss.item())
         logger.log_tabular("Loss/pi_pos", policy_aux.pos.loss.item())
 
@@ -1251,17 +1088,9 @@ def main(args, cfg_env=None):
         logger.log_tabular("Mean/embd_neg_score", embd_aux.neg_score.item())
         logger.log_tabular("Mean/embd_union_score", embd_aux.union_score.item())
         logger.log_tabular("Mean/embd_random_score", embd_aux.random_score.item())
-        logger.log_tabular("Mean/value_pos", value_aux.pos_value.item())
-        logger.log_tabular("Mean/value_neg", value_aux.neg_value.item())
-        logger.log_tabular("Mean/value_random", value_aux.random_value.item())
-        logger.log_tabular("Mean/value_union", value_aux.union_value.item())
         logger.log_tabular("Mean/decay_weight", train_aux.weight.item())
-        logger.log_tabular("Mean/pi_union_q", policy_aux.union.q.item())
-        logger.log_tabular("Mean/pi_union_v", policy_aux.union.v.item())
         logger.log_tabular("Mean/pi_union_weight", policy_aux.union.weight.item())
         logger.log_tabular("Mean/pi_union_entropy", policy_aux.union.entropy.item())
-        logger.log_tabular("Mean/pi_pos_q", policy_aux.pos.q.item())
-        logger.log_tabular("Mean/pi_pos_v", policy_aux.pos.v.item())
         logger.log_tabular("Mean/pi_pos_weight", policy_aux.pos.weight.item())
         logger.log_tabular("Mean/pi_pos_entropy", policy_aux.pos.entropy.item())
         logger.log_tabular("Mean/pi_baseline", policy_aux.pi_baseline.item())
@@ -1304,10 +1133,6 @@ def main(args, cfg_env=None):
             get_tree_norm(nnx.state(embedding_model, nnx.Param)),
         )
         logger.log_tabular(
-            "Norm/value_model",
-            get_tree_norm(nnx.state(value_model, nnx.Param)),
-        )
-        logger.log_tabular(
             "Norm/policy_model",
             get_tree_norm(nnx.state(policy_model, nnx.Param)),
         )
@@ -1327,11 +1152,6 @@ def main(args, cfg_env=None):
             )
             logger.nn_model_save(
                 itr=steps,
-                nn_model_saver_element=value_model,
-                prefix="value",
-            )
-            logger.nn_model_save(
-                itr=steps,
                 nn_model_saver_element=policy_model,
                 prefix="bc_policy",
             )
@@ -1347,7 +1167,6 @@ def main(args, cfg_env=None):
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=embedding_model, prefix="embedding"
     )
-    logger.nn_model_save(itr=steps, nn_model_saver_element=value_model, prefix="value")
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=policy_model, prefix="bc_policy"
     )

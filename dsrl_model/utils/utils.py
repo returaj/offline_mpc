@@ -158,6 +158,12 @@ def single_agent_args():
             "help": "hyperparameter lambda value",
         },
         {
+            "name": "--gamma",
+            "type": float,
+            "default": None,  # 1e-3 performs better
+            "help": "hyperparameter lambda value",
+        },
+        {
             "name": "--cost-weight-temp",
             "type": float,
             "default": None,
