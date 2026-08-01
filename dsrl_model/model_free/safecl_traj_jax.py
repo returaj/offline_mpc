@@ -18,6 +18,7 @@ import numpy as np
 import optax
 from flax import nnx, struct
 from jax import debug
+from matplotlib.colors import LinearSegmentedColormap
 
 from dsrl_model.utils.buffer_jax import SafeCLBuffer
 from dsrl_model.utils.dsrl_dataset import (
@@ -258,20 +259,32 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
     # Custom colormap: purple to orange
     neg_limit, pos_limit = min(min(weights), -0.01), max(max(weights), 0.01)
     norm = mcolors.TwoSlopeNorm(vmin=neg_limit, vcenter=0, vmax=pos_limit)
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(2.5, 1.6))
 
     pos_mask = weights > 0
     neg_mask = weights <= 0
+
+    cmap = LinearSegmentedColormap.from_list(
+        "preference",
+        [
+            "#D97662",  # Non-Preferred (coral)
+            "#F8E9E5",  # very light coral
+            "#FFFFFF",  # zero
+            "#FBE7B2",  # very light orange
+            "#E69F00",  # Preferred (orange)
+        ],
+        N=256,
+    )
 
     # Positive preferences: circles
     sc_pos = ax.scatter(
         np.array(costs)[pos_mask],
         np.array(rewards)[pos_mask],
         c=weights[pos_mask],
-        cmap="PuOr",
+        cmap=cmap,
         norm=norm,
         marker="o",
-        s=80,
+        s=25,
         edgecolors="black",
         linewidths=0.5,
         label="Positive",
@@ -282,24 +295,35 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
         np.array(costs)[neg_mask],
         np.array(rewards)[neg_mask],
         c=weights[neg_mask],
-        cmap="PuOr",
+        cmap=cmap,
         norm=norm,
         marker="x",
-        s=80,
-        linewidths=1.5,
+        s=25,
+        linewidths=1.0,
         label="Negative",
     )
-
-    # sc = ax.scatter(costs, rewards, c=weights, cmap="PuOr", norm=norm)
-
     cbar = fig.colorbar(sc_pos, ax=ax)
-    cbar.set_label("Preference")
 
-    ax.set_xlabel("Traj. Cost")
-    ax.set_ylabel("Traj. Reward")
-    ax.set_title(f"Preference Plot ({env_name})")
-    ax.legend()
-    fig.savefig(save_plot, dpi=300, bbox_inches="tight")
+    # sc = ax.scatter(
+    #     costs,
+    #     rewards,
+    #     c=weights,
+    #     cmap=cmap,
+    #     norm=norm,
+    #     marker="o",
+    #     s=25,
+    #     edgecolors="black",
+    #     linewidths=0.5,
+    # )
+    # cbar = fig.colorbar(sc, ax=ax)
+
+    cbar.set_label("weights", fontsize=10)
+
+    ax.set_xlabel("Traj. Cost", fontsize=10)
+    ax.set_ylabel("Traj. Reward", fontsize=10)
+    # ax.set_title(f"Preference Plot ({env_name})", fontsize=10)
+    # ax.legend()
+    fig.savefig(save_plot, format="svg", dpi=300, bbox_inches="tight")
 
 
 @jax.jit
@@ -1143,7 +1167,7 @@ def main(args, cfg_env=None):
                 data_buffer=data_buffer,
                 num_trajs=args.num_union,
                 env_name=env_name,
-                save_plot=f"{args.log_dir}/weight_dataset_{steps}_{args.seed}.png",
+                save_plot=f"{args.log_dir}/weight_dataset_{steps}_{args.seed}.svg",
             )
             logger.nn_model_save(
                 itr=steps,
@@ -1179,7 +1203,7 @@ def main(args, cfg_env=None):
         data_buffer=data_buffer,
         num_trajs=args.num_union,
         env_name=env_name,
-        save_plot=f"{args.log_dir}/weight_dataset_{args.seed}.png",
+        save_plot=f"{args.log_dir}/weight_dataset_{args.seed}.svg",
     )
 
     logger.close()
