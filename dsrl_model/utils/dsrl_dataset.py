@@ -313,7 +313,7 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
     has_positive = len(pos_idxs) > 0
     has_negative = len(neg_idxs) > 0
 
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(2.5, 2.2))
 
     traj_rewards = d4rl_data["rewards"].sum(1)
     traj_costs = d4rl_data["costs"].sum(1)
@@ -326,7 +326,9 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
         traj_costs[union_idxs],
         traj_rewards[union_idxs],
         "o",
-        color="lightblue",
+        markerfacecolor="#E6E6E6",  # gray
+        markeredgecolor="#808080",
+        markeredgewidth=1.0,
         label=f"union_{num_union_data}",
     )
     print(f"Number of union trajectory dataset: {num_union_data}")
@@ -344,7 +346,9 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
             traj_costs[pos_idxs],
             traj_rewards[pos_idxs],
             "o",
-            color="darkgreen",
+            markerfacecolor="#0072B2",  # blue (Okabe–Ito)
+            markeredgecolor="#808080",
+            markeredgewidth=1.0,
             label=f"pos_{num_pos_data}",
         )
         print(f"Number of positive trajectory dataset: {num_pos_data}")
@@ -362,7 +366,9 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
             traj_costs[neg_idxs],
             traj_rewards[neg_idxs],
             "o",
-            color="darkred",
+            markerfacecolor="#D97662",  # red (coral)
+            markeredgecolor="#808080",
+            markeredgewidth=1.0,
             label=f"neg_{num_neg_data}",
         )
         print(f"Number of negative trajectory dataset: {num_neg_data}")
@@ -372,13 +378,13 @@ def get_pos_neg_and_union_data(d4rl_data, config, save_dir=".", seed=0):
         )
         print(f"Avg negative trajectory cost/reward: {neg_cost:.3f}/{neg_reward:.3f}")
 
-    ax.set_title(f"Sampled Dataset ({config['data_inpaint']})")
-    ax.set_xlabel("Traj Cost")
-    ax.set_ylabel("Traj Reward")
-    ax.legend(loc="lower right")
+    ax.set_title(f"Sampled Dataset ({config['data_inpaint']})", fontsize=10)
+    ax.set_xlabel("Traj Cost", fontsize=10)
+    ax.set_ylabel("Traj Reward", fontsize=10)
+    ax.legend(loc="lower right", fontsize=10)
 
     os.makedirs(save_dir, exist_ok=True)
-    fig.savefig(f"{save_dir}/sampled_dataset_{seed}.png", bbox_inches="tight")
+    fig.savefig(f"{save_dir}/sampled_dataset_{seed}.svg", bbox_inches="tight")
 
     return pos_data, neg_data, union_data
 

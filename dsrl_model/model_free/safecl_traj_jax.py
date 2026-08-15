@@ -270,8 +270,8 @@ def plot_weighted_trajectory_data(data_buffer, num_trajs, env_name, save_plot):
             "#D97662",  # Non-Preferred (coral)
             "#F8E9E5",  # very light coral
             "#FFFFFF",  # zero
-            "#FBE7B2",  # very light orange
-            "#E69F00",  # Preferred (orange)
+            "#DCEAF7",  # very light blue
+            "#0072B2",  # Preferred (blue)
         ],
         N=256,
     )
