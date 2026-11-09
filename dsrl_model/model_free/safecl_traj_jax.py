@@ -541,9 +541,7 @@ def embedding_grad_aux_fun(
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
-        loss = (1.0 - union_scale) * (
-            pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
-        )
+        loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
 
         return loss, EmbeddingAux(
             loss=loss,
@@ -648,18 +646,20 @@ def train_step(
         config=config,
     )
 
-    embedding_grads, embedding_aux = embedding_grad_aux_fun(
-        curriculum_embedding_model=state.models.curriculum_embedding,
-        embedding_model=state.models.embedding,
-        data=batch_data,
-        target_union_score=union_score,
-        config=config,
-        pos_scale=1.0 * has_positive,
-        neg_scale=1.0 * has_negative,
-        union_scale=1.0 * do_warmup,  # convert into float type
-        key=key,
-    )
-    state.optimizers.embedding.update(embedding_grads)
+    embedding_aux = EmbeddingAux()
+    if not do_warmup:
+        embedding_grads, embedding_aux = embedding_grad_aux_fun(
+            curriculum_embedding_model=state.models.curriculum_embedding,
+            embedding_model=state.models.embedding,
+            data=batch_data,
+            target_union_score=union_score,
+            config=config,
+            pos_scale=1.0 * has_positive,
+            neg_scale=1.0 * has_negative,
+            union_scale=1.0 * do_warmup,  # convert into float type
+            key=key,
+        )
+        state.optimizers.embedding.update(embedding_grads)
 
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=state.models.policy,
