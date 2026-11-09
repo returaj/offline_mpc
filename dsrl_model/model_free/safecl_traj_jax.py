@@ -596,7 +596,7 @@ def policy_grad_aux_fun(
 
         # B
         if config.pi_weight == 'binary':
-            weight = logw
+            weight = jnp.where(logw > 0, 1.0, 0.0)
         else:
             weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
