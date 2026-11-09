@@ -391,6 +391,12 @@ def single_agent_args():
             "default": False,
             "help": "SafeCL whether to use weight decay or percentage based",
         },
+        {
+            "name": "--num-embd-updates",
+            "type": int,
+            "default": 100_000,
+            "help": "number of embedding updates required",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

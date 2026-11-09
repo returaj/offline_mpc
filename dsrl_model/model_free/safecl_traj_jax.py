@@ -105,6 +105,7 @@ class TrainingState(nnx.Module):
 class TrainAux:
     weight: float = 0.0
     num_embd_updates: float = 0.0
+    num_embd_updates_after_warmup: float = 0.0
     embd_freq: float = 0.0
     num_itr: float = 0.0
 
@@ -595,10 +596,7 @@ def policy_grad_aux_fun(
         l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
 
         # B
-        if config.pi_weight == 'binary':
-            weight = logw
-        else:
-            weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
+        weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
 
         loss = (weight * l2_loss).mean()
@@ -640,6 +638,8 @@ def policy_grad_aux_fun(
 def train_step(
     state, batch_data, config, train_aux, has_positive, has_negative, do_warmup, key
 ):
+    dtype = batch_data.union_obs.dtype
+
     union_score, union_weight, union_sink_aux = get_union_sink(
         curriculum_embedding_model=state.models.curriculum_embedding,
         embedding_model=state.models.embedding_target,
@@ -649,25 +649,46 @@ def train_step(
         config=config,
     )
 
-    embedding_aux = EmbeddingAux()
-    if not do_warmup:
-        embedding_grads, embedding_aux = embedding_grad_aux_fun(
-            curriculum_embedding_model=state.models.curriculum_embedding,
-            embedding_model=state.models.embedding,
-            data=batch_data,
-            target_union_score=union_score,
+    embd_active = train_aux.num_embd_updates_after_warmup < config.embd_update_cnt
+
+    def update_embedding(
+        curriculum_embedding, embedding, embedding_opt, data, target_score, key
+    ):
+        embedding_grads, aux = embedding_grad_aux_fun(
+            curriculum_embedding_model=curriculum_embedding,
+            embedding_model=embedding,
+            data=data,
+            target_union_score=target_score,
             config=config,
             pos_scale=1.0 * has_positive,
             neg_scale=1.0 * has_negative,
             union_scale=1.0 * do_warmup,  # convert into float type
             key=key,
         )
-        state.optimizers.embedding.update(embedding_grads)
+        embedding_opt.update(embedding_grads)
+        return jax.tree.map(lambda x: jnp.asarray(x, dtype=dtype), aux)
+
+    def skip_embedding(
+        curriculum_embedding, embedding, embedding_opt, data, target_score, key
+    ):
+        return jax.tree.map(lambda _: jnp.zeros((), dtype=dtype), EmbeddingAux())
+
+    embedding_aux = nnx.cond(
+        embd_active,
+        update_embedding,
+        skip_embedding,
+        state.models.curriculum_embedding,
+        state.models.embedding,
+        state.optimizers.embedding,
+        batch_data,
+        union_score,
+        key,
+    )
 
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=state.models.policy,
         data=batch_data,
-        union_weight=union_score,  # pass union score to learn policy
+        union_weight=union_weight,  # pass union score to learn policy
         pos_scale=1.0 * has_positive,
         union_scale=1.0 * do_warmup,
         config=config,
@@ -692,7 +713,7 @@ def train_step(
     )
 
 
-@nnx.jit(static_argnames=["do_warmup"])
+@nnx.jit
 def train_n_steps(
     state,
     data_buffer,
@@ -740,43 +761,53 @@ def train_n_steps(
             key=subkey,
         )
 
-        if not do_warmup:
-            embedding_cond = 1.0 * ((steps + i + 1) % train_aux.embd_freq == 0)
-            polyak_update(
-                state.models.embedding_target,
-                state.models.embedding,
-                embedding_cond * config.update_tau,
-            )
+        # traced condition -> 0/1 float mask instead of a Python `if`
+        embd_active = (
+            train_aux.num_embd_updates_after_warmup < config.embd_update_cnt
+        ).astype(jnp.float32)
+        embedding_cond = embd_active * (
+            1.0 * ((steps + i + 1) % train_aux.embd_freq == 0)
+        )
 
-            sink_percent_ema = ema(
-                prev_sink_aux.sink_percent_ema, sink_aux.sink_percent, config.decay
-            )
-            sink_bimodality_ema = ema(
-                prev_sink_aux.sink_bimodality_ema,
-                sink_aux.sink_bimodality,
-                config.decay,
-            )
-            sink_aux = sink_aux.replace(
-                sink_percent_ema=sink_percent_ema,
-                sink_bimodality_ema=sink_bimodality_ema,
-            )
+        # tau = 0 is an exact no-op, so the target freezes once embd_active = 0
+        polyak_update(
+            state.models.embedding_target,
+            state.models.embedding,
+            embedding_cond * config.update_tau,
+        )
 
-            update_weight = do_warmup * embedding_cond
-            embd_freq = jnp.maximum(
-                250, (100 * sink_bimodality_ema * config.embd_freq) // 1
-            )
+        sink_percent_ema = ema(
+            prev_sink_aux.sink_percent_ema, sink_aux.sink_percent, config.decay
+        )
+        sink_bimodality_ema = ema(
+            prev_sink_aux.sink_bimodality_ema,
+            sink_aux.sink_bimodality,
+            config.decay,
+        )
+        sink_aux = sink_aux.replace(
+            sink_percent_ema=sink_percent_ema,
+            sink_bimodality_ema=sink_bimodality_ema,
+        )
 
-            new_weight = (
-                train_aux.weight * config.lmbda
-                if config.use_weight_decay
-                else 1.0 - sink_bimodality_ema
-            )
+        update_weight = do_warmup * embedding_cond
+        embd_freq = jnp.maximum(
+            250, (100 * sink_bimodality_ema * config.embd_freq) // 1
+        )
 
-            train_aux = train_aux.replace(
-                embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
-                num_embd_updates=train_aux.num_embd_updates + embedding_cond,
-                weight=jnp.where(update_weight, new_weight, train_aux.weight),
-            )
+        new_weight = (
+            train_aux.weight * config.lmbda
+            if config.use_weight_decay
+            else 1.0 - sink_bimodality_ema
+        )
+
+        train_aux = train_aux.replace(
+            embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
+            num_embd_updates=train_aux.num_embd_updates + embedding_cond,
+            num_embd_updates_after_warmup=(
+                train_aux.num_embd_updates_after_warmup + do_warmup * embedding_cond
+            ),
+            weight=jnp.where(update_weight, new_weight, train_aux.weight),
+        )
 
         # do_warmup: False: union_weight = 0
         # do_warmup: True: update union_weight
@@ -849,9 +880,10 @@ def main(args, cfg_env=None):
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
     config["pi_alpha"] = args.alpha
-    config['pi_weight'] = args.policy_weight_type
+    config["pi_weight"] = args.policy_weight_type
 
     config["embd_type"] = args.embedding_model_type
+    config["embd_update_cnt"] = args.num_embd_updates
 
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["normalize_observation"] = args.normalize_observation
@@ -1064,7 +1096,8 @@ def main(args, cfg_env=None):
 
     train_aux = TrainAux(
         weight=1.0,
-        num_embd_updates=0,
+        num_embd_updates=0.0,
+        num_embd_updates_after_warmup=0.0,
         embd_freq=config_data.embd_freq,
         num_itr=0,
     )
@@ -1107,6 +1140,9 @@ def main(args, cfg_env=None):
 
         logger.log_tabular(
             "Num/target_embedding_updates", train_aux.num_embd_updates.item()
+        )
+        logger.log_tabular(
+            "Num/target_embedding_updates_after_warmup", train_aux.num_embd_updates_after_warmup.item()
         )
         logger.log_tabular("Num/target_embedding_stale", train_aux.embd_freq.item())
 
