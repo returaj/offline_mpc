@@ -541,7 +541,9 @@ def embedding_grad_aux_fun(
         random_mean_loss = jnp.mean(range_loss(random_score, target_random_score, 1.0))
         random_mean_score = jnp.mean(random_score)
 
-        loss = pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
+        loss = (1.0 - union_scale) * (
+            pos_mean_loss + neg_mean_loss + union_mean_loss + random_mean_loss
+        )
 
         return loss, EmbeddingAux(
             loss=loss,
@@ -687,7 +689,7 @@ def train_step(
     )
 
 
-@nnx.jit
+@nnx.jit(static_argnames=["do_warmup"])
 def train_n_steps(
     state,
     data_buffer,
@@ -735,39 +737,43 @@ def train_n_steps(
             key=subkey,
         )
 
-        embedding_cond = 1.0 * ((steps + i + 1) % train_aux.embd_freq == 0)
-        polyak_update(
-            state.models.embedding_target,
-            state.models.embedding,
-            embedding_cond * config.update_tau,
-        )
+        if not do_warmup:
+            embedding_cond = 1.0 * ((steps + i + 1) % train_aux.embd_freq == 0)
+            polyak_update(
+                state.models.embedding_target,
+                state.models.embedding,
+                embedding_cond * config.update_tau,
+            )
 
-        sink_percent_ema = ema(
-            prev_sink_aux.sink_percent_ema, sink_aux.sink_percent, config.decay
-        )
-        sink_bimodality_ema = ema(
-            prev_sink_aux.sink_bimodality_ema, sink_aux.sink_bimodality, config.decay
-        )
-        sink_aux = sink_aux.replace(
-            sink_percent_ema=sink_percent_ema, sink_bimodality_ema=sink_bimodality_ema
-        )
+            sink_percent_ema = ema(
+                prev_sink_aux.sink_percent_ema, sink_aux.sink_percent, config.decay
+            )
+            sink_bimodality_ema = ema(
+                prev_sink_aux.sink_bimodality_ema,
+                sink_aux.sink_bimodality,
+                config.decay,
+            )
+            sink_aux = sink_aux.replace(
+                sink_percent_ema=sink_percent_ema,
+                sink_bimodality_ema=sink_bimodality_ema,
+            )
 
-        update_weight = do_warmup * embedding_cond
-        embd_freq = jnp.maximum(
-            250, (100 * sink_bimodality_ema * config.embd_freq) // 1
-        )
+            update_weight = do_warmup * embedding_cond
+            embd_freq = jnp.maximum(
+                250, (100 * sink_bimodality_ema * config.embd_freq) // 1
+            )
 
-        new_weight = (
-            train_aux.weight * config.lmbda
-            if config.use_weight_decay
-            else 1.0 - sink_bimodality_ema
-        )
+            new_weight = (
+                train_aux.weight * config.lmbda
+                if config.use_weight_decay
+                else 1.0 - sink_bimodality_ema
+            )
 
-        train_aux = train_aux.replace(
-            embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
-            num_embd_updates=train_aux.num_embd_updates + embedding_cond,
-            weight=jnp.where(update_weight, new_weight, train_aux.weight),
-        )
+            train_aux = train_aux.replace(
+                embd_freq=jnp.where(embedding_cond, embd_freq, train_aux.embd_freq),
+                num_embd_updates=train_aux.num_embd_updates + embedding_cond,
+                weight=jnp.where(update_weight, new_weight, train_aux.weight),
+            )
 
         # do_warmup: False: union_weight = 0
         # do_warmup: True: update union_weight
@@ -1060,7 +1066,7 @@ def main(args, cfg_env=None):
     )
     steps = 0
     while steps < config["total_iteration"]:
-        do_warmup = steps >= config_data.warmup_steps
+        do_warmup = bool(steps >= config_data.warmup_steps)
 
         (
             data_buffer,
