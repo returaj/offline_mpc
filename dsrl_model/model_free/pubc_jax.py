@@ -39,6 +39,17 @@ What is kept from PSIL (for a controlled comparison)
 * Logger: EpochLogger (progress.csv for policy learning, filter_progress.csv for the
   PU filter iterations).
 
+Saved artifacts (only what is actually used)
+--------------------------------------------
+* Filter: only the ensemble of the LAST iteration (the one whose selection is used for
+  BC) is saved, together with its trajectory probabilities, the adaptive-threshold plot
+  and the selected-trajectory plot. Intermediate iterations are only logged in
+  filter_progress.csv.
+* pubc_selected_<seed>.npy: the trajectory mask actually used to train the policy
+  (after any fallback to the seed positives).
+* Policy: only the final bc_policy is saved. Periodic checkpoints can be re-enabled
+  with --pubc-save-freq N (N > 0).
+
 Deviations (only where the original code would crash or cannot apply)
 ---------------------------------------------------------------------
 * DSRL trajectories are padded to a fixed episode length; padded steps are masked out
@@ -99,6 +110,7 @@ EPS = 1e-6
 # Policy-learning configuration: identical to PSIL so that the policy is the same.
 default_cfg = {
     "log_freq": int(1e4),
+    # 0: save only the final policy. N > 0: also save a checkpoint every N steps.
     "save_freq": int(2e4),
     "hidden_size": 256,
     "max_grad_norm": 5.0,
@@ -179,7 +191,10 @@ def parse_prefixed_flags(prefix, cfg_dicts):
                 continue  # tuples / None-only entries are not exposed
             dest = f"{prefix}_{key}"
             parser.add_argument(
-                f"--{prefix}-{key.replace('_', '-')}", dest=dest, type=ftype, default=None
+                f"--{prefix}-{key.replace('_', '-')}",
+                dest=dest,
+                type=ftype,
+                default=None,
             )
             flag_map[dest] = (cfg, key)
     parsed, remaining = parser.parse_known_args(sys.argv[1:])
@@ -344,10 +359,7 @@ class FilterNet(nnx.Module):
             ]
         )
         self.obs_norms = tuple(
-            [
-                torch_batchnorm(obs_sizes[i + 1], rngs)
-                for i in range(len(obs_sizes) - 1)
-            ]
+            [torch_batchnorm(obs_sizes[i + 1], rngs) for i in range(len(obs_sizes) - 1)]
         )
         self.obs_out = torch_linear(obs_sizes[-1], act_dim * 2, rngs)
 
@@ -367,7 +379,7 @@ class FilterNet(nnx.Module):
         )
         self.head_out = torch_linear(head_sizes[-1], 2, rngs)
 
-    def __call__(self, obs, act, training=True):
+    def logits(self, obs, act, training=True):
         # training=True : model.train() in PyTorch (batch statistics, update running stats)
         # training=False: model.eval() in PyTorch (running statistics)
         use_running_average = not training
@@ -380,14 +392,25 @@ class FilterNet(nnx.Module):
         x = jnp.concatenate([o, act], axis=-1)
         for linear, norm in zip(self.head_linears, self.head_norms):
             x = nnx.relu(norm(linear(x), use_running_average=use_running_average))
+        return self.head_out(x)
+
+    def __call__(self, obs, act, training=True):
         # nn.Softmax(dim=1): column 0 = P(positive), column 1 = P(negative)
-        return jax.nn.softmax(self.head_out(x), axis=-1)
+        return jax.nn.softmax(self.logits(obs, act, training=training), axis=-1)
 
 
-def torch_bce_loss(pred, labels):
-    """torch.nn.BCELoss (mean reduction, log clamped at -100)."""
-    log_p = jnp.clip(jnp.log(pred), min=-100.0)
-    log_1mp = jnp.clip(jnp.log(1.0 - pred), min=-100.0)
+def torch_bce_loss(logits, labels):
+    """torch.nn.BCELoss(Softmax(logits), labels): mean reduction, log clamped at -100.
+
+    Computed from the logits with log_softmax instead of log(softmax(.)). In float32
+    the softmax saturates to exactly 0 or 1 as soon as the two logits differ by ~17,
+    so log(1 - p) = -inf and the gradient 1 / (1 - p) = inf; the clamp at -100 then
+    multiplies that inf by 0 and the loss becomes NaN. (PyTorch avoids this because its
+    BCELoss backward divides by max(p * (1 - p), 1e-12).) For a two-class softmax,
+    log(1 - p_j) = log p_{1-j}, so both terms come from the same stable log_softmax.
+    """
+    log_p = jnp.clip(jax.nn.log_softmax(logits, axis=-1), min=-100.0)
+    log_1mp = log_p[..., ::-1]
     return -jnp.mean(labels * log_p + (1.0 - labels) * log_1mp)
 
 
@@ -406,8 +429,8 @@ def make_filter_optimizer(model, lr, weight_decay):
 @nnx.jit
 def filter_train_step(model, optimizer, obs, act, labels):
     def loss_fun(model):
-        pred = model(obs, act, training=True)
-        return torch_bce_loss(pred, labels)
+        logits = model.logits(obs, act, training=True)
+        return torch_bce_loss(logits, labels)
 
     loss, grads = nnx.value_and_grad(loss_fun)(model)
     optimizer.update(grads)
@@ -425,7 +448,9 @@ def filter_positive_prob(model, obs, act):
 
 
 class PUSampler:
-    def __init__(self, raw_obs, raw_act, max_action, max_observation, negative_sampler, rng):
+    def __init__(
+        self, raw_obs, raw_act, max_action, max_observation, negative_sampler, rng
+    ):
         # raw_obs / raw_act: all valid (non-padded) transitions of the raw dataset
         self.raw_obs = raw_obs
         self.raw_act = raw_act
@@ -522,12 +547,25 @@ class PUSampler:
 # ----------------------------------------------------------------------------------
 
 
-def adap_probs(probs, bins=100, fit_pow=8, prob_th=0.96, save_plot_path=None, logger=None):
+def adap_probs(
+    probs, bins=100, fit_pow=8, prob_th=0.96, save_plot_path=None, logger=None
+):
     def get_minima(values):
         min_index = sg.argrelmin(values)[0]
         return min_index, values[min_index]
 
     probs = np.asarray(probs, dtype=np.float64)
+    finite = np.isfinite(probs)
+    if not finite.all():
+        if logger is not None:
+            logger.log(
+                f"adap_probs: {int((~finite).sum())} non-finite trajectory probabilities "
+                "ignored for the threshold fit.",
+                color="red",
+            )
+        probs = probs[finite]
+    if probs.size == 0:
+        raise ValueError("adap_probs: no finite trajectory probability.")
     if probs.max() == probs.min():
         if logger is not None:
             logger.log(
@@ -574,7 +612,9 @@ def adap_probs(probs, bins=100, fit_pow=8, prob_th=0.96, save_plot_path=None, lo
         ax.plot(xdata, ydata, "*", color="gold", label="original values")
         ax.plot(xdata, y_pred, color="r", label="polyfit values")
         if adap_v is not None:
-            ax.scatter(adap_p, adap_v, s=40, marker="D", color="b", label="adapted point")
+            ax.scatter(
+                adap_p, adap_v, s=40, marker="D", color="b", label="adapted point"
+            )
         ax.legend(loc=0)
         fig.savefig(save_plot_path, format="svg", dpi=300, bbox_inches="tight")
         plt.close(fig)
@@ -594,7 +634,18 @@ def make_filter_ensemble(num_models, obs_dim, act_dim, rngs, lr, weight_decay):
     return models, optimizers
 
 
-def train_filter_member(model, optimizer, pos_obs, pos_act, sampler, epochs, batch_size, rng, iteration, member):
+def train_filter_member(
+    model,
+    optimizer,
+    pos_obs,
+    pos_act,
+    sampler,
+    epochs,
+    batch_size,
+    rng,
+    iteration,
+    member,
+):
     num = pos_obs.shape[0]
     epoch_loss = 0.0
     for epoch in range(1, epochs + 1):
@@ -603,12 +654,27 @@ def train_filter_member(model, optimizer, pos_obs, pos_act, sampler, epochs, bat
         losses = []
         for start in range(0, num, batch_size):
             idx = perm[start : start + batch_size]
+            if idx.shape[0] < 2:
+                # BatchNorm cannot use batch statistics on a single sample (PyTorch
+                # raises an error here); skip the leftover sample of this epoch.
+                continue
             obs, act, labels = sampler.batch(pos_obs[idx], pos_act[idx])
             loss = filter_train_step(
-                model, optimizer, jnp.asarray(obs), jnp.asarray(act), jnp.asarray(labels)
+                model,
+                optimizer,
+                jnp.asarray(obs),
+                jnp.asarray(act),
+                jnp.asarray(labels),
             )
-            losses.append(float(loss))
-        epoch_loss = float(np.mean(losses))
+            loss = float(loss)
+            if not np.isfinite(loss):
+                raise FloatingPointError(
+                    f"PUBC filter loss became {loss} (iteration {iteration + 1}, "
+                    f"member {member}, epoch {epoch}). The filter diverged; try a "
+                    "lower --pubc-filter-lr."
+                )
+            losses.append(loss)
+        epoch_loss = safe_mean(losses)
         print(
             f"Iteration: {iteration + 1}   Model: {member}   Epoch: {epoch}   Loss: {epoch_loss}"
         )
@@ -616,26 +682,38 @@ def train_filter_member(model, optimizer, pos_obs, pos_act, sampler, epochs, bat
 
 
 def trajectory_positive_probs(models, raw_obs, raw_act, valid, chunk_size=65536):
-    """Per classifier, the mean P(positive) over each trajectory's (valid) steps."""
-    num_trajs, ep_len = valid.shape
-    flat_obs = raw_obs.reshape(num_trajs * ep_len, -1)
-    flat_act = raw_act.reshape(num_trajs * ep_len, -1)
-    valid_f = valid.astype(np.float32)
+    """Per classifier, the mean P(positive) over each trajectory's (valid) steps.
+
+    Only valid (non-padded) steps are passed through the network. Masking by
+    multiplication is not enough: padded steps can hold NaN/inf, and NaN * 0 = NaN,
+    which made every trajectory probability NaN.
+    """
+    num_trajs, _ = valid.shape
+    valid_obs = raw_obs[valid]
+    valid_act = raw_act[valid]
+    # trajectory index of every valid step (boolean indexing keeps row-major order)
+    traj_idx = np.nonzero(valid)[0]
+    steps_per_traj = valid.sum(axis=1)
+
     traj_probs = []
     for model in models:
         step_probs = []
-        for start in range(0, flat_obs.shape[0], chunk_size):
+        for start in range(0, valid_obs.shape[0], chunk_size):
             step_probs.append(
                 np.asarray(
                     filter_positive_prob(
                         model,
-                        jnp.asarray(flat_obs[start : start + chunk_size]),
-                        jnp.asarray(flat_act[start : start + chunk_size]),
+                        jnp.asarray(valid_obs[start : start + chunk_size]),
+                        jnp.asarray(valid_act[start : start + chunk_size]),
                     )
                 )
             )
-        step_probs = np.concatenate(step_probs).reshape(num_trajs, ep_len)
-        traj_probs.append((step_probs * valid_f).sum(1) / valid_f.sum(1))
+        step_probs = np.concatenate(step_probs).astype(np.float64)
+        sums = np.bincount(traj_idx, weights=step_probs, minlength=num_trajs)
+        # trajectories without any valid step get probability 0 (never selected)
+        traj_probs.append(
+            np.where(steps_per_traj > 0, sums / np.maximum(steps_per_traj, 1), 0.0)
+        )
     # num_models X num_trajs
     return np.stack(traj_probs, axis=0)
 
@@ -709,11 +787,24 @@ def plot_selected_trajectory_data(costs, rewards, selected, is_seed, save_plot):
     plt.close(fig)
 
 
-def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger, logger, log_dir, run_seed):
+def run_pubc_filter(
+    raw,
+    seed,
+    is_seed,
+    cfg,
+    filter_rngs,
+    np_rng,
+    filter_logger,
+    logger,
+    log_dir,
+    run_seed,
+):
     raw_obs, raw_act, valid = raw["observations"], raw["actions"], raw["valid"]
     seed_obs, seed_act = seed["observations"], seed["actions"]
     obs_dim, act_dim = raw_obs.shape[-1], raw_act.shape[-1]
     num_models = cfg["models_in_ensemble"]
+    num_iterations = cfg["iterations"]
+    assert num_iterations >= 1, "PUBC needs at least one filter iteration."
 
     traj_rewards = raw["rewards"].sum(axis=1)
     traj_costs = raw["costs"].sum(axis=1)
@@ -722,6 +813,28 @@ def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger,
     # args.max_action / args.max_observation in PUBuffer (scalars over the raw dataset)
     valid_obs = raw_obs[valid]
     valid_act = raw_act[valid]
+
+    # Padded steps may contain NaN/inf (they are never used); real steps must be finite.
+    for name, arr in (
+        ("raw observations", valid_obs),
+        ("raw actions", valid_act),
+        ("seed observations", seed_obs),
+        ("seed actions", seed_act),
+    ):
+        bad = ~np.isfinite(arr)
+        if bad.any():
+            bad_dims = np.nonzero(bad.any(axis=0))[0].tolist()
+            raise ValueError(
+                f"PUBC filter: {int(bad.any(axis=1).sum())} non-padded {name} contain "
+                f"NaN/inf (dims {bad_dims}). Check the observation normalisation "
+                "(e.g. a constant dimension with zero std)."
+            )
+    if num_trajs_without_steps := int((valid.sum(axis=1) == 0).sum()):
+        logger.log(
+            f"PUBC filter: {num_trajs_without_steps} trajectories have no valid step "
+            "and will never be selected.",
+            color="red",
+        )
     sampler = PUSampler(
         raw_obs=valid_obs,
         raw_act=valid_act,
@@ -737,9 +850,18 @@ def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger,
     )
 
     selected = np.zeros(raw_obs.shape[0], dtype=bool)
-    for iteration in range(cfg["iterations"]):
+    for iteration in range(num_iterations):
+        # Only the last iteration's ensemble/selection is used for BC, so only its
+        # artifacts (models, probabilities, plots) are written to disk.
+        is_last = iteration == num_iterations - 1
+
         models, optimizers = make_filter_ensemble(
-            num_models, obs_dim, act_dim, filter_rngs, cfg["filter_lr"], cfg["filter_weight_decay"]
+            num_models,
+            obs_dim,
+            act_dim,
+            filter_rngs,
+            cfg["filter_lr"],
+            cfg["filter_weight_decay"],
         )
 
         member_losses = []
@@ -769,7 +891,9 @@ def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger,
             bins=cfg["th_bins"],
             fit_pow=cfg["th_fit_pow"],
             prob_th=cfg["th_high_bound"],
-            save_plot_path=f"{log_dir}/adap_probs_iteration={iteration + 1}_{run_seed}.svg",
+            save_plot_path=(
+                f"{log_dir}/pubc_adap_probs_{run_seed}.svg" if is_last else None
+            ),
             logger=logger,
         )
         if cfg["ensemble_method"] == "vote":
@@ -789,7 +913,8 @@ def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger,
             "Filter/Coverage", 100.0 * sel_u.sum() / max(int(union_mask.sum()), 1)
         )
         filter_logger.log_tabular(
-            "Filter/SeedSelected", safe_mean(selected[is_seed]) if is_seed.any() else 0.0
+            "Filter/SeedSelected",
+            safe_mean(selected[is_seed]) if is_seed.any() else 0.0,
         )
         filter_logger.log_tabular(
             "Filter/TransitionsSelected", int((valid & selected[:, None]).sum())
@@ -804,24 +929,28 @@ def run_pubc_filter(raw, seed, is_seed, cfg, filter_rngs, np_rng, filter_logger,
         filter_logger.log_tabular("Cost/rejected", safe_mean(traj_costs[rej_u]))
         filter_logger.dump_tabular()
 
-        np.save(f"{log_dir}/pubc_probs_iteration={iteration + 1}_{run_seed}.npy", member_probs)
-        np.save(f"{log_dir}/pubc_selected_iteration={iteration + 1}_{run_seed}.npy", selected)
-        plot_selected_trajectory_data(
-            traj_costs,
-            traj_rewards,
-            selected,
-            is_seed,
-            save_plot=f"{log_dir}/pubc_selected_iteration={iteration + 1}_{run_seed}.svg",
-        )
-        for member, model in enumerate(models):
-            logger.nn_model_save(
-                itr=iteration + 1,
-                nn_model_saver_element=model,
-                prefix=f"pubc_filter{member + 1}",
+        if is_last:
+            # Final filter: the one whose selection is used to train the policy.
+            np.save(f"{log_dir}/pubc_probs_{run_seed}.npy", member_probs)
+            plot_selected_trajectory_data(
+                traj_costs,
+                traj_rewards,
+                selected,
+                is_seed,
+                save_plot=f"{log_dir}/pubc_selected_{run_seed}.svg",
             )
+            for member, model in enumerate(models):
+                logger.nn_model_save(
+                    itr=iteration + 1,
+                    nn_model_saver_element=model,
+                    prefix=f"pubc_filter{member + 1}",
+                )
+            break
 
-        # buffer.update_pos()
-        new_member_data = relabelled_positive_subsets(raw_obs, raw_act, valid, selected, num_models)
+        # buffer.update_pos() (only needed if another iteration follows)
+        new_member_data = relabelled_positive_subsets(
+            raw_obs, raw_act, valid, selected, num_models
+        )
         if new_member_data is None:
             logger.log(
                 "PUBC filter selected too few transitions for the ensemble; "
@@ -1040,7 +1169,6 @@ def main(args, pubc_config, cfg_env=None):
         log_dir=args.log_dir,
         run_seed=args.seed,
     )
-    np.save(f"{args.log_dir}/pubc_selected_{args.seed}.npy", selected)
     filter_logger.close()
 
     # policy buffer: every raw trajectory is stored; rejected ones get zero priority
@@ -1073,11 +1201,16 @@ def main(args, pubc_config, cfg_env=None):
             raise RuntimeError(
                 "No trajectory selected and the seed is not part of the raw dataset."
             )
-        traj_mask = np.repeat(is_seed.astype(np.float32), ep_len)
+        selected = is_seed.copy()
+        traj_mask = np.repeat(selected.astype(np.float32), ep_len)
         filtered_priorities = data_buffer.union_priorities * jnp.asarray(traj_mask)
     data_buffer = data_buffer.replace(union_priorities=filtered_priorities)
 
+    # the trajectory mask actually used to train the policy
+    np.save(f"{args.log_dir}/pubc_selected_{args.seed}.npy", selected)
+
     logger.log("Start bc_policy training on the PUBC-filtered trajectories.")
+    save_freq = int(config["save_freq"])
     steps = 0
     while steps < config["total_iteration"]:
         policy_aux = train_n_steps(
@@ -1102,16 +1235,18 @@ def main(args, pubc_config, cfg_env=None):
         )
         logger.dump_tabular()
 
-        if steps % config["save_freq"] == 0:
+        if steps >= config["total_iteration"]:
+            break
+
+        # optional intermediate checkpoints (disabled by default: save_freq = 0)
+        if save_freq > 0 and steps % save_freq == 0:
             logger.nn_model_save(
                 itr=steps,
                 nn_model_saver_element=policy_model,
                 prefix="bc_policy",
             )
 
-        if steps >= config["total_iteration"]:
-            break
-
+    # final policy (the only policy checkpoint saved by default)
     logger.nn_model_save(
         itr=steps, nn_model_saver_element=policy_model, prefix="bc_policy"
     )
