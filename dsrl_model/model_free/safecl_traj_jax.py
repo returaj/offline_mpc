@@ -595,7 +595,7 @@ def policy_grad_aux_fun(
         l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
 
         # B
-        weight = jnp.where(logw > 0, 1.0, jnp.where(logw < 0, -1.0, 0.0))
+        weight = jnp.where(logw > 0, 1.0, 0.0)
         weight = scale * jax.lax.stop_gradient(weight)
 
         loss = (weight * l2_loss).mean()
