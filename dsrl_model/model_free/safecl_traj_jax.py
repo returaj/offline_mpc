@@ -595,7 +595,7 @@ def policy_grad_aux_fun(
         l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
 
         # B
-        weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
+        weight = jnp.where(logw > 0, 1.0, jnp.where(logw < 0, -1.0, 0.0))
         weight = scale * jax.lax.stop_gradient(weight)
 
         loss = (weight * l2_loss).mean()
@@ -664,7 +664,7 @@ def train_step(
     policy_grads, policy_aux = policy_grad_aux_fun(
         policy_model=state.models.policy,
         data=batch_data,
-        union_weight=union_weight,  # pass union weight to learn policy
+        union_weight=union_score,  # pass union score to learn policy
         pos_scale=1.0 * has_positive,
         union_scale=1.0 * do_warmup,
         config=config,
