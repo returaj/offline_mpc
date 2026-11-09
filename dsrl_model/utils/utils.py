@@ -370,7 +370,7 @@ def single_agent_args():
         {
             "name": "--policy-weight-type",
             "type": str,
-            "default": "value_based",
+            "default": None,
             "help": "policy weight type can be 'value_based', 'score_based'",
         },
         {
