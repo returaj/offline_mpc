@@ -60,7 +60,8 @@ Deviations (only where the original code cannot apply directly)
   transitions (the decision function is then evaluated on all of D_U).
 * Linear algebra runs in float32 (JAX default) instead of NumPy float64; squared
   distances are clipped at 0 before the kernel to avoid round-off.
-* The estimated class prior is clipped to [1e-3, 1 - 1e-3] (cpe can return 0 or 1).
+* The estimated class prior is clipped to [prior_clip, 1 - prior_clip] (cpe can
+  return 0 or 1).
 * With a single (sigma, lambda, eta) combination the original code sets the best
   index to 1 (out of range); here it is 0.
 
@@ -117,12 +118,20 @@ default_cfg = {
     "save_freq": int(2e4),
     "hidden_size": 256,
     "max_grad_norm": 5.0,
-    "gamma": 0.9,  # for trajectory based policy learning
     "action_repeat": 1,
-    "train_horizon": 50,
-    "pi_temp": 0.2,
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
+    # Policy learning: values of the PSIL paper (Appendix B and C).
+    "train_horizon": 50,
+    "normalize_observation": True,
+    "lr": 3e-4,
+    "gamma": 0.9,  # for trajectory based policy learning
+    "batch_size": 64,
+    # Weighted BC (PSIL Eq. 4: exp(w / alpha), alpha = 0.2). Set these to the values in
+    # the config.json of your PSIL runs (keys pi_baseline_type, pi_alpha, pi_temp).
+    "pi_baseline_type": "constant",  # 'softer_max', 'mean_std' or 'constant'
+    "pi_alpha": 0.9,  # constant baseline (or std multiplier for 'mean_std')
+    "pi_temp": 0.2,
 }
 
 # Data construction: identical to PSIL.
@@ -159,33 +168,84 @@ pnu_cfg = {
     "eta_max": 0.9,
     "eta_num": 19,
     "prior": None,  # None: estimate with cpe (LfP+N only)
-    "max_unlabeled": 10000,
+    "max_unlabeled": 10000,  # ours: size of the unlabeled subset used for fitting
+    "prior_clip": 1e-3,  # ours: estimated prior clipped to [prior_clip, 1 - prior_clip]
+    "cpe_alpha": 1,  # cpe_ene.cpe default (energy distance exponent)
 }
 
 
-def pnu_args():
-    """Parse PNU-only flags and strip them from sys.argv."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--pnu-basis", type=str, default=None, choices=["gauss", "lm"])
-    parser.add_argument("--pnu-n-basis", type=int, default=None)
-    parser.add_argument("--pnu-n-fold", type=int, default=None)
-    parser.add_argument("--pnu-sigma-num", type=int, default=None)
-    parser.add_argument("--pnu-lambda-min", type=float, default=None)
-    parser.add_argument("--pnu-lambda-max", type=float, default=None)
-    parser.add_argument("--pnu-lambda-num", type=int, default=None)
-    parser.add_argument("--pnu-eta-min", type=float, default=None)
-    parser.add_argument("--pnu-eta-max", type=float, default=None)
-    parser.add_argument("--pnu-eta-num", type=int, default=None)
-    parser.add_argument("--pnu-prior", type=float, default=None)
-    parser.add_argument("--pnu-max-unlabeled", type=int, default=None)
-    pnu, remaining = parser.parse_known_args(sys.argv[1:])
-    sys.argv = [sys.argv[0]] + remaining
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    return str(v).lower() in ("true", "1", "yes", "y", "t")
 
-    cfg = dict(pnu_cfg)
-    for key, val in vars(pnu).items():
+
+def parse_prefixed_flags(prefix, cfg_dicts):
+    """Create one --<prefix>-<key> flag for every entry of the given config dicts,
+    update the dicts in place with the values passed on the command line, and strip
+    these flags from sys.argv before single_agent_args() parses the PSIL arguments.
+
+    The dicts in this file are the single source of truth for every hyperparameter.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    flag_map = {}
+    for cfg in cfg_dicts:
+        for key, val in cfg.items():
+            if isinstance(val, bool):
+                ftype = str2bool
+            elif isinstance(val, int):
+                ftype = int
+            elif isinstance(val, float) or val is None:
+                ftype = float
+            elif isinstance(val, str):
+                ftype = str
+            else:
+                continue  # tuples / None-only entries are not exposed
+            dest = f"{prefix}_{key}"
+            parser.add_argument(
+                f"--{prefix}-{key.replace('_', '-')}", dest=dest, type=ftype, default=None
+            )
+            flag_map[dest] = (cfg, key)
+    parsed, remaining = parser.parse_known_args(sys.argv[1:])
+    sys.argv = [sys.argv[0]] + remaining
+    for dest, val in vars(parsed).items():
         if val is not None:
-            cfg[key[len("pnu_"):]] = val
-    return cfg
+            cfg, key = flag_map[dest]
+            cfg[key] = val
+
+
+# PSIL command-line arguments that are NOT used by this baseline: the values come
+# from the dicts above. A warning is logged if they are passed with another value.
+IGNORED_PSIL_ARGS = {
+    "lr": "lr",
+    "batch_size": "batch_size",
+    "gamma": "gamma",
+    "train_horizon": "train_horizon",
+    "normalize_observation": "normalize_observation",
+    "policy_baseline_type": "pi_baseline_type",
+    "alpha": "pi_alpha",
+    "bc_weight_temp": "pi_temp",
+}
+
+
+def warn_ignored_args(args, config, logger, prefix):
+    for arg_name, cfg_key in IGNORED_PSIL_ARGS.items():
+        if cfg_key not in config:
+            continue
+        val = getattr(args, arg_name, None)
+        if val is not None and val != config[cfg_key]:
+            logger.log(
+                f"--{arg_name.replace('_', '-')}={val} is ignored; using "
+                f"{cfg_key}={config[cfg_key]} from the config dict "
+                f"(override with --{prefix}-{cfg_key.replace('_', '-')}).",
+                color="red",
+            )
+
+
+def pnu_args():
+    """PNU flags: --pnu-<key> for every entry of default_cfg and pnu_cfg."""
+    parse_prefixed_flags("pnu", [default_cfg, pnu_cfg])
+    return dict(pnu_cfg)
 
 
 # ----------------------------------------------------------------------------------
@@ -790,17 +850,7 @@ def main(args, pnu_config, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["pnu"] = dict(pnu_config)
-    config["pi_baseline_type"] = args.policy_baseline_type
-    config["pi_alpha"] = args.alpha
-    config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["normalize_observation"] = args.normalize_observation
-    config["pi_temp"] = args.bc_weight_temp or config["pi_temp"]
-    config["lr"] = args.lr
-    config["gamma"] = args.gamma or config["gamma"]
-
-    # set training steps
-    batch_size = args.batch_size or config.get("batch_size")
-    config["batch_size"] = batch_size
+    batch_size = config["batch_size"]
 
     # env name
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
@@ -917,9 +967,9 @@ def main(args, pnu_config, cfg_env=None):
     buffer.to_jax_ndarray()
     data_buffer = buffer.get_data_buffer()
 
-    # set logger
-    dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+    # set logger (config values take precedence over the PSIL command-line arguments)
+    dict_args = dict(config)
+    dict_args["psil_args"] = {k: v for k, v in vars(args).items() if v is not None}
 
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     pnu_logger = EpochLogger(
@@ -929,6 +979,7 @@ def main(args, pnu_config, cfg_env=None):
         use_tensorboard=False,
     )
     logger.save_config(dict_args)
+    warn_ignored_args(args, config, logger, "pnu")
 
     # ------------------------------------------------------------------------------
     # PNU classifier on state-action pairs
@@ -955,10 +1006,12 @@ def main(args, pnu_config, cfg_env=None):
         if pnu_config["prior"] is None:
             x_l = np.concatenate([x_p, x_n], axis=0)
             y_l = np.concatenate([np.ones(x_p.shape[0]), -np.ones(x_n.shape[0])])
-            prior_raw = float(cpe(x_l, y_l, x_u))
+            prior_raw = float(cpe(x_l, y_l, x_u, alpha=pnu_config["cpe_alpha"]))
         else:
             prior_raw = float(pnu_config["prior"])
-        prior = float(np.clip(prior_raw, 1e-3, 1 - 1e-3))
+        prior = float(
+            np.clip(prior_raw, pnu_config["prior_clip"], 1 - pnu_config["prior_clip"])
+        )
         eta_list = np.linspace(
             pnu_config["eta_min"], pnu_config["eta_max"], pnu_config["eta_num"]
         )
@@ -970,7 +1023,9 @@ def main(args, pnu_config, cfg_env=None):
             "pass the class prior with --pnu-prior."
         )
         prior_raw = float(pnu_config["prior"])
-        prior = float(np.clip(prior_raw, 1e-3, 1 - 1e-3))
+        prior = float(
+            np.clip(prior_raw, pnu_config["prior_clip"], 1 - pnu_config["prior_clip"])
+        )
         # PU (eta = +1) or NU (eta = -1); validation with the same risk
         eta_list = np.array([1.0 if has_positive else -1.0])
         eta_val = float(eta_list[0])

@@ -102,11 +102,15 @@ default_cfg = {
     "save_freq": int(2e4),
     "hidden_size": 256,
     "max_grad_norm": 5.0,
-    "gamma": 0.9,  # for trajectory based policy learning
     "action_repeat": 1,
-    "train_horizon": 50,
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
+    # Policy learning: values of the PSIL paper (Appendix B and C).
+    "train_horizon": 50,
+    "normalize_observation": True,
+    "lr": 3e-4,
+    "gamma": 0.9,  # for trajectory based policy learning
+    "batch_size": 64,
 }
 
 # Data construction: identical to PSIL.
@@ -152,32 +156,72 @@ def str2bool(v):
     return str(v).lower() in ("true", "1", "yes", "y", "t")
 
 
-def pubc_args():
-    """Parse PUBC-only flags and strip them from sys.argv."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--pubc-models-in-ensemble", type=int, default=None)
-    parser.add_argument(
-        "--pubc-ensemble-method", type=str, default=None, choices=["vote", "avg"]
-    )
-    parser.add_argument("--pubc-iterations", type=int, default=None)
-    parser.add_argument(
-        "--pubc-negative-sampler", type=str, default=None, choices=["part", "full"]
-    )
-    parser.add_argument("--pubc-epochs-per-iteration", type=int, default=None)
-    parser.add_argument("--pubc-th-bins", type=int, default=None)
-    parser.add_argument("--pubc-th-high-bound", type=float, default=None)
-    parser.add_argument("--pubc-th-fit-pow", type=int, default=None)
-    parser.add_argument("--pubc-filter-batch-size", type=int, default=None)
-    parser.add_argument("--pubc-filter-lr", type=float, default=None)
-    parser.add_argument("--pubc-seed-in-raw", type=str2bool, default=None)
-    pubc, remaining = parser.parse_known_args(sys.argv[1:])
-    sys.argv = [sys.argv[0]] + remaining
+def parse_prefixed_flags(prefix, cfg_dicts):
+    """Create one --<prefix>-<key> flag for every entry of the given config dicts,
+    update the dicts in place with the values passed on the command line, and strip
+    these flags from sys.argv before single_agent_args() parses the PSIL arguments.
 
-    cfg = dict(pubc_cfg)
-    for key, val in vars(pubc).items():
+    The dicts in this file are the single source of truth for every hyperparameter.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    flag_map = {}
+    for cfg in cfg_dicts:
+        for key, val in cfg.items():
+            if isinstance(val, bool):
+                ftype = str2bool
+            elif isinstance(val, int):
+                ftype = int
+            elif isinstance(val, float) or val is None:
+                ftype = float
+            elif isinstance(val, str):
+                ftype = str
+            else:
+                continue  # tuples / None-only entries are not exposed
+            dest = f"{prefix}_{key}"
+            parser.add_argument(
+                f"--{prefix}-{key.replace('_', '-')}", dest=dest, type=ftype, default=None
+            )
+            flag_map[dest] = (cfg, key)
+    parsed, remaining = parser.parse_known_args(sys.argv[1:])
+    sys.argv = [sys.argv[0]] + remaining
+    for dest, val in vars(parsed).items():
         if val is not None:
-            cfg[key[len("pubc_"):]] = val
-    return cfg
+            cfg, key = flag_map[dest]
+            cfg[key] = val
+
+
+# PSIL command-line arguments that are NOT used by this baseline: the values come
+# from the dicts above. A warning is logged if they are passed with another value.
+IGNORED_PSIL_ARGS = {
+    "lr": "lr",
+    "batch_size": "batch_size",
+    "gamma": "gamma",
+    "train_horizon": "train_horizon",
+    "normalize_observation": "normalize_observation",
+    "policy_baseline_type": "pi_baseline_type",
+    "alpha": "pi_alpha",
+    "bc_weight_temp": "pi_temp",
+}
+
+
+def warn_ignored_args(args, config, logger, prefix):
+    for arg_name, cfg_key in IGNORED_PSIL_ARGS.items():
+        if cfg_key not in config:
+            continue
+        val = getattr(args, arg_name, None)
+        if val is not None and val != config[cfg_key]:
+            logger.log(
+                f"--{arg_name.replace('_', '-')}={val} is ignored; using "
+                f"{cfg_key}={config[cfg_key]} from the config dict "
+                f"(override with --{prefix}-{cfg_key.replace('_', '-')}).",
+                color="red",
+            )
+
+
+def pubc_args():
+    """PUBC flags: --pubc-<key> for every entry of default_cfg and pubc_cfg."""
+    parse_prefixed_flags("pubc", [default_cfg, pubc_cfg])
+    return dict(pubc_cfg)
 
 
 # ----------------------------------------------------------------------------------
@@ -886,14 +930,7 @@ def main(args, pubc_config, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["pubc"] = dict(pubc_config)
-    config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["normalize_observation"] = args.normalize_observation
-    config["lr"] = args.lr
-    config["gamma"] = args.gamma or config["gamma"]
-
-    # set training steps
-    batch_size = args.batch_size or config.get("batch_size")
-    config["batch_size"] = batch_size
+    batch_size = config["batch_size"]
 
     # env name
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
@@ -947,9 +984,9 @@ def main(args, pubc_config, cfg_env=None):
         union_data["observations"].shape[1] == ep_len
     ), f"{union_data['observations'].shape[1]} episode length is different from {ep_len}"
 
-    # set logger
-    dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+    # set logger (config values take precedence over the PSIL command-line arguments)
+    dict_args = dict(config)
+    dict_args["psil_args"] = {k: v for k, v in vars(args).items() if v is not None}
 
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     filter_logger = EpochLogger(
@@ -959,6 +996,7 @@ def main(args, pubc_config, cfg_env=None):
         use_tensorboard=False,
     )
     logger.save_config(dict_args)
+    warn_ignored_args(args, config, logger, "pubc")
 
     if args.num_non_preferred > 0:
         logger.log(

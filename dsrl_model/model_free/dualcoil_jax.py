@@ -107,6 +107,7 @@ default_cfg = {
     "save_freq": int(2e4),
     "hidden_size": 256,  # policy (SafeDiceTanhMixtureActor), as in PSIL
     "total_iteration": int(1e6),  # authors' max_steps
+    "normalize_observation": True,  # PSIL normalisation (replaces state_norm)
 }
 
 # Data construction: identical to PSIL.
@@ -153,6 +154,15 @@ dualcoil_cfg = {
     "num_disc_train": int(1e5),
     "adv_policy_extraction": False,
     "learn_expert_data": False,
+    # constants hard-coded in the authors' code
+    "critic_weight_decay": 1e-4,  # optax.adamw default (critic optimiser)
+    "value_weight_decay": 1e-4,  # optax.adamw default (value optimiser)
+    "disc_clip_min": 0.05,  # Discriminator_state_only output clip
+    "disc_clip_max": 0.95,
+    "actor_weight_max": 100.0,  # update_actor: weight.clip(max=100)
+    "adv_clip": 7.0,  # update_actor (adv_policy_extraction): adv.clip(max=7)
+    "adv_scale": 3.0,  # update_actor (adv_policy_extraction): exp(adv * 3)
+    "action_clip_eps": 1e-5,  # D4RLDataset clip_to_eps
 }
 
 
@@ -162,21 +172,72 @@ def str2bool(v):
     return str(v).lower() in ("true", "1", "yes", "y", "t")
 
 
-def dualcoil_args():
-    """Parse DualCOIL-only flags and strip them from sys.argv."""
+def parse_prefixed_flags(prefix, cfg_dicts):
+    """Create one --<prefix>-<key> flag for every entry of the given config dicts,
+    update the dicts in place with the values passed on the command line, and strip
+    these flags from sys.argv before single_agent_args() parses the PSIL arguments.
+
+    The dicts in this file are the single source of truth for every hyperparameter.
+    """
     parser = argparse.ArgumentParser(add_help=False)
-    types = {bool: str2bool, int: int, float: float}
-    for key, val in dualcoil_cfg.items():
-        flag = "--dualcoil-" + key.replace("_", "-")
-        parser.add_argument(flag, type=types[type(val)], default=None)
+    flag_map = {}
+    for cfg in cfg_dicts:
+        for key, val in cfg.items():
+            if isinstance(val, bool):
+                ftype = str2bool
+            elif isinstance(val, int):
+                ftype = int
+            elif isinstance(val, float) or val is None:
+                ftype = float
+            elif isinstance(val, str):
+                ftype = str
+            else:
+                continue  # tuples / None-only entries are not exposed
+            dest = f"{prefix}_{key}"
+            parser.add_argument(
+                f"--{prefix}-{key.replace('_', '-')}", dest=dest, type=ftype, default=None
+            )
+            flag_map[dest] = (cfg, key)
     parsed, remaining = parser.parse_known_args(sys.argv[1:])
     sys.argv = [sys.argv[0]] + remaining
-
-    cfg = dict(dualcoil_cfg)
-    for key, val in vars(parsed).items():
+    for dest, val in vars(parsed).items():
         if val is not None:
-            cfg[key[len("dualcoil_"):]] = val
-    return cfg
+            cfg, key = flag_map[dest]
+            cfg[key] = val
+
+
+# PSIL command-line arguments that are NOT used by this baseline: the values come
+# from the dicts above. A warning is logged if they are passed with another value.
+IGNORED_PSIL_ARGS = {
+    "lr": "lr",
+    "batch_size": "batch_size",
+    "gamma": "gamma",
+    "train_horizon": "train_horizon",
+    "normalize_observation": "normalize_observation",
+    "policy_baseline_type": "pi_baseline_type",
+    "alpha": "pi_alpha",
+    "bc_weight_temp": "pi_temp",
+}
+
+
+def warn_ignored_args(args, config, logger, prefix):
+    for arg_name, cfg_key in IGNORED_PSIL_ARGS.items():
+        if cfg_key not in config:
+            continue
+        val = getattr(args, arg_name, None)
+        if val is not None and val != config[cfg_key]:
+            logger.log(
+                f"--{arg_name.replace('_', '-')}={val} is ignored; using "
+                f"{cfg_key}={config[cfg_key]} from the config dict "
+                f"(override with --{prefix}-{cfg_key.replace('_', '-')}).",
+                color="red",
+            )
+
+
+def dualcoil_args():
+    """DualCOIL flags: --dualcoil-<key> for every entry of default_cfg and dualcoil_cfg."""
+    parse_prefixed_flags("dualcoil", [default_cfg, dualcoil_cfg])
+    return dict(dualcoil_cfg)
 
 
 # ----------------------------------------------------------------------------------
@@ -230,11 +291,14 @@ class ValueCritic(nnx.Module):
 class Discriminator(nnx.Module):
     """Discriminator_state_only: sigmoid output clipped to [0.05, 0.95]."""
 
-    def __init__(self, obs_dim, hidden_dims, rngs):
+    def __init__(self, obs_dim, hidden_dims, rngs, clip_min=0.05, clip_max=0.95):
         self.d = MLP(obs_dim, hidden_dims, 1, rngs)
+        self.clip_min = clip_min
+        self.clip_max = clip_max
 
     def __call__(self, obs):
-        return jnp.squeeze(jax.nn.sigmoid(self.d(obs)).clip(min=0.05, max=0.95), -1)
+        out = jax.nn.sigmoid(self.d(obs)).clip(min=self.clip_min, max=self.clip_max)
+        return jnp.squeeze(out, -1)
 
 
 class Models(nnx.Module):
@@ -294,7 +358,7 @@ class AllData:
     mix: TransitionData
 
 
-def get_transitions(data, ep_len, eps=1e-5):
+def get_transitions(data, ep_len, eps):
     """(s_t, a_t, s_{t+1}, 1 - terminal_t) for the valid steps of padded trajectories.
 
     Returns the transitions and, for logging, the trajectory index of each transition.
@@ -417,10 +481,12 @@ def actor_grad_fun(actor, target_critic, t_v, good_obs, good_act, mix_obs, mix_a
     q = jnp.minimum(q1, q2) if config.double_q else q1
     q = jax.lax.stop_gradient(q)
     if not config.adv_policy_extraction:
-        weight = jnp.exp(config.actor_temperature_Q * q).clip(min=0, max=100)
+        weight = jnp.exp(config.actor_temperature_Q * q).clip(
+            min=0, max=config.actor_weight_max
+        )
     else:
-        adv = (q - t_v).clip(max=7.0)
-        weight = jnp.exp(adv * 3).clip(min=0, max=100)
+        adv = (q - t_v).clip(max=config.adv_clip)
+        weight = jnp.exp(adv * config.adv_scale).clip(min=0, max=config.actor_weight_max)
     weight = jax.lax.stop_gradient(weight)
 
     obs = jnp.concatenate([good_obs, mix_obs], axis=0)
@@ -680,7 +746,6 @@ def main(args, dc_config, cfg_env=None):
 
     config = {**default_cfg, **trajectory_cfg}
     config["dualcoil"] = dict(dc_config)
-    config["normalize_observation"] = args.normalize_observation
 
     # env name
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
@@ -708,6 +773,9 @@ def main(args, dc_config, cfg_env=None):
             "double_q": dc_config["double_q"],
             "adv_policy_extraction": dc_config["adv_policy_extraction"],
             "learn_expert_data": dc_config["learn_expert_data"],
+            "actor_weight_max": dc_config["actor_weight_max"],
+            "adv_clip": dc_config["adv_clip"],
+            "adv_scale": dc_config["adv_scale"],
             "has_bad": has_negative,
         },
     )()
@@ -739,8 +807,9 @@ def main(args, dc_config, cfg_env=None):
     critic = DoubleCritic(obs_dim, act_dim, hidden_dims, critic_rngs)
     target_critic = deepcopy(critic)  # same initialisation as the critic
     value = ValueCritic(obs_dim, hidden_dims, critic_rngs)
-    good_disc = Discriminator(obs_dim, hidden_dims, disc_rngs)
-    bad_disc = Discriminator(obs_dim, hidden_dims, disc_rngs)
+    disc_clip = (dc_config["disc_clip_min"], dc_config["disc_clip_max"])
+    good_disc = Discriminator(obs_dim, hidden_dims, disc_rngs, *disc_clip)
+    bad_disc = Discriminator(obs_dim, hidden_dims, disc_rngs, *disc_clip)
 
     def disc_tx():
         return optax.chain(
@@ -760,8 +829,18 @@ def main(args, dc_config, cfg_env=None):
         optimizers=Optimizers(
             actor=actor_optimizer,
             # optax.adamw default weight decay (1e-4), as in the authors' code
-            critic=nnx.Optimizer(model=critic, tx=optax.adamw(dc_config["critic_lr"])),
-            value=nnx.Optimizer(model=value, tx=optax.adamw(dc_config["value_lr"])),
+            critic=nnx.Optimizer(
+                model=critic,
+                tx=optax.adamw(
+                    dc_config["critic_lr"], weight_decay=dc_config["critic_weight_decay"]
+                ),
+            ),
+            value=nnx.Optimizer(
+                model=value,
+                tx=optax.adamw(
+                    dc_config["value_lr"], weight_decay=dc_config["value_weight_decay"]
+                ),
+            ),
             good_disc=nnx.Optimizer(model=good_disc, tx=disc_tx()),
             bad_disc=nnx.Optimizer(model=bad_disc, tx=disc_tx()),
         ),
@@ -784,17 +863,18 @@ def main(args, dc_config, cfg_env=None):
         union_data["observations"].shape[1] == ep_len
     ), f"{union_data['observations'].shape[1]} episode length is different from {ep_len}"
 
-    good_trans, _ = get_transitions(pos_data, ep_len)
-    mix_trans, mix_traj_idx = get_transitions(union_data, ep_len)
+    clip_eps = dc_config["action_clip_eps"]
+    good_trans, _ = get_transitions(pos_data, ep_len, clip_eps)
+    mix_trans, mix_traj_idx = get_transitions(union_data, ep_len, clip_eps)
     if has_negative:
-        bad_trans, _ = get_transitions(neg_data, ep_len)
+        bad_trans, _ = get_transitions(neg_data, ep_len, clip_eps)
     else:
         bad_trans = empty_transitions(obs_dim, act_dim)
     all_data = AllData(good=good_trans, bad=bad_trans, mix=mix_trans)
 
-    # set logger
-    dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+    # set logger (config values take precedence over the PSIL command-line arguments)
+    dict_args = dict(config)
+    dict_args["psil_args"] = {k: v for k, v in vars(args).items() if v is not None}
 
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     disc_logger = EpochLogger(
@@ -804,6 +884,7 @@ def main(args, dc_config, cfg_env=None):
         use_tensorboard=False,
     )
     logger.save_config(dict_args)
+    warn_ignored_args(args, config, logger, "dualcoil")
     logger.log(
         f"DualCOIL{'' if has_negative else '-G'}: good={good_trans.observations.shape[0]}, "
         f"bad={bad_trans.observations.shape[0] if has_negative else 0}, "
