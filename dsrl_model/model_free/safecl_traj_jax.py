@@ -880,7 +880,6 @@ def main(args, cfg_env=None):
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
     config["pi_alpha"] = args.alpha
-    config["pi_weight"] = args.policy_weight_type
 
     config["embd_type"] = args.embedding_model_type
     config["embd_update_cnt"] = args.num_embd_updates
