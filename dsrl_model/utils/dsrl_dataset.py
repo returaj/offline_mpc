@@ -221,7 +221,7 @@ def get_full_pos_neg_and_union_data(d4rl_data, config):
     num_union_traj = config["num_union_trajectories"]
 
     # preferred dataset
-    true_percentage = 1.0 - config["pref_noise"]
+    true_percentage = 1.0 - config.get("pref_noise", 0.0)
     num_true_pos_traj = int(num_pos_traj * true_percentage)
     num_false_pos_traj = num_pos_traj - num_true_pos_traj
 
