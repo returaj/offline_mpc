@@ -320,6 +320,12 @@ def single_agent_args():
             "help": "fraction of noisy label in the non-preferred dataset",
         },
         {
+            "name": "--pref-noise",
+            "type": float,
+            "default": 0.0,
+            "help": "fraction of noisy label in the preferred dataset",
+        },
+        {
             "name": "--use-bc-trajectory",
             "type": lambda x: bool(strtobool(x)),
             "default": True,

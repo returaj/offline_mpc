@@ -834,6 +834,7 @@ def main(args, cfg_env=None):
     trajectory_cfg["num_negative_trajectories"] = args.num_non_preferred
     trajectory_cfg["num_union_trajectories"] = args.num_union
     trajectory_cfg["non_pref_noise"] = args.non_pref_noise
+    trajectory_cfg["pref_noise"] = args.pref_noise
     trajectory_cfg["data_inpaint"] = args.data_inpaint
     trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
