@@ -640,7 +640,7 @@ def plot_fbeta_kappa_aggregate(agg, algo_order=None, fontsize=10):
         _beta_lines(ax, agg[agg["level"] == lvl], algos, betas)
         ax.set_title(LEVEL_TITLES[lvl], fontsize=fontsize)
         ax.set_xlabel(r"$\beta$", fontsize=fontsize)
-    axs[0].set_ylabel(r"F$\beta$-score", fontsize=fontsize)
+    axs[0].set_ylabel(r"F$_\beta^\kappa$-score", fontsize=fontsize)
     h, l = axs[0].get_legend_handles_labels()
     fig.legend(h, l, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=len(algos), fontsize=fontsize - 1)
     fig.tight_layout()
