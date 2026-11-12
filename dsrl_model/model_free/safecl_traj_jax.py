@@ -595,7 +595,10 @@ def policy_grad_aux_fun(
         l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
 
         # B
-        weight = jnp.where(logw > 0, 1.0, 0.0)
+        if config.pi_weight == 'binary':
+            weight = jnp.where(logw > 0, 1.0, 0.0)
+        else:
+            weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
 
         loss = (weight * l2_loss).mean()
@@ -840,6 +843,7 @@ def main(args, cfg_env=None):
     config = {**default_cfg, **trajectory_cfg}
     config["pi_baseline_type"] = args.policy_baseline_type
     config["pi_alpha"] = args.alpha
+    config['pi_weight'] = args.policy_weight_type
 
     config["embd_type"] = args.embedding_model_type
 
