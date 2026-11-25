@@ -204,6 +204,105 @@ class SafeDiceTanhMixtureActor(nnx.Module):
         return self.action_keep_params_static(self.rngs(), obs, deterministic)
 
 
+class GaussianActor(nnx.Module):
+    """
+    Standard Gaussian policy from IQL (Implicit Q-Learning; Kostrikov, Nair & Levine,
+    ICLR 2022), which is also the default actor of AWAC/AWR-style weighted behaviour
+    cloning in offline RL.
+
+    Reference implementation: ikostrikov/implicit_q_learning, `policy.NormalTanhPolicy`
+    built in `learner.py` with
+        hidden_dims=(256, 256), state_dependent_std=False, log_std_min=-5.0,
+        tanh_squash_distribution=False
+    i.e.
+        a ~ N(tanh(f_mu(s)), diag(exp(log_std))^2)
+      - 2 x 256 ReLU MLP with orthogonal(sqrt(2)) initialisation (jaxrl default).
+      - The mean is passed through tanh, but the distribution itself is NOT
+        tanh-squashed. Hence `get_log_prob` evaluates the dataset action directly:
+        no atanh, no Jacobian, and no blow-up for saturated actions at +/-1.
+      - log_std is a state-independent learned parameter, initialised to 0 and
+        clipped to [-5, 2].
+      - Deterministic action is the mean (IQL evaluates with temperature 0).
+
+    The interface mirrors `SafeDiceTanhMixtureActor` so it can be swapped in directly:
+      __call__(obs)                -> (actions, log_prob, pretanh_actions, dist)
+      get_log_prob(obs, act)       -> log_prob
+      action_w_key(key, obs, det)  -> actions
+      action(obs, det)             -> actions
+    Since there is no tanh squashing, `pretanh_actions` is the raw Gaussian sample,
+    and `actions` is that sample clipped to the valid action range [-1, 1].
+    `get_pretanh_action_dist` returns the (unsquashed) Gaussian action distribution.
+    """
+
+    def __init__(
+        self,
+        rngs,
+        obs_dim,
+        act_dim,
+        hidden_size=256,
+        logstd_range=(-5.0, 2.0),
+        eps=EPS,
+    ):
+        self.rngs = rngs
+
+        self.act_dim = act_dim
+        self.logstd_min, self.logstd_max = logstd_range
+        self.eps = eps
+
+        kernel_init = nnx.initializers.orthogonal(scale=jnp.sqrt(2.0))
+        self.pre_encoder = nnx.Sequential(
+            nnx.Linear(obs_dim, hidden_size, kernel_init=kernel_init, rngs=rngs),
+            nnx.relu,
+            nnx.Linear(hidden_size, hidden_size, kernel_init=kernel_init, rngs=rngs),
+            nnx.relu,
+        )
+        self.means = nnx.Linear(hidden_size, act_dim, kernel_init=kernel_init, rngs=rngs)
+        self.logstds = nnx.Param(jnp.zeros((act_dim,)))
+
+    def _get_action_dist(self, obs):
+        x = self.pre_encoder(obs)
+
+        means = nnx.tanh(self.means(x))
+        logstds = jnp.clip(self.logstds.value, self.logstd_min, self.logstd_max)
+        stds = jnp.broadcast_to(jnp.exp(logstds), means.shape)
+
+        action_dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
+        return action_dist
+
+    def __call__(self, obs):
+        action_dist = self._get_action_dist(obs)
+
+        # reparameterised sample, so gradients flow to the mean and log_std
+        pretanh_actions = action_dist.sample(seed=self.rngs())
+        log_prob = action_dist.log_prob(pretanh_actions)
+        actions = jnp.clip(pretanh_actions, -1.0, 1.0)
+
+        return actions, log_prob, pretanh_actions, action_dist
+
+    def get_log_prob(self, obs, act):
+        # dataset actions are evaluated as-is: no atanh / Jacobian is needed because
+        # the distribution is not tanh-squashed.
+        action_dist = self._get_action_dist(obs)
+        log_prob = action_dist.log_prob(act)
+        return log_prob
+
+    def action_w_key(self, key, obs, deterministic=False):
+        action_dist = self._get_action_dist(obs)
+
+        deterministic_action = action_dist.mean()
+        stochastic_action = action_dist.sample(seed=key)
+
+        action = jnp.where(deterministic, deterministic_action, stochastic_action)
+        return jnp.clip(action, -1.0, 1.0)
+
+    @functools.partial(jax.jit, static_argnums=0)
+    def action_keep_params_static(self, key, obs, deterministic=False):
+        return self.action_w_key(key, obs, deterministic)
+
+    def action(self, obs, deterministic=True):
+        return self.action_keep_params_static(self.rngs(), obs, deterministic)
+
+
 class ExpCostModel(nnx.Module):
     def __init__(self, rngs, x_dims, hidden_size=256, clip_range=(0.0, 1.0)):
         sizes = [x_dims, hidden_size, hidden_size, 1]
