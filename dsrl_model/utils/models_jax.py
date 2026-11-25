@@ -304,11 +304,13 @@ class GaussianActor(nnx.Module):
 
 
 class ExpCostModel(nnx.Module):
-    def __init__(self, rngs, x_dims, hidden_size=256, clip_range=(0.0, 1.0)):
+    def __init__(
+        self, rngs, x_dims, hidden_size=256, clip_range=(0.0, 1.0), activation=nnx.elu
+    ):
         sizes = [x_dims, hidden_size, hidden_size, 1]
         layers = list()
         for j in range(len(sizes) - 1):
-            act = nnx.elu if j < len(sizes) - 2 else jax.nn.identity
+            act = activation if j < len(sizes) - 2 else jax.nn.identity
             affine_layer = nnx.Linear(sizes[j], sizes[j + 1], rngs=rngs)
             layers += [affine_layer, act]
         self.model = nnx.Sequential(*layers)

@@ -24,35 +24,39 @@ from dsrl_model.utils.dsrl_dataset import (
     get_normalized_data,
     get_pos_neg_and_union_data,
 )
-from dsrl_model.utils.models_jax import (
-    ExpCostModel,
-    Scalar,
-    get_tree_norm,
-)
-from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
+from dsrl_model.utils.models_jax import ExpCostModel, Scalar, get_tree_norm
 from dsrl_model.utils.native_logger import EpochLogger
+from dsrl_model.utils.pi_utils_jax import (
+    check_policy_config,
+    get_actor_cls,
+    policy_bc_loss,
+)
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
-
 # jax.config.update("jax_disable_jit", True)
 
 EPS = 1e-6
 
+# Defaults follow the authors' ILID implementation
+# (HansenHua/ILID-offline-imitation-learning, main.py argparse / iLID.__init__).
 default_cfg = {
     "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 5.0,
-    "decay": 0.9,
-    "alpha": 1.0,
-    "lmbda": 0.85,
-    "pu_nu": 0.9,
-    "rollback": 10,
+    "decay": 0.9,  # --decay
+    "alpha": 1.0,  # --alpha (initial value, tuned automatically)
+    "lmbda": 0.89,  # --bar: discriminator threshold for expert-like states
+    "pu_nu": 0.5,  # --eta: PU-learning balance
+    "rollback": 5,  # --rollback
     "action_repeat": 1,  # set to 2, min value is 1
     "train_horizon": 1,
-    "weight_decay": 0.01,
-    "total_iteration_disc": int(1e5),
-    "warmup_iteration_policy": int(2e5),
+    "batch_size": 256,  # --batch_size
+    "lr": 1e-5,  # --policy_lr (also discriminator lr)
+    "weight_decay": 0.005,  # --regularization (torch Adam L2 weight decay)
+    "pi_loss": "nll",  # authors' policy loss is weighted log-likelihood
+    "normalize_observation": True,  # authors normalize states unless --no_normalize
+    "total_iteration_disc": int(1e5),  # --d_steps
+    "warmup_iteration_policy": int(2e5),  # --bc_steps
     "total_iteration_policy": int(1e6),
 }
 
@@ -71,6 +75,32 @@ trajectory_data = {
     "reward_only": None,
     "cost_only": ((0.0, 1.0, 0.0, 0.5),),
 }
+
+
+def adam_l2(lr, weight_decay=0.0):
+    # torch.optim.Adam(weight_decay=wd): L2 term added to the gradient before Adam
+    return optax.chain(optax.add_decayed_weights(weight_decay), optax.adam(lr))
+
+
+def add_pos_to_union(obj):
+    """Authors add the expert data (weight 1) into the selected imperfect data."""
+    num_union = obj.union_act.shape[0]
+    num_pos = obj.pos_act.shape[0]
+    dtype = obj.union_obs.dtype
+    return obj.replace(
+        union_obs=jnp.concat(
+            [obj.union_obs[:num_union], obj.pos_obs[:num_pos], obj.union_obs[num_union:]]
+        ),
+        union_act=jnp.concat([obj.union_act, obj.pos_act]),
+        union_reward=jnp.concat([obj.union_reward, obj.pos_reward]),
+        union_cost=jnp.concat([obj.union_cost, obj.pos_cost]),
+        union_priorities=jnp.concat(
+            [obj.union_priorities[:num_union], jnp.ones(num_pos, dtype=dtype)]
+        ),
+        union_weight=jnp.concat(
+            [obj.union_weight[:num_union], jnp.ones(num_pos, dtype=dtype)]
+        ),
+    )
 
 
 def evaluate_bc_policy(eval_env, bc_policy, mu_obs, std_obs):
@@ -365,21 +395,31 @@ def main(args, cfg_env=None):
     trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg}
+
+    # authors' defaults unless the flag is explicitly passed
+    def flag_passed(flag):
+        return any(a == flag or a.startswith(flag + "=") for a in sys.argv[1:])
+
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
     config["lmbda"] = args.lmbda or config.get("lmbda")
     config["policy_type"] = args.policy_type
-    config["normalize_observation"] = args.normalize_observation
-    config["lr"] = args.lr
+    if flag_passed("--normalize-observation"):
+        config["normalize_observation"] = args.normalize_observation
+    if flag_passed("--lr"):
+        config["lr"] = args.lr
     config["pi_actor"] = args.pi_actor
-    config["pi_loss"] = args.pi_loss
+    if flag_passed("--pi-loss"):
+        config["pi_loss"] = args.pi_loss
     check_policy_config(config["pi_actor"], config["pi_loss"])
     actor_cls = get_actor_cls(config["pi_actor"])
-    config["warmup_iteration_policy"] = args.warmup_bc
+    if args.warmup_bc is not None:
+        config["warmup_iteration_policy"] = args.warmup_bc
     do_alpha_warmup = config["warmup_iteration_policy"] > 0
 
     # set training steps
-    batch_size = args.batch_size or config.get("batch_size")
-    config["batch_size"] = batch_size
+    if flag_passed("--batch-size"):
+        config["batch_size"] = args.batch_size
+    batch_size = config["batch_size"]
 
     config_data = make_static_config_from_dict(name="State", d=config)()
 
@@ -397,13 +437,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
     )
     policy_optimizer = nnx.Optimizer(
-        model=policy_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=policy_model, tx=adam_l2(config["lr"], config["weight_decay"])
     )
 
     expert_policy_model = actor_cls(
@@ -413,13 +447,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
     )
     expert_policy_optimizer = nnx.Optimizer(
-        model=expert_policy_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=expert_policy_model, tx=adam_l2(config["lr"], config["weight_decay"])
     )
 
     discriminator_model = ExpCostModel(
@@ -427,26 +455,17 @@ def main(args, cfg_env=None):
         x_dims=obs_space.shape[0],
         hidden_size=config["hidden_size"],
         clip_range=(0.1, 0.9),
+        activation=nnx.relu,
     )
+    # authors: discriminator Adam lr=1e-5, weight_decay=0.005 (hard-coded)
     discriminator_optimizer = nnx.Optimizer(
-        model=discriminator_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=discriminator_model, tx=adam_l2(1e-5, 0.005)
     )
 
     log_alpha_model = Scalar(0.0)
+    # authors: alpha Adam lr=policy_lr, no weight decay
     log_alpha_optimizer = nnx.Optimizer(
-        model=log_alpha_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=log_alpha_model, tx=optax.adam(learning_rate=config["lr"])
     )
 
     # data
@@ -508,7 +527,9 @@ def main(args, cfg_env=None):
 
     # set logger
     dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+    dict_args.update(
+        (k, v) for k, v in vars(args).items() if v is not None and k not in config
+    )
 
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     logger.save_config(dict_args)
@@ -614,7 +635,7 @@ def main(args, cfg_env=None):
     logger.log(
         "Reshuffle union dataset based on discriminator next state expert prediction."
     )
-    pred_expert_mask = discriminator_model(data_buffer.union_obs) > config_data.lmbda
+    pred_expert_mask = discriminator_model(data_buffer.union_obs) >= config_data.lmbda
     logger.log(
         f"Number of predicted expert state in union dataset: {pred_expert_mask.sum()} / {pred_expert_mask.shape[0]}"
     )
@@ -624,6 +645,7 @@ def main(args, cfg_env=None):
         rollback=config_data.rollback,
         decay=config_data.decay,
     )
+    data_buffer = add_pos_to_union(data_buffer)
 
     logger.log("Start training policy model.")
     steps = 0
