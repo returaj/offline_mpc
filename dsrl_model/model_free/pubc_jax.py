@@ -30,8 +30,9 @@ What is kept from PSIL (for a controlled comparison)
 * Data construction: get_dataset_in_d4rl_format / get_pos_neg_and_union_data /
   get_normalized_data with the same seeding order, so D_P and D_U are identical to PSIL
   for the same seed and arguments.
-* Policy: SafeDiceTanhMixtureActor, AdamW + global-norm clipping, horizon-H windows,
-  discounted L2 BC loss (gamma), same batch size, learning rate and 1M gradient steps.
+* Policy: SafeDiceTanhMixtureActor (or GaussianActor with --pi-actor gaussian), AdamW +
+  global-norm clipping, horizon-H windows, discounted BC loss (gamma; sampled-action L2
+  or NLL with --pi-loss), same batch size, learning rate and 1M gradient steps.
   PUBC trains this policy only on the trajectories the filter labels as positive
   (uniform weight), exactly like the authors' BC on the filtered dataset.
 * Buffer: OnPolicyBuffer from dsrl_model.utils.buffer_jax. Filtering is applied by
@@ -97,7 +98,8 @@ from dsrl_model.utils.dsrl_dataset import (
     get_normalized_data,
     get_pos_neg_and_union_data,
 )
-from dsrl_model.utils.models_jax import SafeDiceTanhMixtureActor, get_tree_norm
+from dsrl_model.utils.models_jax import get_tree_norm
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -979,13 +981,15 @@ def policy_grad_aux_fun(policy_model, data, config):
     target_act = data.union_act.reshape(batch * horizon, -1)
 
     def loss_fun(policy_model):
-        pred_act, log_pi, *_ = policy_model(target_obs)
-        # BH
-        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
-        l2_loss = l2_loss.reshape(batch, horizon)  # B X H
-        l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
+        # BH; 'sample_l2': L2 between a sampled and the dataset action,
+        # 'nll': negative log-likelihood of the dataset action
+        step_loss, _, log_pi = policy_bc_loss(
+            policy_model, target_obs, target_act, config.pi_loss
+        )
+        step_loss = step_loss.reshape(batch, horizon)  # B X H
+        traj_loss = discounted_sum(step_loss.T, config.gamma)  # B
         # PUBC: every selected trajectory has weight 1 (plain BC on the filtered data)
-        loss = l2_loss.mean()
+        loss = traj_loss.mean()
         return loss, PolicyAux(loss=loss, entropy=-log_pi.mean())
 
     grad_fun = nnx.value_and_grad(loss_fun, has_aux=True)
@@ -1061,13 +1065,23 @@ def main(args, pubc_config, cfg_env=None):
     config["pubc"] = dict(pubc_config)
     batch_size = config["batch_size"]
 
+    # policy class / BC loss (same flags as PSIL)
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
+
     # env name
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
     config["env_name"] = env_name
 
     config_data = make_static_config_from_dict(
         name="State",
-        d={"log_freq": config["log_freq"], "gamma": config["gamma"]},
+        d={
+            "log_freq": config["log_freq"],
+            "gamma": config["gamma"],
+            "pi_loss": config["pi_loss"],
+        },
     )()
 
     # evaluation environment
@@ -1077,7 +1091,7 @@ def main(args, pubc_config, cfg_env=None):
 
     # policy (identical to PSIL)
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

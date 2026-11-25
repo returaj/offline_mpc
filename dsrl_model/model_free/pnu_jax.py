@@ -99,10 +99,10 @@ from dsrl_model.utils.dsrl_dataset import (
     get_pos_neg_and_union_data,
 )
 from dsrl_model.utils.models_jax import (
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
     softer_max,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -730,17 +730,19 @@ def policy_grad_aux_fun(
         pi_baseline = config.pi_alpha
 
     def fwd_kl_loss(policy_model, target_obs, target_act, logw, scale):
-        pred_act, log_pi, *_ = policy_model(target_obs)
-        # BH
-        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
-        l2_loss = l2_loss.reshape(batch, horizon)  # B X H
-        l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
+        # BH; 'sample_l2': L2 between a sampled and the dataset action,
+        # 'nll': negative log-likelihood of the dataset action
+        step_loss, _, log_pi = policy_bc_loss(
+            policy_model, target_obs, target_act, config.pi_loss
+        )
+        step_loss = step_loss.reshape(batch, horizon)  # B X H
+        traj_loss = discounted_sum(step_loss.T, config.gamma)  # B
 
         # B
         weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
         weight = scale * jax.lax.stop_gradient(weight)
 
-        loss = (weight * l2_loss).mean()
+        loss = (weight * traj_loss).mean()
         return loss, PolicyAux.Value(
             loss=loss,
             weight=weight.mean(),
@@ -852,6 +854,12 @@ def main(args, pnu_config, cfg_env=None):
     config["pnu"] = dict(pnu_config)
     batch_size = config["batch_size"]
 
+    # policy class / BC loss (same flags as PSIL)
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
+
     # env name
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
     config["env_name"] = env_name
@@ -864,6 +872,7 @@ def main(args, pnu_config, cfg_env=None):
             "pi_temp": config["pi_temp"],
             "pi_alpha": config["pi_alpha"],
             "pi_baseline_type": config["pi_baseline_type"],
+            "pi_loss": config["pi_loss"],
         },
     )()
 
@@ -874,7 +883,7 @@ def main(args, pnu_config, cfg_env=None):
 
     # policy (identical to PSIL)
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

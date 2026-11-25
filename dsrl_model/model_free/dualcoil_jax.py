@@ -34,8 +34,10 @@ What is kept from PSIL
   get_normalized_data) with the same seeding order, so D_P, D_N and D_U are identical
   to PSIL for the same seed and arguments. D_P -> good dataset, D_N -> bad dataset,
   D_U -> unlabeled (mixed) dataset.
-* Policy network: SafeDiceTanhMixtureActor, trained with DualCOIL's own objective
-  (Q-weighted log-likelihood through get_log_prob) and DualCOIL's actor optimiser.
+* Policy network: SafeDiceTanhMixtureActor (or GaussianActor with --pi-actor gaussian),
+  trained with DualCOIL's own objective (Q-weighted log-likelihood through
+  get_log_prob; default --pi-loss nll, or Q-weighted sampled-action L2 with
+  --pi-loss sample_l2) and DualCOIL's actor optimiser.
   It is saved with the "bc_policy" prefix and the "norm" state, so your PSIL
   evaluation script can load it unchanged.
 * Logger: EpochLogger (progress.csv for the joint training, disc_progress.csv for the
@@ -91,7 +93,8 @@ from dsrl_model.utils.dsrl_dataset import (
     get_normalized_data,
     get_pos_neg_and_union_data,
 )
-from dsrl_model.utils.models_jax import SafeDiceTanhMixtureActor, get_tree_norm
+from dsrl_model.utils.models_jax import get_tree_norm
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -494,13 +497,23 @@ def actor_grad_fun(actor, target_critic, t_v, good_obs, good_act, mix_obs, mix_a
     num_good = good_obs.shape[0]
 
     def loss_fun(actor):
-        log_probs = actor.get_log_prob(obs, act)
-        expert_log_probs = log_probs[:num_good]
-        mixed_log_probs = log_probs[num_good:]
-        loss = -(weight * mixed_log_probs).mean()
+        # 'nll' (DualCOIL default): bc_loss = -log pi(a|s) of the dataset action;
+        # 'sample_l2': L2 between a sampled policy action and the dataset action.
+        # log_pi: log-prob of the sampled policy action (entropy estimate)
+        bc_loss, _, log_pi = policy_bc_loss(actor, obs, act, config.pi_loss)
+        expert_bc_loss = bc_loss[:num_good]
+        mixed_bc_loss = bc_loss[num_good:]
+        loss = (weight * mixed_bc_loss).mean()
         if config.learn_expert_data:
-            loss += -(100 * expert_log_probs.mean())
-        return loss, (loss, weight.mean(), expert_log_probs.mean(), mixed_log_probs.mean())
+            loss += 100 * expert_bc_loss.mean()
+        # good/mixed "logp" = -bc_loss (the dataset log-likelihood when pi_loss='nll')
+        return loss, (
+            loss,
+            weight.mean(),
+            -expert_bc_loss.mean(),
+            -mixed_bc_loss.mean(),
+            -log_pi[num_good:].mean(),
+        )
 
     (_, aux), grads = nnx.value_and_grad(loss_fun, has_aux=True)(actor)
     return grads, aux
@@ -576,7 +589,7 @@ def dualcoil_step(state, data, key, config):
     )
     o.value.update(value_grads)
 
-    actor_grads, (actor_loss, actor_weight, good_logp, mixed_logp) = actor_grad_fun(
+    actor_grads, (actor_loss, actor_weight, good_logp, mixed_logp, entropy) = actor_grad_fun(
         m.actor,
         m.target_critic,
         t_v,
@@ -605,7 +618,7 @@ def dualcoil_step(state, data, key, config):
         actor_good_logp=good_logp,
         actor_mixed_logp=mixed_logp,
         mix_ratio=mix_ratio.mean(),
-        entropy=-mixed_logp,
+        entropy=entropy,
     )
 
 
@@ -751,6 +764,17 @@ def main(args, dc_config, cfg_env=None):
     env_name = re.search(r"Offline(.*?)(?:Gymnasium)?-v[0-9]", args.task).group(1)
     config["env_name"] = env_name
 
+    # policy class / BC loss. DualCOIL's own objective is the Q-weighted
+    # log-likelihood, so pi_loss defaults to 'nll' unless --pi-loss is passed.
+    pi_loss_passed = any(
+        a == "--pi-loss" or a.startswith("--pi-loss=") for a in sys.argv[1:]
+    )
+    pi_loss = args.pi_loss if pi_loss_passed else "nll"
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
+
     # derived values (train.py)
     actor_temperature_Q = dc_config["actor_Q_scale"] / dc_config["v_beta"]
     good_reward_coeff = dc_config["r_scale"]
@@ -777,6 +801,7 @@ def main(args, dc_config, cfg_env=None):
             "adv_clip": dc_config["adv_clip"],
             "adv_scale": dc_config["adv_scale"],
             "has_bad": has_negative,
+            "pi_loss": pi_loss,
         },
     )()
 
@@ -790,7 +815,7 @@ def main(args, dc_config, cfg_env=None):
     hidden_dims = tuple([dc_config["mlp_hidden_size"]] * dc_config["num_layers"])
 
     # policy network (identical to PSIL), DualCOIL actor optimiser
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_dim,
         act_dim=act_dim,
