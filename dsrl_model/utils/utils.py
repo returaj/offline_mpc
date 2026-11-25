@@ -397,6 +397,55 @@ def single_agent_args():
             "default": False,
             "help": "SafeCL whether to use weight decay or percentage based",
         },
+        # ---- safecl_traj_jax options (defaults = original behaviour) ----
+        {
+            "name": "--pi-actor",
+            "type": str,
+            "default": "tanh_mixture",
+            "help": "safecl_traj policy class: 'tanh_mixture' (SafeDiceTanhMixtureActor) "
+            "or 'gaussian' (IQL-style GaussianActor)",
+        },
+        {
+            "name": "--pi-loss",
+            "type": str,
+            "default": "sample_l2",
+            "help": "safecl_traj per-step policy loss: 'sample_l2' (L2 on a sampled "
+            "action) or 'nll' (negative log-likelihood of the dataset action)",
+        },
+        {
+            "name": "--pi-filter-neg",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "safecl_traj: zero policy weight for union segments with negative "
+            "weight (judged non-preferred)",
+        },
+        {
+            "name": "--pi-lr-schedule",
+            "type": str,
+            "default": "constant",
+            "help": "safecl_traj policy lr schedule: 'constant' or 'cosine' (IQL actor: "
+            "cosine decay to 0 over training)",
+        },
+        {
+            "name": "--embd-lr-schedule",
+            "type": str,
+            "default": "constant",
+            "help": "safecl_traj embedding lr schedule: 'constant' or 'warmup' "
+            "(Decision Transformer: linear warmup then constant)",
+        },
+        {
+            "name": "--embd-input-ln",
+            "type": lambda x: bool(strtobool(x)),
+            "default": False,
+            "help": "safecl_traj: LayerNorm on embedding input tokens",
+        },
+        {
+            "name": "--embd-attention",
+            "type": str,
+            "default": "pool",
+            "help": "safecl_traj score pooling: 'pool' (single learned query) or "
+            "'pref_attn' (Preference Transformer preference attention)",
+        },
     ]
     # Create argument parser
     parser = argparse.ArgumentParser(description="RL Policy")

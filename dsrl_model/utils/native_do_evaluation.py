@@ -116,7 +116,9 @@ def load_flax_model(obs_dim, act_dim, hidden_size, path, device):
     restored_pure_dict = joblib.load(path)
 
     rngs = nnx.Rngs(default=0, params=0, dropout=0, random_sample=0)
-    model = SafeDiceTanhMixtureActor(
+    # SafeDiceTanhMixtureActor has mixture "logits"; GaussianActor does not.
+    actor_cls = SafeDiceTanhMixtureActor if "logits" in restored_pure_dict else GaussianActor
+    model = actor_cls(
         rngs=rngs, obs_dim=obs_dim, act_dim=act_dim, hidden_size=hidden_size
     )
     abstract_model = nnx.eval_shape(lambda: model)
@@ -303,7 +305,7 @@ if __name__ == "__main__":
         import jax.numpy as jnp
         from flax import nnx
 
-        from dsrl_model.utils.models_jax import SafeDiceTanhMixtureActor
+        from dsrl_model.utils.models_jax import GaussianActor, SafeDiceTanhMixtureActor
     else:
         import torch
 

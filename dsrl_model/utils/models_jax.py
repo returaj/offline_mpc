@@ -231,7 +231,7 @@ class GaussianActor(nnx.Module):
       action(obs, det)             -> actions
     Since there is no tanh squashing, `pretanh_actions` is the raw Gaussian sample,
     and `actions` is that sample clipped to the valid action range [-1, 1].
-    `get_pretanh_action_dist` returns the (unsquashed) Gaussian action distribution.
+    `_get_action_dist` returns the (unsquashed) Gaussian action distribution.
     """
 
     def __init__(
@@ -273,11 +273,11 @@ class GaussianActor(nnx.Module):
         action_dist = self._get_action_dist(obs)
 
         # reparameterised sample, so gradients flow to the mean and log_std
-        pretanh_actions = action_dist.sample(seed=self.rngs())
-        log_prob = action_dist.log_prob(pretanh_actions)
-        actions = jnp.clip(pretanh_actions, -1.0, 1.0)
+        sampled_actions = action_dist.sample(seed=self.rngs())
+        log_prob = action_dist.log_prob(sampled_actions)
+        actions = jnp.clip(sampled_actions, -1.0, 1.0)
 
-        return actions, log_prob, pretanh_actions, action_dist
+        return actions, log_prob, sampled_actions, action_dist
 
     def get_log_prob(self, obs, act):
         # dataset actions are evaluated as-is: no atanh / Jacobian is needed because
@@ -457,7 +457,25 @@ class TransformerEmbedding(nnx.Module):
         num_attentions=1,
         do_layer_norm=True,
         do_residual=True,
+        input_layer_norm=False,
+        attention_type="pool",
     ):
+        """
+        Optional additions (all off by default, so default models and their
+        checkpoints are unchanged):
+          input_layer_norm: LayerNorm on the token embeddings (encoder + position)
+              before the transformer blocks, as in Preference Transformer
+              (Kim et al., ICLR 2023).
+          attention_type: how per-step scores are pooled into the segment score.
+              "pool": one learned query vector, w_j = softmax_j(a . z_j) (default).
+              "pref_attn": Preference Transformer's preference attention layer,
+                  w_j = mean_i softmax_j(q_i . k_j / sqrt(d)), with q, k projected
+                  from z.
+        """
+        if attention_type not in ("pool", "pref_attn"):
+            raise ValueError(
+                f"attention_type must be 'pool' or 'pref_attn', got {attention_type}"
+            )
         self.horizon = horizon
         self.encoder = nnx.Linear(obs_dim + act_dim, embd_dim, rngs=rngs)
         # self.pos_encoding = positionalencoding1d(embd_dim, horizon)
@@ -481,11 +499,26 @@ class TransformerEmbedding(nnx.Module):
         )
         self.attention = nnx.Linear(embd_dim, 1, rngs=rngs)
 
+        # Optional modules are created last and only when enabled, so the random
+        # initialisation of the default model is identical to before.
+        self.embd_dim = embd_dim
+        self.attention_type = attention_type
+        self.input_ln = (
+            nnx.LayerNorm(embd_dim, rngs=rngs) if input_layer_norm else None
+        )
+        self.pref_attention = (
+            nnx.Linear(embd_dim, 2 * embd_dim, rngs=rngs)
+            if attention_type == "pref_attn"
+            else None
+        )
+
     def z(self, x, normalize_z=True, training=True):
         # ensure x: batch X horizon X obs_act_dim
         x = self.encoder(x)
         positions = jnp.arange(x.shape[1])[None, :]  # (1, Horizon)
         x += self.pos_embedding(positions)
+        if self.input_ln is not None:
+            x = self.input_ln(x)
         for transformer in self.transformer_blocks:
             x = transformer(x, self.mask, training)
 
@@ -495,17 +528,35 @@ class TransformerEmbedding(nnx.Module):
         # batch X horizon X embd_dim
         return x
 
+    def get_pool_weights(self, z):
+        # horizon: mask first half of the trajectory
+        second_half = jnp.arange(self.horizon) > self.horizon // 2
+        if self.attention_type == "pref_attn":
+            # Preference Transformer's preference attention layer: per-step query
+            # and key, bidirectional softmax over (second-half) keys, then the
+            # attention matrix is averaged over (second-half) queries.
+            q, k = jnp.split(self.pref_attention(z), 2, axis=-1)
+            # batch X horizon(query) X horizon(key)
+            attn_logits = jnp.einsum("bid,bjd->bij", q, k) / jnp.sqrt(self.embd_dim)
+            attn_logits = attn_logits + (1.0 - second_half)[None, None, :] * -1e9
+            attn = jax.nn.softmax(attn_logits, axis=-1)
+            query_mask = second_half.astype(attn.dtype)
+            # batch X horizon(key); rows sum to 1
+            attn_weights = jnp.einsum("bij,i->bj", attn, query_mask) / query_mask.sum()
+        else:
+            # batch X horizon
+            attn_logits = self.attention(z).squeeze(axis=-1)
+            attn_logits = attn_logits + (1.0 - second_half) * -1e9
+            attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+        return attn_weights
+
     def get_score(self, x, ztarget, normalize_z=True, training=True):
         # batch X horizon X embd_dim
         z = self.z(x, normalize_z, training)
         # batch X horizon
         traj_score = jnp.einsum("ijk,ijk->ij", z, ztarget)
-        # horizon: mask first half of the trajectory
-        second_half = jnp.arange(self.horizon) > self.horizon // 2
         # batch X horizon
-        attn_logits = self.attention(z).squeeze(axis=-1)
-        attn_logits = attn_logits + (1.0 - second_half) * -1e9
-        attn_weights = jax.nn.softmax(attn_logits, axis=-1)
+        attn_weights = self.get_pool_weights(z)
         # batch
         score = jnp.einsum("ij,ij->i", attn_weights, traj_score)
         return score
@@ -523,6 +574,7 @@ class TransformerEmbeddingNoProjection(TransformerEmbedding):
         num_attentions=1,
         do_layer_norm=True,
         do_residual=True,
+        **kwargs,
     ):
         super().__init__(
             rngs,
@@ -534,6 +586,7 @@ class TransformerEmbeddingNoProjection(TransformerEmbedding):
             num_attentions,
             do_layer_norm,
             do_residual,
+            **kwargs,
         )
         self.pre_score = nnx.Sequential(
             nnx.Linear(embd_dim, embd_dim, rngs=rngs),
@@ -563,6 +616,7 @@ class TransformerEmbeddingCostant(TransformerEmbedding):
         num_attentions=1,
         do_layer_norm=True,
         do_residual=True,
+        **kwargs,
     ):
         super().__init__(
             rngs,
@@ -574,6 +628,7 @@ class TransformerEmbeddingCostant(TransformerEmbedding):
             num_attentions,
             do_layer_norm,
             do_residual,
+            **kwargs,
         )
         direction = jax.random.normal(rngs(), shape=(embd_dim,), dtype=jnp.float32)
         self.unit_direction = l2_normalize(direction, axis=-1)

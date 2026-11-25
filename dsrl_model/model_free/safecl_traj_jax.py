@@ -29,6 +29,7 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     EnsembleValue,
+    GaussianActor,
     SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     TransformerEmbeddingCostant,
@@ -62,6 +63,9 @@ default_cfg = {
     "update_tau": 0.01,
     "weight_decay": 0.01,
     "total_iteration": int(1e6),
+    # linear lr warmup length for --embd-lr-schedule warmup
+    # (Decision Transformer: 10k steps linear warmup, then constant lr)
+    "lr_warmup_steps": int(1e4),
 }
 
 trajectory_cfg = {
@@ -587,18 +591,27 @@ def policy_grad_aux_fun(
     else:
         pi_baseline = config.pi_alpha
 
-    def fwd_kl_loss(policy_model, target_obs, target_act, logw, scale):
+    def fwd_loss(policy_model, target_obs, target_act, logw, scale, is_pos):
         pred_act, log_pi, *_ = policy_model(target_obs)
         # BH
-        l2_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)  # forward kl
-        l2_loss = l2_loss.reshape(batch, horizon)  # B X H
-        l2_loss = discounted_sum(l2_loss.T, config.gamma)  # B
+        if config.pi_loss == "nll":
+            # weighted maximum likelihood of the dataset action (the AWR/AWAC/IQL
+            # policy extraction step); use with --pi-actor gaussian
+            step_loss = -policy_model.get_log_prob(target_obs, target_act)
+        else:
+            # original: L2 between a sampled policy action and the dataset action
+            step_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
+        step_loss = step_loss.reshape(batch, horizon)  # B X H
+        traj_loss = discounted_sum(step_loss.T, config.gamma)  # B
 
         # B
         weight = jnp.exp(jnp.clip((logw - pi_baseline) / config.pi_temp, max=5.0))
+        if config.pi_filter_neg and not is_pos:
+            # do not imitate union segments with negative weight at all
+            weight = weight * (logw >= 0.0)
         weight = scale * jax.lax.stop_gradient(weight)
 
-        loss = (weight * l2_loss).mean()
+        loss = (weight * traj_loss).mean()
         return loss, PolicyAux.Value(
             loss=loss,
             weight=weight.mean(),
@@ -606,20 +619,22 @@ def policy_grad_aux_fun(
         )
 
     def loss_fun(policy_model):
-        union_loss, union_aux = fwd_kl_loss(
+        union_loss, union_aux = fwd_loss(
             policy_model,
             target_union_obs,
             target_union_act,
             union_weight,
             union_scale,
+            is_pos=False,
         )
         pos_weight = jnp.ones_like(union_weight)
-        pos_loss, pos_aux = fwd_kl_loss(
+        pos_loss, pos_aux = fwd_loss(
             policy_model,
             target_pos_obs,
             target_pos_act,
             pos_weight,
             pos_scale,
+            is_pos=True,
         )
         loss = union_loss + pos_loss
         return loss, PolicyAux(
@@ -860,6 +875,28 @@ def main(args, cfg_env=None):
         args.num_non_preferred, 1.0
     )
 
+    # optional changes (defaults reproduce the original behaviour)
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    config["pi_filter_neg"] = args.pi_filter_neg
+    config["pi_lr_schedule"] = args.pi_lr_schedule
+    config["embd_lr_schedule"] = args.embd_lr_schedule
+    config["embd_input_ln"] = args.embd_input_ln
+    config["embd_attention"] = args.embd_attention
+    assert config["pi_actor"] in ("tanh_mixture", "gaussian"), config["pi_actor"]
+    assert config["pi_loss"] in ("sample_l2", "nll"), config["pi_loss"]
+    assert config["pi_lr_schedule"] in ("constant", "cosine"), config["pi_lr_schedule"]
+    assert config["embd_lr_schedule"] in ("constant", "warmup"), config[
+        "embd_lr_schedule"
+    ]
+    if config["pi_loss"] == "nll" and config["pi_actor"] == "tanh_mixture":
+        print(
+            "WARNING: --pi-loss nll with the tanh-squashed actor gives very large "
+            "losses for dataset actions at +/-1 (atanh blow-up); "
+            "consider --pi-actor gaussian.",
+            file=sys.stderr,
+        )
+
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
     config["batch_size"] = batch_size
@@ -885,50 +922,59 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+
+    def make_tx(lr_schedule):
+        # one optimizer update per training iteration
+        if lr_schedule == "warmup":
+            # Decision Transformer: linear warmup 0 -> lr, then constant. Constant
+            # (not decaying) because the sink labels keep changing during training.
+            learning_rate = optax.linear_schedule(
+                init_value=0.0,
+                end_value=config["lr"],
+                transition_steps=config["lr_warmup_steps"],
+            )
+        elif lr_schedule == "cosine":
+            # IQL actor: cosine decay lr -> 0 over training
+            learning_rate = optax.cosine_decay_schedule(
+                init_value=config["lr"], decay_steps=int(config["total_iteration"])
+            )
+        else:
+            learning_rate = config["lr"]
+        return optax.chain(
+            optax.clip_by_global_norm(config["max_grad_norm"]),
+            optax.adamw(learning_rate=learning_rate, weight_decay=config["weight_decay"]),
+        )
+
+    actor_cls = (
+        GaussianActor if config["pi_actor"] == "gaussian" else SafeDiceTanhMixtureActor
+    )
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
         hidden_size=config["hidden_size"],
     )
     policy_optimizer = nnx.Optimizer(
-        model=policy_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=policy_model, tx=make_tx(config["pi_lr_schedule"])
     )
 
     embd_size = config["embd_size"]
+    embedding_kwargs = dict(
+        rngs=rngs,
+        obs_dim=obs_space.shape[0],
+        act_dim=act_space.shape[0],
+        horizon=config["train_horizon"],
+        embd_dim=embd_size,
+        num_attentions=2,
+        input_layer_norm=config["embd_input_ln"],
+        attention_type=config["embd_attention"],
+    )
     if config["embd_type"] == "model_projection":
-        embedding_model = TransformerEmbedding(
-            rngs=rngs,
-            obs_dim=obs_space.shape[0],
-            act_dim=act_space.shape[0],
-            horizon=config["train_horizon"],
-            embd_dim=embd_size,
-            num_attentions=2,
-        )
+        embedding_model = TransformerEmbedding(**embedding_kwargs)
     elif config["embd_type"] == "constant_projection":
-        embedding_model = TransformerEmbeddingCostant(
-            rngs=rngs,
-            obs_dim=obs_space.shape[0],
-            act_dim=act_space.shape[0],
-            horizon=config["train_horizon"],
-            embd_dim=embd_size,
-            num_attentions=2,
-        )
+        embedding_model = TransformerEmbeddingCostant(**embedding_kwargs)
     elif config["embd_type"] == "no_projection":
-        embedding_model = TransformerEmbeddingNoProjection(
-            rngs=rngs,
-            obs_dim=obs_space.shape[0],
-            act_dim=act_space.shape[0],
-            horizon=config["train_horizon"],
-            embd_dim=embd_size,
-            num_attentions=2,
-        )
+        embedding_model = TransformerEmbeddingNoProjection(**embedding_kwargs)
     else:
         raise ValueError(
             "Embedding type not valid. "
@@ -936,13 +982,7 @@ def main(args, cfg_env=None):
             + f"Given embedding type: {config['embd_type']}."
         )
     embedding_optimizer = nnx.Optimizer(
-        model=embedding_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=embedding_model, tx=make_tx(config["embd_lr_schedule"])
     )
     embedding_model_target = deepcopy(embedding_model)
     curriculum_embedding_model = TransformerEmbedding(
