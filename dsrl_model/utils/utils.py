@@ -401,7 +401,7 @@ def single_agent_args():
         {
             "name": "--pi-actor",
             "type": str,
-            "default": "tanh_mixture",
+            "default": "gaussian",
             "help": "policy class (safecl_traj, ppl, ipl, ipl_xql, osil, safemil, ilid, iqlearn, "
             "dualcoil, pnu, pubc): "
             "'tanh_mixture' (SafeDiceTanhMixtureActor) "
@@ -410,7 +410,7 @@ def single_agent_args():
         {
             "name": "--pi-loss",
             "type": str,
-            "default": "sample_l2",
+            "default": "nll",
             "help": "per-step BC policy loss (safecl_traj, ppl, ipl, ipl_xql, osil, safemil, ilid, "
             "pnu, pubc, dualcoil [default nll there unless passed]): "
             "'sample_l2' (L2 on a sampled "
