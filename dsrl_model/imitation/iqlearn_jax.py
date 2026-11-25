@@ -36,21 +36,27 @@ from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_ar
 
 EPS = 1e-6
 
+# Defaults follow the authors' IQ-Learn (Div99/IQ-Learn) SAC agent for continuous
+# control (conf/config.yaml, conf/agent/sac.yaml, conf/method/iq.yaml, run_mujoco.sh:
+# method.loss=value, method.regularize=True, agent.actor_lr=3e-5).
 default_cfg = {
     "log_freq": int(1e4),
     "save_freq": int(2e4),
     "eval_episode_freq": 1,  # use saved bc_policy to run evaluatation
     "hidden_size": 256,
-    "max_grad_norm": 1.0,
     "bag_size": 1,
     "gamma": 0.99,
     "action_repeat": 1,  # set to 2, min value is 1
-    "update_critic_freq": 2,
+    "update_critic_freq": 1,  # authors update the critic every step
     "update_tau": 0.005,
-    "train_horizon": 5,  # min horizon 2 is required
-    "weight_decay": 0.01,
+    "train_horizon": 2,  # one (s, a, s') transition per sample, as in the authors' buffer
+    "batch_size": 256,  # per buffer (expert and union), env.train.batch
+    "critic_lr": 3e-4,  # agent.critic_lr (Adam)
+    "actor_lr": 3e-5,  # agent.actor_lr in run_mujoco.sh (Adam)
+    "alpha": 1e-2,  # agent.init_temp (learn_temp: false)
+    "lmbda": 0.5,  # method.alpha (chi^2 regulariser)
     "grad_reg_coeffs": 10.0,
-    "total_iteration": int(1e6),
+    "total_iteration": int(1e6),  # env.learn_steps
 }
 
 trajectory_cfg = {
@@ -368,12 +374,20 @@ def main(args, cfg_env=None):
     trajectory_cfg["inpaint_ranges"] = trajectory_data[args.data_inpaint]
 
     config = {**default_cfg, **trajectory_cfg}
+
+    # authors' defaults unless the flag is explicitly passed
+    def flag_passed(flag):
+        return any(a == flag or a.startswith(flag + "=") for a in sys.argv[1:])
+
     config["train_horizon"] = args.train_horizon or config.get("train_horizon")
-    config["alpha"] = args.bc_weight_temp
-    config["lmbda"] = args.lmbda
+    if flag_passed("--bc-weight-temp"):
+        config["alpha"] = args.bc_weight_temp
+    if args.lmbda is not None:
+        config["lmbda"] = args.lmbda
+    if flag_passed("--lr"):
+        config["critic_lr"] = config["actor_lr"] = args.lr
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
-    config["lr"] = args.lr
     config["pi_actor"] = args.pi_actor
     # IQ-Learn's policy objective is SAC-style (max Q - alpha * log pi) and has no
     # dataset-action BC term, so --pi-loss does not apply here.
@@ -384,7 +398,7 @@ def main(args, cfg_env=None):
     actor_cls = get_actor_cls(config["pi_actor"])
 
     # set training steps
-    batch_size = args.batch_size or config.get("batch_size")
+    batch_size = args.batch_size if flag_passed("--batch-size") else config["batch_size"]
     config["batch_size"] = batch_size
 
     config_data = make_static_config_from_dict(name="State", d=config)()
@@ -403,13 +417,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
     )
     policy_optimizer = nnx.Optimizer(
-        model=policy_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=policy_model, tx=optax.adam(learning_rate=config["actor_lr"])
     )
 
     critic_model = EnsembleValue(
@@ -418,13 +426,7 @@ def main(args, cfg_env=None):
         hidden_size=config["hidden_size"],
     )
     critic_optimizer = nnx.Optimizer(
-        model=critic_model,
-        tx=optax.chain(
-            optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adamw(
-                learning_rate=config["lr"], weight_decay=config["weight_decay"]
-            ),
-        ),
+        model=critic_model, tx=optax.adam(learning_rate=config["critic_lr"])
     )
     critic_model_target = deepcopy(critic_model)
 
@@ -490,7 +492,9 @@ def main(args, cfg_env=None):
     eval_cost_deque = deque(maxlen=config["eval_episode_freq"])
     eval_len_deque = deque(maxlen=config["eval_episode_freq"])
     dict_args = config
-    dict_args.update((k, v) for k, v in vars(args).items() if v is not None)
+    dict_args.update(
+        (k, v) for k, v in vars(args).items() if v is not None and k not in config
+    )
 
     logger = EpochLogger(log_dir=args.log_dir, seed=str(args.seed))
     logger.save_config(dict_args)
