@@ -115,7 +115,6 @@ class Logger:
         self,
         log_dir,
         seed=None,
-        output_fname="progress.csv",
         debug: bool = False,
         level: int = 1,
         use_tensorboard=True,
@@ -127,6 +126,7 @@ class Logger:
         self.verbose = verbose
 
         os.makedirs(self.log_dir, exist_ok=True)
+        output_fname=f"progress_{seed}.csv"
         self.output_file = open(  # noqa: SIM115 # pylint: disable=consider-using-with
             os.path.join(self.log_dir, output_fname),
             encoding="utf-8",
@@ -339,7 +339,6 @@ class EpochLogger(Logger):
         self,
         log_dir,
         seed=None,
-        output_fname="progress.csv",
         debug: bool = False,
         level: int = 1,
         use_tensorboard=True,
@@ -348,7 +347,6 @@ class EpochLogger(Logger):
         super().__init__(
             log_dir=log_dir,
             seed=seed,
-            output_fname=output_fname,
             debug=debug,
             level=level,
             use_tensorboard=use_tensorboard,

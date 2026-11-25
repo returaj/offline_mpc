@@ -331,12 +331,13 @@ class EpochLogger(Logger):
         self,
         log_dir,
         seed=None,
-        output_fname="progress.csv",
         debug: bool = False,
         level: int = 1,
         use_tensorboard=True,
         verbose=True,
     ):
+        
+        output_fname=f"progress_{seed}.csv"
         super().__init__(
             log_dir=log_dir,
             seed=seed,
