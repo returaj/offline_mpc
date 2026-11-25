@@ -29,14 +29,13 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     EnsembleValue,
-    GaussianActor,
-    SafeDiceTanhMixtureActor,
     TransformerEmbedding,
     TransformerEmbeddingCostant,
     TransformerEmbeddingNoProjection,
     get_tree_norm,
     softer_max,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -592,15 +591,11 @@ def policy_grad_aux_fun(
         pi_baseline = config.pi_alpha
 
     def fwd_loss(policy_model, target_obs, target_act, logw, scale, is_pos):
-        pred_act, log_pi, *_ = policy_model(target_obs)
-        # BH
-        if config.pi_loss == "nll":
-            # weighted maximum likelihood of the dataset action (the AWR/AWAC/IQL
-            # policy extraction step); use with --pi-actor gaussian
-            step_loss = -policy_model.get_log_prob(target_obs, target_act)
-        else:
-            # original: L2 between a sampled policy action and the dataset action
-            step_loss = optax.l2_loss(pred_act, target_act).sum(axis=-1)
+        # BH; 'nll': weighted ML of the dataset action (AWR/AWAC/IQL policy
+        # extraction), 'sample_l2': L2 between a sampled and the dataset action
+        step_loss, _, log_pi = policy_bc_loss(
+            policy_model, target_obs, target_act, config.pi_loss
+        )
         step_loss = step_loss.reshape(batch, horizon)  # B X H
         traj_loss = discounted_sum(step_loss.T, config.gamma)  # B
 
@@ -883,20 +878,11 @@ def main(args, cfg_env=None):
     config["embd_lr_schedule"] = args.embd_lr_schedule
     config["embd_input_ln"] = args.embd_input_ln
     config["embd_attention"] = args.embd_attention
-    assert config["pi_actor"] in ("tanh_mixture", "gaussian"), config["pi_actor"]
-    assert config["pi_loss"] in ("sample_l2", "nll"), config["pi_loss"]
+    check_policy_config(config["pi_actor"], config["pi_loss"])
     assert config["pi_lr_schedule"] in ("constant", "cosine"), config["pi_lr_schedule"]
     assert config["embd_lr_schedule"] in ("constant", "warmup"), config[
         "embd_lr_schedule"
     ]
-    if config["pi_loss"] == "nll" and config["pi_actor"] == "tanh_mixture":
-        print(
-            "WARNING: --pi-loss nll with the tanh-squashed actor gives very large "
-            "losses for dataset actions at +/-1 (atanh blow-up); "
-            "consider --pi-actor gaussian.",
-            file=sys.stderr,
-        )
-
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
     config["batch_size"] = batch_size
@@ -945,9 +931,7 @@ def main(args, cfg_env=None):
             optax.adamw(learning_rate=learning_rate, weight_decay=config["weight_decay"]),
         )
 
-    actor_cls = (
-        GaussianActor if config["pi_actor"] == "gaussian" else SafeDiceTanhMixtureActor
-    )
+    actor_cls = get_actor_cls(config["pi_actor"])
     policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],

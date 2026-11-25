@@ -26,9 +26,9 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     ExpCostModel,
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import single_agent_args
 
@@ -155,7 +155,7 @@ def train_cost_model(
     return loss, *aux_values
 
 
-@nnx.jit
+@functools.partial(nnx.jit, static_argnames=("pi_loss",))
 def train_policy_model(
     cost_model,
     bc_policy,
@@ -165,6 +165,7 @@ def train_policy_model(
     target_union_obs,
     target_union_act,
     has_positive,
+    pi_loss="sample_l2",
 ):
     batch, horizon, _ = target_union_obs.shape
 
@@ -180,12 +181,14 @@ def train_policy_model(
     )
 
     def loss_fun(bc_policy):
-        pred_pos_act, *_ = bc_policy(target_pos_obs)
-        flat_pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        flat_pos_loss, *_ = policy_bc_loss(
+            bc_policy, target_pos_obs, target_pos_act, pi_loss
+        )
         pos_loss = has_positive * jnp.mean(flat_pos_loss)
 
-        pred_union_act, *_ = bc_policy(target_union_obs)
-        flat_union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        flat_union_loss, *_ = policy_bc_loss(
+            bc_policy, target_union_obs, target_union_act, pi_loss
+        )
         union_loss = jnp.mean(union_weight * flat_union_loss)
 
         loss = pos_loss + union_loss
@@ -242,7 +245,11 @@ def main(args, cfg_env=None):
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
     config["lr"] = args.lr
-    bc_policy = SafeDiceTanhMixtureActor(
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
+    bc_policy = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
@@ -410,6 +417,7 @@ def main(args, cfg_env=None):
                 target_union_obs=target_union_obs,
                 target_union_act=target_union_act,
                 has_positive=has_positive,
+                pi_loss=config["pi_loss"],
             )
 
             mean_pos_reward = has_positive * target_pos_reward.sum(-1).mean()

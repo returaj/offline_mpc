@@ -26,9 +26,9 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     EnsembleValue,
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -122,6 +122,7 @@ def policy_loss_grads_fun(
     data,
     has_positive,
     beta,
+    pi_loss="sample_l2",
 ):
     # Batch X Horizon X obs_dim
     batch, horizon, _ = data.union_obs.shape
@@ -134,11 +135,15 @@ def policy_loss_grads_fun(
     target_union_act = data.union_act.reshape(batch * horizon, -1)
 
     def loss_fun(policy_model):
-        pred_pos_act, *_ = policy_model(target_pos_obs)
-        pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        pos_loss, *_ = policy_bc_loss(
+            policy_model, target_pos_obs, target_pos_act, pi_loss
+        )
         pos_bc_loss = has_positive * jnp.mean(pos_loss)
 
-        pred_union_act, *_ = policy_model(target_union_obs)
+        # union_loss: Batch_Horizon; pred_union_act: sampled policy action
+        union_loss, pred_union_act, _ = policy_bc_loss(
+            policy_model, target_union_obs, target_union_act, pi_loss
+        )
         # Batch_Horizon
         q_union = jnp.minimum(
             *critic_model(jnp.concat([target_union_obs, target_union_act], axis=-1))
@@ -149,7 +154,6 @@ def policy_loss_grads_fun(
         weight_union = jnp.clip((q_union - v_union) / beta, max=5.0)
         weight_union = jax.lax.stop_gradient(jnp.exp(weight_union))
 
-        union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
         union_bc_loss = jnp.mean(weight_union * union_loss)
 
         loss = pos_bc_loss + union_bc_loss
@@ -295,6 +299,7 @@ def train_step(
         data=batch_data,
         has_positive=has_positive,
         beta=config.beta,
+        pi_loss=config.pi_loss,
     )
     policy_optimizer.update(policy_grads)
 
@@ -433,6 +438,10 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
@@ -447,7 +456,7 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

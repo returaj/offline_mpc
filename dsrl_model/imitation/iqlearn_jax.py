@@ -26,9 +26,9 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     EnsembleValue,
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -374,6 +374,14 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["pi_actor"] = args.pi_actor
+    # IQ-Learn's policy objective is SAC-style (max Q - alpha * log pi) and has no
+    # dataset-action BC term, so --pi-loss does not apply here.
+    config["pi_loss"] = "sample_l2"
+    if args.pi_loss != "sample_l2":
+        print(f"WARNING: --pi-loss {args.pi_loss} is ignored by iqlearn.", file=sys.stderr)
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
@@ -388,7 +396,7 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

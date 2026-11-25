@@ -26,10 +26,10 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     ExpCostModel,
-    SafeDiceTanhMixtureActor,
     Scalar,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -138,6 +138,7 @@ def policy_loss_grads_fun(
     policy_model,
     data,
     alpha,
+    pi_loss="sample_l2",
 ):
     # Batch X Horizon X obs_dim
     batch, horizon, _ = data.pos_obs.shape
@@ -155,12 +156,15 @@ def policy_loss_grads_fun(
         # logp_union = union_weight * policy_model.get_log_prob(union_obs, union_act)
         # loss = -alpha * jnp.mean(logp_pos) - jnp.mean(logp_union)
 
-        pred_pos_act, logp_pos, *_ = policy_model(pos_obs)
-        loss_pos = optax.l2_loss(pred_pos_act, pos_act).sum(-1).mean()
-        pred_union_act, logp_union, *_ = policy_model(union_obs)
-        loss_union = (
-            union_weight * optax.l2_loss(pred_union_act, union_act).sum(-1)
-        ).mean()
+        # logp_*: log-prob of the sampled policy action (logged entropy estimate)
+        flat_loss_pos, _, logp_pos = policy_bc_loss(
+            policy_model, pos_obs, pos_act, pi_loss
+        )
+        loss_pos = flat_loss_pos.mean()
+        flat_loss_union, _, logp_union = policy_bc_loss(
+            policy_model, union_obs, union_act, pi_loss
+        )
+        loss_union = (union_weight * flat_loss_union).mean()
         loss = alpha * loss_pos + loss_union
 
         return loss, (union_weight.mean(), -logp_pos.mean(), -logp_union.mean())
@@ -219,6 +223,7 @@ def train_steps_policy(
         policy_model=policy_model,
         data=batch_data,
         alpha=alpha,
+        pi_loss=config.pi_loss,
     )
     policy_optimizer.update(policy_grads)
 
@@ -365,6 +370,10 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
     config["warmup_iteration_policy"] = args.warmup_bc
     do_alpha_warmup = config["warmup_iteration_policy"] > 0
 
@@ -381,7 +390,7 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
@@ -397,7 +406,7 @@ def main(args, cfg_env=None):
         ),
     )
 
-    expert_policy_model = SafeDiceTanhMixtureActor(
+    expert_policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

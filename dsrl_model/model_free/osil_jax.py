@@ -27,9 +27,9 @@ from dsrl_model.utils.dsrl_dataset import (
 from dsrl_model.utils.models_jax import (
     ContrastiveCostModel,
     EnsembleValue,
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -371,12 +371,15 @@ def policy_loss_grad_fun(
     )
 
     def loss_fun(bc_policy):
-        pred_pos_act, *_ = bc_policy(target_pos_obs)
-        pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        pos_loss, *_ = policy_bc_loss(
+            bc_policy, target_pos_obs, target_pos_act, config.pi_loss
+        )
         pos_bc_loss = has_positive * jnp.mean(pos_loss)
 
-        pred_union_act, *_ = bc_policy(target_union_obs)
-        union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        # pred_union_act (sampled, reparameterised) is also used by the value term
+        union_loss, pred_union_act, _ = policy_bc_loss(
+            bc_policy, target_union_obs, target_union_act, config.pi_loss
+        )
         union_bc_loss = jnp.mean(union_loss)
 
         union_value = jnp.maximum(
@@ -596,6 +599,10 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
@@ -610,7 +617,7 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    bc_policy = SafeDiceTanhMixtureActor(
+    bc_policy = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],

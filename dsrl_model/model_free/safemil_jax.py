@@ -26,9 +26,9 @@ from dsrl_model.utils.dsrl_dataset import (
 )
 from dsrl_model.utils.models_jax import (
     ExpCostModel,
-    SafeDiceTanhMixtureActor,
     get_tree_norm,
 )
+from dsrl_model.utils.pi_utils_jax import check_policy_config, get_actor_cls, policy_bc_loss
 from dsrl_model.utils.native_logger import EpochLogger
 from dsrl_model.utils.utils import make_static_config_from_dict, single_agent_args
 
@@ -137,14 +137,16 @@ def policy_loss_grads_fun(
     union_weight = exp_union_weight / exp_union_weight.mean()
 
     def loss_fun(policy_model):
-        pred_pos_act, *_ = policy_model(target_pos_obs)
-        flat_pos_loss = optax.l2_loss(pred_pos_act, target_pos_act).sum(axis=-1)
+        flat_pos_loss, *_ = policy_bc_loss(
+            policy_model, target_pos_obs, target_pos_act, config.pi_loss
+        )
         horizon_pos_loss = has_positive * flat_pos_loss.reshape((batch_bag, horizon))
         batch_bag_pos_loss = discounted_sum(horizon_pos_loss.T, gamma)
         pos_loss = jnp.mean(batch_bag_pos_loss)
 
-        pred_union_act, *_ = policy_model(target_union_obs)
-        flat_union_loss = optax.l2_loss(pred_union_act, target_union_act).sum(axis=-1)
+        flat_union_loss, *_ = policy_bc_loss(
+            policy_model, target_union_obs, target_union_act, config.pi_loss
+        )
         horizon_union_loss = flat_union_loss.reshape((batch_bag, horizon))
         batch_bag_union_loss = discounted_sum(horizon_union_loss.T, gamma)
         union_loss = jnp.mean(union_weight * batch_bag_union_loss)
@@ -355,6 +357,10 @@ def main(args, cfg_env=None):
     config["policy_type"] = args.policy_type
     config["normalize_observation"] = args.normalize_observation
     config["lr"] = args.lr
+    config["pi_actor"] = args.pi_actor
+    config["pi_loss"] = args.pi_loss
+    check_policy_config(config["pi_actor"], config["pi_loss"])
+    actor_cls = get_actor_cls(config["pi_actor"])
 
     # set training steps
     batch_size = args.batch_size or config.get("batch_size")
@@ -369,7 +375,7 @@ def main(args, cfg_env=None):
 
     # set model
     obs_space, act_space = eval_env.observation_space, eval_env.action_space
-    policy_model = SafeDiceTanhMixtureActor(
+    policy_model = actor_cls(
         rngs=rngs,
         obs_dim=obs_space.shape[0],
         act_dim=act_space.shape[0],
